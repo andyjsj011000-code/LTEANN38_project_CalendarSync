@@ -9,6 +9,23 @@ import Channel_Export as channels
 
 
 class ChannelRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_old_thread_with_new_reply_does_not_hide_new_root(self):
+        first = httpx.Response(200, json={
+            "value": [{"id": "old-root", "createdDateTime": "2026-10-01T01:00:00Z",
+                       "lastModifiedDateTime": "2026-10-13T02:00:00Z"}],
+            "@odata.nextLink": "https://graph.example/next",
+        }, request=httpx.Request("GET", "https://graph.example/messages"))
+        second = httpx.Response(200, json={
+            "value": [{"id": "new-root", "createdDateTime": "2026-10-12T01:00:00Z",
+                       "lastModifiedDateTime": "2026-10-12T01:00:00Z"}],
+        }, request=httpx.Request("GET", "https://graph.example/next"))
+        with patch.object(channels, "safe_http_request", new=AsyncMock(side_effect=[first, second])):
+            result = await channels.channel_export(
+                "team", "channel", datetime(2026, 10, 11, tzinfo=timezone.utc),
+                object(), "token",
+            )
+        self.assertEqual([item["id"] for item in result], ["new-root"])
+
     async def test_failed_later_page_propagates_after_first_page(self):
         first = httpx.Response(200, json={
             "value": [{"createdDateTime": "2026-10-13T01:00:00Z", "id": "first"}],
