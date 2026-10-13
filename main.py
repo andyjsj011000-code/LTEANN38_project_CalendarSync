@@ -220,8 +220,7 @@ async def get_user_channels_from_graph(user_id: str, access_token: str, http_cli
     try:
         teams_res = await safe_http_request(http_client, "GET", teams_url, headers=headers)
         if teams_res.status_code != 200:
-            logger.error(f"[Graph API Error] 팀 목록 조회 실패 (Status: {teams_res.status_code})")
-            return []
+            raise RuntimeError(f"Teams lookup failed: HTTP {teams_res.status_code}")
 
         teams = teams_res.json().get("value", [])
 
@@ -244,10 +243,11 @@ async def get_user_channels_from_graph(user_id: str, access_token: str, http_cli
                         "channel_name": ch.get("displayName")
                     })
             else:
-                logger.warning(f"[Graph API Warning] 팀 채널 조회 실패 ({ch_res.status_code})")
+                raise RuntimeError(f"Channel lookup failed: HTTP {ch_res.status_code}")
 
     except Exception as e:
         logger.error(f"[Graph API Exception] 팀/채널 탐지 중 에러 발생: {e}",exc_info=True)
+        raise
 
     return discovered_channels
     
@@ -462,7 +462,8 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
     
     tracemalloc.start()
     
-    if not http_client:
+    owns_http_client = http_client is None
+    if owns_http_client:
         http_client = httpx.AsyncClient(limits=limits, timeout=timeout)
         
     try:
@@ -485,6 +486,8 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
             target_email = pdata.get("mail") or pdata.get("userPrincipalName")
             target_user_name = pdata.get("displayName")
             pdata=None
+        if not target_email:
+            raise RuntimeError(f"Calendar owner lookup failed: HTTP {profile_res.status_code}")
 
         calculated_grade = calculate_grade_from_email(target_email, now_utc.year)
         user_grade = getattr(user, "grade", None) or calculated_grade or DEFAULT_USER_GRADE
@@ -499,7 +502,7 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
             models.UserSyncState.user_id == anon_user_id
         ).first()
 
-        log_time = sync_state.last_synced_at
+        log_time = sync_state.last_synced_at if sync_state else None
 
         # Timezone 보정 및 last_sync_time 최종 결정
         if log_time:
@@ -532,9 +535,10 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
                         extracted_url = metadata.get("webUrl") or msg.get("webUrl")
                         result.web_url = extracted_url
                         return result
+                    raise RuntimeError("Schedule extraction returned no result")
             except Exception as e:
                 logger.error(f"메시지 분석 최종 실패 (ID: {msg.get('id')}): {e}",exc_info=True)
-                return None
+                raise
 
         # 3. 채널 1개를 처리하는 비동기 함수 (개수 Return 구조)
         async def process_channel(ch) -> int:
@@ -573,7 +577,10 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
             logger.info(f"[디버그] LLM 응답 수신완료: 총 {len(extracted_data_list)}개 객체")
             '''
             for idx, extracted_data in enumerate(extracted_data_list):
-                if not extracted_data or isinstance(extracted_data, Exception):
+                if isinstance(extracted_data, BaseException):
+                    calendar_batch.had_failures = True
+                    continue
+                if not extracted_data:
                     '''
                     logger.info(f"[{idx+1}번 메시지 스킵] LLM 응답 없음 또는 예외 발생: {extracted_data}")
                     '''
@@ -633,6 +640,10 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
 
         # 예외 객체를 제외하고 숫자만 합산
         written_count = sum(r for r in results if isinstance(r, int))
+        for result in results:
+            if isinstance(result, BaseException):
+                calendar_batch.had_failures = True
+                logger.error("[Sync 채널 실패] User(%s): %s", anon_user_id, result)
 
         # 등록/중복 조회 실패가 있으면 이전 기준 시각을 유지해 다음 주기에 재시도합니다.
         if calendar_batch.had_failures:
@@ -655,7 +666,8 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
         db.add(log_entry)
         db.commit()
         db.refresh(log_entry)
-        db.refresh(sync_state)
+        if sync_state is not None:
+            db.refresh(sync_state)
         logger.info(f"[Sync 완료] User({anon_user_id}): 총 {written_count}건 등록 | Log DB ID: {log_entry.id}")
         
         snapshot = tracemalloc.take_snapshot()
@@ -679,8 +691,8 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
         results = None
         profile_res = None
         db.close()
-        await http_client.aclose()
-        engine.dispose()
+        if owns_http_client:
+            await http_client.aclose()
         gc.collect()
 
 def sync_single_user(user_id: str, now_utc: datetime, access_token: str):
@@ -752,7 +764,7 @@ async def teams_event_webhook(
                 db.add(sync_state)
             else:
                 # 재설치인 경우 기준 시각 업데이트
-                latest_sync_time = max(initial_sync_time, sync_state.last_sync_time)
+                sync_state.last_synced_at = max(initial_sync_time, sync_state.last_synced_at)
             
             #로그
             install_log = models.CalendarEventLog(
