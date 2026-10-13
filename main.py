@@ -29,6 +29,7 @@ from calender_service import CalendarRegistrationBatch
 from Channel_Export import channel_export, get_graph_access_token
 from reset import resetdb
 from cachetools import TTLCache
+from message_analysis_cache import cached_extraction, message_cache_key, named_for_user
 from temp_http_client import safe_http_request
 from send_anouncement import run_daily_schedule_job
 import psutil
@@ -158,6 +159,10 @@ def calculate_grade_from_email(email: Optional[str], current_year: int) -> Optio
 
 # OpenAI Structured Output용 구조체
 class ScheduleItem(BaseModel):
+    target_people: List[str] = Field(
+        default_factory=list,
+        description="이 일정의 대상자로 원문에 명시된 개인 이름. 일반 공지이면 빈 목록"
+    )
     event_kind: Literal[
         "exam", "meeting", "submission_deadline", "application_deadline",
         "application_period", "event", "holiday", "unknown"
@@ -291,7 +296,6 @@ async def send_teams_reply(service_url: str, conversation_id: str, text: str):
 async def analyze_message_with_gpt(
     message_payload: dict, 
     graph_access_token: str = None, 
-    target_user_name: str = None,
     http_client: httpx.AsyncClient = None
 ) -> ExtractedSchedule:
     body_info = message_payload.get("body", {})
@@ -357,8 +361,6 @@ async def analyze_message_with_gpt(
     web_url = message_payload.get("webUrl", "")
     message_id = message_payload.get("id", "")
 
-    user_context = f"- 현재 캘린더 주인 이름: {target_user_name}\n" if target_user_name else ""
-
     system_prompt = '''너는 메신저 메시지와 이미지를 분석하여 사용자가 챙겨야 할 일정을 정확히 파악하고 extraction 객체 형태로 반환하는 AI 도우미야.
 
 [0. 일정 추출 대상 (has_schedule = True)]
@@ -410,14 +412,13 @@ async def analyze_message_with_gpt(
 - event_kind는 실제 행동/행사의 종류다. 신청 마감과 행사 개최는 각각 추출한다.
 - identity_context에는 과목, 학기, 행사명, 회차 등 구별 정보를 원문에서 보존한다.
 - audience에는 구체적인 학년/반/분반을 보존하고, 없는 대상 정보는 만들지 않는다.
+- target_people에는 일정의 대상자로 명시된 개인의 이름만 원문 그대로 넣는다. 발표자나 작성자는 대상자로 취급하지 않는다. 일반 공지이면 빈 목록이다.
 - time_precision은 원문에 시각 또는 교시가 있으면 time, 날짜만 있으면 date이다.
 - 제목이 짧아도 summary에는 원문에 있는 회차/대상/변경 안내를 누락하지 않는다.
 - start_time/end_time은 한국 현지 시간 ISO 8601 문자열로, UTC를 뜻하는 Z 없이 반환한다.
 """
 
-    user_text_prompt = f"""[유저 정보]
-{user_context}
-[메시지 메타데이터]
+    user_text_prompt = f"""[메시지 메타데이터]
 - 작성자: {sender_name}
 - 작성 일시: {created_at}
 - 메시지 ID: {message_id}
@@ -520,22 +521,23 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
         # 모든 채널이 사용자 한 명의 등록 큐와 성공 목록을 공유합니다.
         calendar_batch = CalendarRegistrationBatch(target_email, http_client, access_token)
             
-        async def analyze_single_message(msg):
+        async def analyze_single_message(msg, team_id, channel_id):
             try:
                 log_memory("gpt에 돌리기")
-                async with gpt_semaphore:
-                    result = await analyze_message_with_gpt(
-                        message_payload=msg,
-                        graph_access_token=access_token,
-                        target_user_name=target_user_name,
-                        http_client=http_client
-                    ) 
-                    if result:
-                        metadata = msg.get("metadata", {})
-                        extracted_url = metadata.get("webUrl") or msg.get("webUrl")
-                        result.web_url = extracted_url
-                        return result
-                    raise RuntimeError("Schedule extraction returned no result")
+                async def produce():
+                    async with gpt_semaphore:
+                        return await analyze_message_with_gpt(
+                            message_payload=msg,
+                            graph_access_token=access_token,
+                            http_client=http_client,
+                        )
+
+                result = await cached_extraction(
+                    message_cache_key(team_id, channel_id, msg), produce
+                )
+                metadata = msg.get("metadata", {})
+                result.web_url = metadata.get("webUrl") or msg.get("webUrl")
+                return result
             except Exception as e:
                 logger.error(f"메시지 분석 최종 실패 (ID: {msg.get('id')}): {e}",exc_info=True)
                 raise
@@ -565,7 +567,10 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
             '''
             logger.info(f"User({anon_user_id}) 채널 신규 메시지 {len(new_messages)}개 발견! 분석 시작...")
             '''
-            msg_tasks = [analyze_single_message(msg) for msg in new_messages]
+            msg_tasks = [
+                analyze_single_message(msg, ch["team_id"], ch["channel_id"])
+                for msg in new_messages
+            ]
             
             # return_exceptions=True 적용하여 1개 실패해도 전체가 멈추지 않도록 설정
             extracted_data_list = await asyncio.gather(*msg_tasks, return_exceptions=True)
@@ -611,6 +616,13 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
                         '''
                         logger.info(f"[{idx+1}번 메시지 탈락] 학년 불일치: 타겟({schedule_item.target_grades}) vs 유저({user_grade})")
                         '''
+                        continue
+
+                    if schedule_item.target_people and not target_user_name:
+                        calendar_batch.had_failures = True
+                        logger.warning("[Sync 대상 확인 실패] User(%s): 프로필 이름이 없습니다.", anon_user_id)
+                        continue
+                    if not named_for_user(schedule_item.target_people, target_user_name):
                         continue
 
                     schedule_dict = schedule_item.model_dump()
