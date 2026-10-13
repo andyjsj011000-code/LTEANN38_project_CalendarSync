@@ -30,6 +30,7 @@ from Channel_Export import channel_export, get_graph_access_token
 from reset import resetdb
 from cachetools import TTLCache
 from message_analysis_cache import cached_extraction, message_cache_key, named_for_user
+from shared_channel_reads import SharedChannelReads, messages_since
 from temp_http_client import safe_http_request
 from send_anouncement import run_daily_schedule_job
 import psutil
@@ -452,11 +453,14 @@ async def analyze_message_with_gpt(
     return completion.choices[0].message.parsed
 
 # 유저 동기화 & 학년 동적 필터링 적용
-async def async_single_user(user_id: str, now_utc: datetime, access_token: str =None, http_client: httpx.AsyncClient = None):
+async def async_single_user(
+    user_id: str, now_utc: datetime, access_token: str = None,
+    http_client: httpx.AsyncClient = None, user_channels: list | None = None,
+    shared_channel_reads: SharedChannelReads | None = None,
+):
     db = SessionLocal()
     anon_user_id = get_anonymous_id(user_id)
     
-    user_channels = None
     channel_tasks = None
     results = None
     profile_res = None
@@ -514,7 +518,8 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
             last_sync_time = now_utc - timedelta(days=INITIAL_SYNC_LOOKBACK_DAYS)
 
         
-        user_channels = await get_user_channels_from_graph(user.user_id, access_token, http_client)
+        if user_channels is None:
+            user_channels = await get_user_channels_from_graph(user.user_id, access_token, http_client)
         if not user_channels:
             return 0
 
@@ -547,18 +552,23 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
             channel_written = 0
             
             # 동기 함수를 안전하게 비동기 스레드로 실행하여 이벤트 루프 차단 방지
-            async with graph_semaphore:
-                raw_messages = await channel_export(ch["team_id"], ch["channel_id"], last_sync_time, http_client, access_token)
+            raw_messages = None
+            if shared_channel_reads is not None:
+                raw_messages = await shared_channel_reads.get(
+                    user_id, ch["team_id"], ch["channel_id"], last_sync_time
+                )
+            if raw_messages is None:
+                # Webhook syncs and checkpoints older than the polling snapshot
+                # continue to read using this user's own checkpoint.
+                async with graph_semaphore:
+                    raw_messages = await channel_export(
+                        ch["team_id"], ch["channel_id"], last_sync_time,
+                        http_client, access_token,
+                    )
             if not raw_messages:
                 return 0
 
-            new_messages = []
-            for msg in raw_messages:
-                created_str = msg.get("createdDateTime")
-                if created_str:
-                    msg_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                    if msg_time > last_sync_time:
-                        new_messages.append(msg)
+            new_messages = messages_since(raw_messages, last_sync_time)
 
             raw_messages = None
             
@@ -860,9 +870,73 @@ async def auto_polling_sync_job():
 
         polling_http_client = httpx.AsyncClient(limits=limits, timeout=timeout)
         access_token = await get_graph_access_token()
-        
-        tasks = [async_single_user(user.user_id, now_utc, access_token=access_token, http_client=polling_http_client) for user in target_users]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if not access_token:
+            raise RuntimeError("Graph access token unavailable for polling")
+
+        # Discover memberships once per user, then plan one read for each
+        # channel/checkpoint cohort. Failed discovery never advances a user.
+        discovery_limit = asyncio.Semaphore(3)
+
+        async def discover(user):
+            async with discovery_limit:
+                return await get_user_channels_from_graph(
+                    user.user_id, access_token, polling_http_client
+                )
+
+        discovered = await asyncio.gather(
+            *(discover(user) for user in target_users), return_exceptions=True
+        )
+        channels_by_user = {}
+        for user, channels in zip(target_users, discovered):
+            if isinstance(channels, BaseException):
+                logger.error(
+                    "[Polling channel discovery failed] User(%s): %s",
+                    get_anonymous_id(user.user_id), channels,
+                )
+                continue
+            channels_by_user[user.user_id] = channels
+
+        anonymous_ids = [get_anonymous_id(user_id) for user_id in channels_by_user]
+        state_rows = (
+            db.query(models.UserSyncState)
+            .filter(models.UserSyncState.user_id.in_(anonymous_ids))
+            .all()
+            if anonymous_ids else []
+        )
+        saved_times = {state.user_id: state.last_synced_at for state in state_rows}
+        checkpoints = {}
+        for user_id in channels_by_user:
+            checkpoint = saved_times.get(get_anonymous_id(user_id))
+            if checkpoint is None:
+                checkpoint = now_utc - timedelta(days=INITIAL_SYNC_LOOKBACK_DAYS)
+            elif checkpoint.tzinfo is None:
+                checkpoint = checkpoint.replace(tzinfo=timezone.utc)
+            checkpoints[user_id] = checkpoint
+
+        async def fetch_channel(team_id, channel_id, checkpoint):
+            async with graph_semaphore:
+                return await channel_export(
+                    team_id, channel_id, checkpoint,
+                    polling_http_client, access_token,
+                )
+
+        shared_reads = SharedChannelReads(
+            channels_by_user, checkpoints, fetch_channel
+        )
+        logger.info("[Polling] Shared channel read groups: %d", shared_reads.read_count)
+        tasks = [
+            async_single_user(
+                user.user_id, now_utc, access_token=access_token,
+                http_client=polling_http_client,
+                user_channels=channels_by_user[user.user_id],
+                shared_channel_reads=shared_reads,
+            )
+            for user in target_users if user.user_id in channels_by_user
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("[Polling user task failed]: %s", result)
 
     finally:
         log_memory("폴링완료")
