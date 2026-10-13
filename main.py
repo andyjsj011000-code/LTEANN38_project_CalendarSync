@@ -5,7 +5,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List, Optional, Literal
 import asyncio
 from bot_token import get_bot_token
 
@@ -25,7 +25,7 @@ import tracemalloc
 import database
 import models
 from database import engine, SessionLocal, get_db
-from calender_service import add_notice_to_calendar
+from calender_service import CalendarRegistrationBatch
 from Channel_Export import channel_export, get_graph_access_token
 from reset import resetdb
 from cachetools import TTLCache
@@ -158,6 +158,19 @@ def calculate_grade_from_email(email: Optional[str], current_year: int) -> Optio
 
 # OpenAI Structured Output용 구조체
 class ScheduleItem(BaseModel):
+    event_kind: Literal[
+        "exam", "meeting", "submission_deadline", "application_deadline",
+        "application_period", "event", "holiday", "unknown"
+    ] = Field(default="unknown", description="개별 일정의 종류. 신청 마감과 행사 개최는 구분")
+    time_precision: Literal["date", "time", "unknown"] = Field(
+        default="unknown", description="원문에 시각/교시가 있으면 time, 날짜만 있으면 date"
+    )
+    identity_context: Optional[str] = Field(
+        default=None, description="일정을 구별하는 과목, 학기, 행사명, 회차 등 원문에 있는 정보"
+    )
+    audience: Optional[str] = Field(
+        default=None, description="원문에 명시된 학년, 반, 분반, 동아리 등 대상"
+    )
     title: str = Field(description="일정 제목")
     start_time: str = Field(description="시작 시간 (ISO 8601 포맷)")
     end_time: str = Field(description="종료 시간 (ISO 8601 포맷)")
@@ -389,6 +402,19 @@ async def analyze_message_with_gpt(
 - 점심시간(12:20~13:10), 5교시(13:10~14:00), 6교시(14:10~15:00), 7교시(15:10~16:00)
 '''
 
+    system_prompt += """
+
+[일정 동일성 비교용 정보]
+- 공지 전체가 아니라 각각의 행사/시험/제출 의무를 독립된 일정으로 추출한다.
+- 월간 달력/학기 일정표의 짧은 항목과 상세 공지의 항목도 같은 구조로 추출한다.
+- event_kind는 실제 행동/행사의 종류다. 신청 마감과 행사 개최는 각각 추출한다.
+- identity_context에는 과목, 학기, 행사명, 회차 등 구별 정보를 원문에서 보존한다.
+- audience에는 구체적인 학년/반/분반을 보존하고, 없는 대상 정보는 만들지 않는다.
+- time_precision은 원문에 시각 또는 교시가 있으면 time, 날짜만 있으면 date이다.
+- 제목이 짧아도 summary에는 원문에 있는 회차/대상/변경 안내를 누락하지 않는다.
+- start_time/end_time은 한국 현지 시간 ISO 8601 문자열로, UTC를 뜻하는 Z 없이 반환한다.
+"""
+
     user_text_prompt = f"""[유저 정보]
 {user_context}
 [메시지 메타데이터]
@@ -487,6 +513,9 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
         user_channels = await get_user_channels_from_graph(user.user_id, access_token, http_client)
         if not user_channels:
             return 0
+
+        # 모든 채널이 사용자 한 명의 등록 큐와 성공 목록을 공유합니다.
+        calendar_batch = CalendarRegistrationBatch(target_email, http_client, access_token)
             
         async def analyze_single_message(msg):
             try:
@@ -589,8 +618,7 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
 
                     try:
                         log_memory("캘린더추가")
-                        await add_notice_to_calendar(target_email, schedule_dict, http_client=http_client)
-                        channel_written += 1
+                        channel_written += await calendar_batch.add_notice(schedule_dict)
                         '''
                         logger.info(f"[{idx+1}번 메시지 성공] 캘린더 등록 완료")
                         '''
@@ -606,7 +634,10 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
         # 예외 객체를 제외하고 숫자만 합산
         written_count = sum(r for r in results if isinstance(r, int))
 
-        if not sync_state:
+        # 등록/중복 조회 실패가 있으면 이전 기준 시각을 유지해 다음 주기에 재시도합니다.
+        if calendar_batch.had_failures:
+            logger.warning(f"[Sync 재시도 대기] User({anon_user_id}): 기준 시각을 유지합니다.")
+        elif not sync_state:
             sync_state = models.UserSyncState(
                 user_id=anon_user_id,
                 last_synced_at=now_utc
@@ -892,4 +923,3 @@ async def extract_data(input_data: dict):
         return await analyze_message_with_gpt(input_data)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    

@@ -1,7 +1,9 @@
+import asyncio
 import copy
 import html
+import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import msal
 import requests
@@ -9,6 +11,7 @@ import logging
 from Channel_Export import get_graph_access_token
 from temp_http_client import safe_http_request
 import httpx
+from schedule_dedup import METADATA_PROPERTY, describe, exact_match, find_duplicate
 load_dotenv()
 
 TENANT_ID = os.environ.get("TENANT_ID")
@@ -16,6 +19,7 @@ CLIENT_ID = os.environ.get("CLIENT_ID")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 
 TIME_ZONE = "Korea Standard Time"
+KST = timezone(timedelta(hours=9))
 logger = logging.getLogger("ScheduleBot")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -192,66 +196,84 @@ def make_event_body(notice: dict):
         ]
     }
 
+    event["singleValueExtendedProperties"].append({
+        "id": METADATA_PROPERTY,
+        "value": json.dumps({
+            "version": 1,
+            "summary": summary,
+            "event_kind": notice.get("event_kind", "unknown"),
+            "time_precision": notice.get("time_precision", "unknown"),
+            "identity_context": notice.get("identity_context"),
+            "audience": notice.get("audience"),
+            "target_grades": notice.get("target_grades", []),
+        }, ensure_ascii=False),
+    })
     return event
 
 def is_duplicate_event(new_event: dict, existing_events: list) -> bool:
-    """
-    새로 등록하려는 일정(new_event)이 기존 일정 리스트(existing_events)에 이미 존재하는지 검증합니다.
-    """
-    # 1. 새 일정 데이터 정제
-    new_title = new_event.get("subject", "").replace(" ", "").lower()
-    new_start_info = new_event.get("start", {})
-    new_start_str = new_start_info.get("dateTime") if isinstance(new_start_info, dict) else new_start_info
-    
-    if not new_start_str:
-        return False
-        
-    new_start_dt = datetime.fromisoformat(new_start_str.replace("Z", "+00:00"))
+    """Only clear exact matches are decided without semantic comparison."""
+    new = describe(new_event)
+    return any(exact_match(new, describe(event)) for event in existing_events
+               if not event.get("isCancelled"))
 
-    for exist in existing_events:
-        # 기존 일정 데이터 정제
-        exist_title = exist.get("subject", "").replace(" ", "").lower()
-        exist_start_info = exist.get("start", {}).get("dateTime")
-        
-        if not exist_start_info:
-            continue
-            
-        exist_start_dt = datetime.fromisoformat(exist_start_info.replace("Z", "+00:00"))
-
-        # 조건 1: 제목 검사 (완전 일치 또는 한쪽이 다른 쪽에 포함)
-        title_matched = (new_title in exist_title) or (exist_title in new_title)
-
-        # 조건 2: 시작 시간 차이가 30분 이내인지 검사
-        time_diff = abs((new_start_dt - exist_start_dt).total_seconds()) / 60.0  # 분 단위
-        time_matched = time_diff <= 30
-
-        # 제목이 유사하고 시간차이가 30분 이내라면 중복으로 판단!
-        if title_matched and time_matched:
-            return True
-
-    return False
 
 async def get_existing_events_for_day(user_email: str, headers: dict, target_datetime_str: str, http_client: httpx.AsyncClient) -> list:
     """
     등록하려는 날짜 당일의 기존 일정들을 API로 미리 끌어옵니다.
     """
-    try:
-        date_part = target_datetime_str.split("T")[0]
-        start_of_day = f"{date_part}T00:00:00Z"
-        end_of_day = f"{date_part}T23:59:59Z"
-
-        url = (
-            f"https://graph.microsoft.com/v1.0/users/{user_email}/calendarView"
-            f"?startDateTime={start_of_day}&endDateTime={end_of_day}"
+    date_part = target_datetime_str.split("T")[0]
+    day_start = datetime.fromisoformat(date_part).replace(tzinfo=KST)
+    params = {
+        "startDateTime": day_start.isoformat(),
+        "endDateTime": (day_start + timedelta(days=1)).isoformat(),
+        "$expand": f"singleValueExtendedProperties($filter=id eq '{METADATA_PROPERTY}')",
+    }
+    query_headers = {**headers, "Prefer": 'outlook.timezone="Korea Standard Time"'}
+    url = f"https://graph.microsoft.com/v1.0/users/{user_email}/calendarView"
+    events = []
+    while url:
+        res = await safe_http_request(
+            http_client, "GET", url, headers=query_headers, params=params, timeout=5
         )
-        res = await safe_http_request(http_client, "GET", url, headers=headers, timeout=5)
-        if res.status_code == 200:
-            return res.json().get("value", [])
-    except Exception as e:
-        logger.error(f"[calendarView 조회 실패] {e}",exc_info=True)
-    return []
+        # 조회 실패를 "일정 없음"으로 취급하면 중복 생성되므로 호출자에게 전달합니다.
+        res.raise_for_status()
+        data = res.json()
+        events.extend(data.get("value", []))
+        url = data.get("@odata.nextLink")
+        params = None
+    return events
 
-async def add_notice_to_calendar(user_email: str, notice_data: dict, http_client: httpx.AsyncClient, access_token: str=None) -> bool:
+
+class CalendarRegistrationBatch:
+    """사용자 한 명의 동기화에서 채널 간 중복 검사와 등록을 직렬화합니다."""
+
+    def __init__(self, user_email: str, http_client: httpx.AsyncClient, access_token: str = None):
+        self.user_email = user_email
+        self.http_client = http_client
+        self.access_token = access_token
+        self._lock = asyncio.Lock()
+        self._created_events = []
+        self.had_failures = False
+
+    async def add_notice(self, notice_data: dict) -> int:
+        async with self._lock:
+            previous_count = len(self._created_events)
+            try:
+                succeeded = await add_notice_to_calendar(
+                    self.user_email, notice_data, self.http_client, self.access_token,
+                    known_events=self._created_events,
+                )
+            except Exception:
+                self.had_failures = True
+                raise
+            if not succeeded:
+                self.had_failures = True
+            return len(self._created_events) - previous_count
+
+async def add_notice_to_calendar(
+    user_email: str, notice_data: dict, http_client: httpx.AsyncClient,
+    access_token: str = None, *, known_events: list | None = None,
+) -> bool:
     """
     GPT AI에서 추출한 단일 notice 또는 schedules 포함 dict를 받아 장기 일정 분할 후 지정 유저의 MS 캘린더에 등록합니다.
     """
@@ -267,6 +289,8 @@ async def add_notice_to_calendar(user_email: str, notice_data: dict, http_client
     target_notices = process_long_term_schedules(notice_data)
 
     success_all = True
+    if known_events is None:
+        known_events = []
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -284,10 +308,21 @@ async def add_notice_to_calendar(user_email: str, notice_data: dict, http_client
             continue
         # 1. 해당 날짜의 기존 일정 미리 끌어오기 (중복 검사용)
         start_datetime = event_body.get("start", {}).get("dateTime", "")
-        existing_events = await get_existing_events_for_day(user_email, headers, start_datetime, http_client=http_client)
+        # 같은 동기화에서 성공한 일정은 Graph 조회에 아직 안 보여도 중복을 막습니다.
+        if await find_duplicate(event_body, known_events):
+            continue
+
+        try:
+            existing_events = await get_existing_events_for_day(
+                user_email, headers, start_datetime, http_client=http_client
+            )
+        except Exception as e:
+            logger.error(f"[calendarView 조회 실패] {e}", exc_info=True)
+            success_all = False
+            continue
 
         # 2. 중복 검사 실행
-        if is_duplicate_event(event_body, existing_events):
+        if await find_duplicate(event_body, existing_events):
             logger.info(f"[Calendar 스킵 - 중복 일정 감지] {event_body.get('subject')}")
             continue  # 중복이면 생성 요청을 보내지 않고 다음으로 건너뜁니다.
         
@@ -296,6 +331,7 @@ async def add_notice_to_calendar(user_email: str, notice_data: dict, http_client
         response = await safe_http_request(http_client, "POST", url, headers=headers, json=event_body)
 
         if response.status_code in (200, 201):
+            known_events.append(event_body)
             '''
             logger.info(f"[Calendar API 성공]")
             '''
