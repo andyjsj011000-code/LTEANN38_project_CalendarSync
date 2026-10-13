@@ -47,7 +47,7 @@ async def channel_export(TEAM_ID: str, CHANNEL_ID: str, last_sync_time, client: 
         access_token = await get_graph_access_token()
         
     if not access_token:
-        return []
+        raise RuntimeError("Graph access token unavailable for channel export")
     
     new_messages = []
     
@@ -80,9 +80,9 @@ async def channel_export(TEAM_ID: str, CHANNEL_ID: str, last_sync_time, client: 
                 new_messages.append(msg)
                 
             url = data.get("@odata.nextLink")
-        except Exception as e:
-            '''
-            logger.error(f"[Graph API Error] 메시지 조회 실패 ({response.status_code}): {response.text}")
-            '''
-            break
+        except Exception:
+            logging.getLogger("ScheduleBot").exception(
+                "[Graph API Error] 채널 메시지 조회 실패 (team=%s, channel=%s)", TEAM_ID, CHANNEL_ID
+            )
+            raise
     return new_messages
