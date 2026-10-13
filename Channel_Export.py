@@ -69,15 +69,19 @@ async def channel_export(TEAM_ID: str, CHANNEL_ID: str, last_sync_time, client: 
             messages = data.get("value", [])
             
             for msg in messages:
-                # 메시지 작성 시간 파싱 (Graph API 시간 형식 대응)
+                # Graph orders threads by their latest modification, including replies.
+                # An old root with a new reply must not hide newer roots on later pages.
+                modified_str = msg.get("lastModifiedDateTime")
+                if modified_str:
+                    modified_dt = datetime.fromisoformat(modified_str.replace("Z", "+00:00"))
+                    if modified_dt <= last_sync_time:
+                        stop = True
+                        break
                 created_dt = datetime.fromisoformat(msg['createdDateTime'].replace("Z", "+00:00"))
                 
-                # 2. 핵심: 이미 동기화된 시간보다 과거 메시지를 만나면 탐색 즉시 중단 (Early Exit)
-                if created_dt <= last_sync_time:
-                    stop = True
-                    break
-                    
-                new_messages.append(msg)
+                # 원글의 작성 시각이 동기화 기준 이후인 경우에만 처리합니다.
+                if created_dt > last_sync_time:
+                    new_messages.append(msg)
                 
             url = data.get("@odata.nextLink")
         except Exception:
