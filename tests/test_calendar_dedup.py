@@ -54,6 +54,29 @@ class CalendarDedupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.posts), 1)
         self.assertEqual(len([c for c in self.calls if c[0] == "GET"]), 1)
 
+    async def test_distinct_events_on_one_day_share_calendar_lookup(self):
+        counts = await asyncio.gather(
+            self.batch.add_notice(notice("Physics exam")),
+            self.batch.add_notice(notice("Chemistry exam")),
+        )
+        self.assertEqual(counts, [1, 1])
+        self.assertEqual(len(self.posts), 2)
+        self.assertEqual(len([c for c in self.calls if c[0] == "GET"]), 1)
+
+    async def test_different_days_have_separate_calendar_lookups(self):
+        await self.batch.add_notice(notice("Physics exam"))
+        await self.batch.add_notice(notice(
+            "Chemistry exam", start="2026-10-14T00:00:00", end="2026-10-14T23:59:00"
+        ))
+        self.assertEqual(len([c for c in self.calls if c[0] == "GET"]), 2)
+
+    async def test_failed_calendar_lookup_is_not_cached(self):
+        self.get_pages = [response(503), response(200, {"value": []})]
+        self.assertEqual(await self.batch.add_notice(notice("Physics exam")), 0)
+        self.assertEqual(await self.batch.add_notice(notice("Chemistry exam")), 1)
+        self.assertEqual(len([c for c in self.calls if c[0] == "GET"]), 2)
+        self.assertTrue(self.batch.had_failures)
+
     async def test_title_whitespace_and_case_are_normalized(self):
         counts = await asyncio.gather(
             self.batch.add_notice(notice("[Science] Report")),
