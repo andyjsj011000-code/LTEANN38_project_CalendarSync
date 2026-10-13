@@ -253,6 +253,7 @@ class CalendarRegistrationBatch:
         self.access_token = access_token
         self._lock = asyncio.Lock()
         self._created_events = []
+        self._day_events = {}
         self.had_failures = False
 
     async def add_notice(self, notice_data: dict) -> int:
@@ -262,6 +263,7 @@ class CalendarRegistrationBatch:
                 succeeded = await add_notice_to_calendar(
                     self.user_email, notice_data, self.http_client, self.access_token,
                     known_events=self._created_events,
+                    day_events=self._day_events,
                 )
             except Exception:
                 self.had_failures = True
@@ -273,6 +275,7 @@ class CalendarRegistrationBatch:
 async def add_notice_to_calendar(
     user_email: str, notice_data: dict, http_client: httpx.AsyncClient,
     access_token: str = None, *, known_events: list | None = None,
+    day_events: dict[str, list] | None = None,
 ) -> bool:
     """
     GPT AI에서 추출한 단일 notice 또는 schedules 포함 dict를 받아 장기 일정 분할 후 지정 유저의 MS 캘린더에 등록합니다.
@@ -291,6 +294,8 @@ async def add_notice_to_calendar(
     success_all = True
     if known_events is None:
         known_events = []
+    if day_events is None:
+        day_events = {}
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -312,14 +317,17 @@ async def add_notice_to_calendar(
         if await find_duplicate(event_body, known_events):
             continue
 
-        try:
-            existing_events = await get_existing_events_for_day(
-                user_email, headers, start_datetime, http_client=http_client
-            )
-        except Exception as e:
-            logger.error(f"[calendarView 조회 실패] {e}", exc_info=True)
-            success_all = False
-            continue
+        day_key = start_datetime.split("T")[0]
+        if day_key not in day_events:
+            try:
+                day_events[day_key] = await get_existing_events_for_day(
+                    user_email, headers, start_datetime, http_client=http_client
+                )
+            except Exception as e:
+                logger.error(f"[calendarView 조회 실패] {e}", exc_info=True)
+                success_all = False
+                continue
+        existing_events = day_events[day_key]
 
         # 2. 중복 검사 실행
         if await find_duplicate(event_body, existing_events):
@@ -331,6 +339,7 @@ async def add_notice_to_calendar(
         response = await safe_http_request(http_client, "POST", url, headers=headers, json=event_body)
 
         if response.status_code in (200, 201):
+            # This overlay is checked before the per-day Graph snapshot.
             known_events.append(event_body)
             '''
             logger.info(f"[Calendar API 성공]")
