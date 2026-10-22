@@ -1,0 +1,37 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const dir = path.resolve(__dirname, '../web_service/static');
+for (const file of ['beta-calendar.js', 'beta.js']) new vm.Script(fs.readFileSync(path.join(dir, file), 'utf8'), {filename: file});
+const context = {window: {}};
+vm.runInNewContext(fs.readFileSync(path.join(dir, 'beta-calendar.js'), 'utf8'), context);
+const C = context.window.BetaCalendar;
+const item = (id, start, end, extra = {}) => ({id, start_date: start, end_date: end, source: 'teams', ...extra});
+assert.equal(C.addDays('2026-12-31', 1), '2027-01-01');
+assert.equal(C.addDays('2028-02-28', 1), '2028-02-29');
+const grid = C.monthGrid('2026-10');
+assert.equal(grid.start, '2026-09-27'); assert.equal(grid.days.length, 42); assert.equal(grid.end, '2026-11-07');
+const long = item('long', '2026-09-28', '2026-10-20');
+const overlap = item('overlap', '2026-10-01', '2026-10-12');
+const next = item('next', '2026-10-04', '2026-10-06');
+const weeks = C.layoutRanges([long, overlap, next, item('single', '2026-10-22', '2026-10-22')], '2026-10');
+const longSegments = weeks.flatMap(w => w.segments).filter(s => s.item.id === 'long');
+assert.equal(longSegments.length, 4); assert.equal(longSegments[0].before, false); assert.equal(longSegments[0].after, true);
+assert.equal(longSegments.at(-1).endsHere, true); assert.equal(longSegments.filter(s => s.endsHere).length, 1);
+assert.equal(new Set(longSegments.map(s => s.lane)).size, 1);
+assert.ok(!weeks.flatMap(w => w.segments).some(s => s.item.id === 'single'));
+for (const w of weeks) for (const a of w.segments) for (const b of w.segments) {
+  assert.ok(a.first >= 0 && a.last <= 6 && a.first <= a.last);
+  if (a !== b && a.first <= b.last && b.first <= a.last) assert.notEqual(a.lane, b.lane, 'Overlapping ranges must not collide');
+}
+const clipped = C.layoutRanges([item('very-long', '2025-01-01', '2027-01-01')], '2026-10');
+assert.ok(clipped.every(w => w.segments[0].before && w.segments[0].after));
+assert.ok(C.layoutRanges([], '2026-10').every(w => w.lanes === 0));
+const task = item('personal', '2026-10-20', '2026-10-24', {source: 'personal', display_mode: 'selected', selected_dates: ['2026-10-21']});
+assert.equal(C.appears(task, '2026-10-21'), true); assert.equal(C.appears(task, '2026-10-22'), false);
+assert.equal(C.appears(task, '2026-10-24'), true); assert.equal(C.appears(task, '2026-10-25'), false);
+assert.equal(C.appears({...task, display_mode: 'final'}, '2026-10-21'), false);
+assert.equal(C.appears({...task, display_mode: 'daily'}, '2026-10-22'), true);
+console.log('Calendar range placement, date rules, month boundaries and JavaScript syntax passed.');

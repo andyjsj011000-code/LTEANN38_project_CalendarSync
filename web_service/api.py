@@ -2,7 +2,8 @@ from datetime import date, datetime, timedelta, timezone
 import hmac
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
 from .identity import MicrosoftIdentity, Unavailable, validate_identity
@@ -14,7 +15,7 @@ FLOW_COOKIE = "calendarsync_login"
 KST = timezone(timedelta(hours=9))
 
 
-def create_app(settings=None, database=None, identity=None):
+def create_app(settings=None, database=None, identity=None, frontend_directory=None):
     settings = settings or Settings.from_env()
     db = database or Database(settings.database_path, settings.data_key)
     db.initialize()
@@ -51,6 +52,8 @@ def create_app(settings=None, database=None, identity=None):
                 raise HTTPException(403, "A valid CSRF token is required")
         return session
 
+    app.state.require_session = current_session
+
     def cookie(response, name, value, max_age):
         response.set_cookie(name, value, httponly=True, secure=settings.secure_cookies, samesite="lax", max_age=max_age, path="/")
 
@@ -65,7 +68,12 @@ def create_app(settings=None, database=None, identity=None):
 
     @app.get("/")
     def index():
+        if frontend_directory is not None:
+            return FileResponse(frontend_directory / "index.html")
         return {"service": "CalendarSync Web Foundation", "sign_in": "/auth/login", "api_docs": "/docs", "ui_connected": False}
+
+    if frontend_directory is not None:
+        app.mount("/assets", StaticFiles(directory=frontend_directory), name="web-assets")
 
     @app.get("/auth/login")
     def login():
