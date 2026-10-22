@@ -15,7 +15,7 @@ def build():
     files["LICENSE"] = repo / "LICENSE"
     release_dir = beta / "releases"
     release_dir.mkdir(exist_ok=True)
-    target = release_dir / "CalendarSync_Beta_0.1.zip"
+    target = release_dir / "CalendarSync_Beta_0.1.1.zip"
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name, path in sorted(files.items()):
             assert path.is_file() and path.resolve().is_relative_to(repo.resolve())
@@ -32,7 +32,8 @@ def build():
         assert archive.testzip() is None
         assert set(archive.namelist()) == set(files)
     checksum = sha256(target.read_bytes()).hexdigest()
-    (release_dir / "SHA256SUMS.txt").write_text(f"{checksum}  {target.name}\n", encoding="ascii")
+    checksums = ''.join(f"{sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in sorted(release_dir.glob('CalendarSync_Beta_*.zip')))
+    (release_dir / "SHA256SUMS.txt").write_text(checksums, encoding="ascii")
     print(f"Built {target.name}: {target.stat().st_size} bytes, {len(files)} files, SHA256 {checksum}")
     return target
 

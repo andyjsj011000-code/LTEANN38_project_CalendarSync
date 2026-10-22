@@ -6,11 +6,19 @@ Teams 일정은 가상의 예시이며 실제 학교 공지·기존 Oracle DB와
 ## 실행
 
 1. Python 3.11 이상을 설치합니다. Windows에서는 설치할 때 `Add Python to PATH`를 선택합니다.
-2. `CalendarSync_Beta_0.1.zip`을 **모두 압축 해제**합니다. ZIP 안에서 바로 실행하지 않습니다.
+2. `CalendarSync_Beta_0.1.1.zip`을 마우스 오른쪽 버튼으로 누르고 **모두 압축 풀기**를 선택합니다. ZIP 안에서 바로 실행하지 않습니다.
 3. Windows는 `start_beta.cmd`를 실행합니다. macOS·Linux는 터미널에서 `python3 start_beta.py`를 실행합니다.
 4. 첫 실행에서는 전용 Python 환경과 의존성을 준비하므로 인터넷이 필요합니다. 이후 같은 폴더에서는 재사용합니다.
 5. 실행 창의 `Tester 1`, `Tester 2`, `Tester 3` 중 하나의 코드를 브라우저 로그인 화면에 입력합니다.
 6. 자동으로 열리지 않으면 `http://127.0.0.1:8080`을 엽니다. 실행 창을 열어 두고, 종료할 때 Ctrl+C를 누릅니다.
+
+### 실행 파일을 눌렀는데 창이 닫히는 경우
+
+`can't open file ... start_beta.py`가 보이면 같은 폴더의 Python 파일을 찾지 못한 것입니다.
+특히 경로에 `Temp`와 `.zip`이 함께 보이면 ZIP 안에서 실행 파일만 연 경우일 수 있습니다.
+압축을 푼 폴더에 `start_beta.cmd`, `start_beta.py`, `requirements-beta.txt`, `web_service`가 함께 있는지 확인한 뒤 실행하세요.
+이미 Python 경로가 표시되었다면 Python이 실행된 것이므로 이 오류 때문에 Python을 다시 설치할 필요는 없습니다.
+0.1.1 실행기는 파일 누락을 먼저 확인하고 원인에 맞는 안내를 표시합니다. 실패 후에는 R로 다시 시도하거나 Q로 닫을 수 있으며, 다른 키를 눌렀다고 창이 닫히지 않습니다.
 
 저장소에서 실행할 때는 `python beta/start_beta.py`를 사용합니다.
 다른 앱이 8080 포트를 사용하면 **첫 실행 전에** `python start_beta.py --port 8081`을 사용합니다.
