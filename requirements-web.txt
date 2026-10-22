@@ -1,0 +1,10 @@
+# Independent web process; no OCR/Oracle/scheduler imports are required.
+fastapi>=0.115.6,<1
+pydantic>=2.10.4,<3
+uvicorn>=0.34,<1
+cryptography>=44,<50
+msal>=1.31.1,<2
+
+# Development/integration tests
+httpx>=0.28.1,<1
+pytest>=8.3,<10
