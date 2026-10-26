@@ -125,22 +125,29 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
             if raw:
                 db.revoke_session(raw)
             response = RedirectResponse("/?login=failed", status_code=303) if integration else JSONResponse({"detail": "Sign-in failed; start again"}, status_code=400)
-            response.delete_cookie(flow_cookie, path="/")
+            response.delete_cookie(flow_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax")
             return response
         response = RedirectResponse("/", status_code=303)
-        response.delete_cookie(flow_cookie, path="/")
+        response.delete_cookie(flow_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax")
         cookie(response, session_cookie, raw, settings.session_seconds)
         if integration and hasattr(integration, "login_response"):
             integration.login_response(response, raw)
         return response
 
     @app.post("/auth/logout", status_code=204)
-    def logout(request: Request, session=Depends(current_session)):
-        if integration and hasattr(integration, "explicit_logout"):
-            integration.explicit_logout(session)
-        db.revoke_session(request.cookies[session_cookie])
+    def logout(request: Request):
+        if integration and hasattr(integration, "logout_request"):
+            # A persistent device must remain revocable after its viewing session expires.
+            integration.logout_request(request)
+        else:
+            session = current_session(request)
+            if integration and hasattr(integration, "explicit_logout"):
+                integration.explicit_logout(session)
+        raw_session = request.cookies.get(session_cookie)
+        if raw_session:
+            db.revoke_session(raw_session)
         response = Response(status_code=204)
-        response.delete_cookie(session_cookie, path="/")
+        response.delete_cookie(session_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax")
         if integration and hasattr(integration, "logout_response"):
             integration.logout_response(response)
         return response

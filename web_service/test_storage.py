@@ -163,13 +163,35 @@ class TestDatabase(SchoolDatabase):
                 elif seen[0]!=version:
                     change_id=digest(user+'|'+event_id+'|'+version)
                     c.execute("UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND source_hash<>? AND status='pending'",(user,event_id,version))
-                    c.execute('INSERT OR IGNORE INTO web_changes(id,user_id,event_id,source_hash,payload_blob,created_at) VALUES(?,?,?,?,?,?)',(change_id,user,event_id,version,self.seal(fields),now))
+                    # A previously superseded or decided revision may become current again.
+                    # Reopen it only when it differs from the last source the user decided on.
+                    c.execute("INSERT INTO web_changes(id,user_id,event_id,source_hash,payload_blob,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_blob=excluded.payload_blob,created_at=CASE WHEN web_changes.status='pending' THEN web_changes.created_at ELSE excluded.created_at END,status='pending'",(change_id,user,event_id,version,self.seal(fields),now))
+                else:
+                    # The source reverted to the version already handled by this user.
+                    c.execute("UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND status='pending'",(user,event_id))
             c.execute("UPDATE web_school_sync SET checked_at=?,state='connected',lease_until=0 WHERE user_id=?",(now,user))
 
     def _shared(self,user_id,tenant_id):
         items=super()._shared(user_id,tenant_id)
         with self.connect() as c: overrides={r[0]:self.unseal(r[1]) for r in c.execute('SELECT event_id,override_blob FROM web_event_states WHERE user_id=? AND override_blob IS NOT NULL',(user_id,))}
         return [{**e,**{k:v for k,v in overrides.get(e['id'],{}).items() if k in {'title','notes','time','source_url','start_date','end_date','kind','cancelled'}}} for e in items]
+
+    def known_oracle_events(self,user,tenant,channels):
+        # Graph has just verified these channels; do not rely on expired cached ACLs.
+        allowed={ch['id'] for ch in channels}
+        if not allowed: return []
+        today=datetime.fromtimestamp(self.clock(),timezone(timedelta(hours=9))).date().isoformat()
+        with self.connect() as c:
+            rows=c.execute("SELECT e.*,s.override_blob FROM web_events e JOIN web_channels ch ON ch.id=e.channel_id JOIN web_user_source_versions v ON v.event_id=e.id AND v.user_id=? LEFT JOIN web_event_states s ON s.event_id=e.id AND s.user_id=v.user_id WHERE ch.tenant_id=? AND e.id LIKE 'oracle:%'",(user,tenant)).fetchall()
+        events=[]
+        fields={'title','notes','time','source_url','start_date','end_date','kind','cancelled','source_version'}
+        for row in rows:
+            if row['channel_id'] not in allowed: continue
+            payload=self.unseal(row['payload_blob'])
+            if row['override_blob']: payload.update({k:v for k,v in self.unseal(row['override_blob']).items() if k in fields})
+            if payload.get('cancelled',False) or payload['end_date']<today: continue
+            events.append({**{k:payload.get(k) for k in fields},'id':row['id'][len('oracle:'):],'channel_id':row['channel_id']})
+        return events
 
     def changes(self,user,tenant):
         accessible={e['id']:e for e in self._shared(user,tenant)}

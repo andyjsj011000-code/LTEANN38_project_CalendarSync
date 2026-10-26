@@ -61,13 +61,15 @@ class TeamsGraph(DelegatedGraph):
             try:
                 with client.stream('GET',url,headers={'Authorization':'Bearer '+token}) as response:
                     kind=response.headers.get('content-type','').split(';')[0]
-                    if response.status_code!=200 or kind not in {'image/png','image/jpeg','image/webp'}: return None
+                    if response.status_code==401: raise GraphFailure('reauth_required')
+                    if response.status_code!=200 or kind not in {'image/png','image/jpeg','image/webp'}: raise GraphFailure()
                     data=b''
                     for chunk in response.iter_bytes():
                         data+=chunk
-                        if len(data)>3_000_000: return None
+                        if len(data)>3_000_000: raise GraphFailure()
+                    if not data: raise GraphFailure()
                     return 'data:'+kind+';base64,'+base64.b64encode(data).decode()
-            except httpx.HTTPError: return None
+            except httpx.HTTPError: raise GraphFailure() from None
 
 class AIExtractor:
     def __init__(self,key='',model='gpt-4o-mini',client_factory=None):

@@ -46,7 +46,20 @@ class OracleSource:
             return ""
         return self.cipher.decrypt(str(value).encode()).decode("utf-8")
 
-    def events(self,channels,tenant_id):
+    def _event(self,row,ch,tenant_id):
+        item_id,channel_id,title,description,start,end,message_id=row
+        if channel_id != ch["id"]:
+            raise ValueError("Source channel mismatch")
+        if start.tzinfo: start=start.astimezone(KST)
+        if end.tzinfo: end=end.astimezone(KST)
+        if end<start:
+            raise ValueError("Invalid source period")
+        title=self._decrypt(title)[:500]
+        kind="assignment" if any(x in title for x in ("과제","제출","마감")) else "application" if "신청" in title else "event"
+        link="https://teams.microsoft.com/l/message/"+quote(str(channel_id),safe="")+"/"+quote(str(message_id),safe="")+"?"+urlencode({"groupId":ch["team_id"],"tenantId":tenant_id})
+        return {"id":str(item_id),"channel_id":channel_id,"title":title,"notes":plain(self._decrypt(description)),"start_date":start.date().isoformat(),"end_date":end.date().isoformat(),"time":end.strftime("%H:%M") if kind in {"assignment","application"} else start.strftime("%H:%M"),"kind":kind,"source_url":link}
+
+    def events(self,channels,tenant_id,known_events=()):
         if not channels:
             return []
         connect=self._connect
@@ -69,17 +82,29 @@ class OracleSource:
                     if len(rows)>1000:
                         raise ValueError("Source channel exceeds import limit")
                     for row in rows:
-                        item_id,channel_id,title,description,start,end,message_id=row
-                        if channel_id != ch["id"]:
-                            raise ValueError("Source channel mismatch")
-                        if start.tzinfo: start=start.astimezone(KST)
-                        if end.tzinfo: end=end.astimezone(KST)
-                        if end<start:
-                            raise ValueError("Invalid source period")
-                        title=self._decrypt(title)[:500]
-                        kind="assignment" if any(x in title for x in ("과제","제출","마감")) else "application" if "신청" in title else "event"
-                        link="https://teams.microsoft.com/l/message/"+quote(str(channel_id),safe="")+"/"+quote(str(message_id),safe="")+"?"+urlencode({"groupId":ch["team_id"],"tenantId":tenant_id})
-                        results.append({"id":str(item_id),"channel_id":channel_id,"title":title,"notes":plain(self._decrypt(description)),"start_date":start.date().isoformat(),"end_date":end.date().isoformat(),"time":end.strftime("%H:%M") if kind in {"assignment","application"} else start.strftime("%H:%M"),"kind":kind,"source_url":link})
+                        results.append(self._event(row,ch,tenant_id))
+                # A windowed listing cannot prove deletion. Re-read missing known
+                # IDs in bounded batches within the same read-only snapshot.
+                present={(e['channel_id'],e['id']) for e in results}
+                for ch in channels:
+                    missing={str(e['id']):e for e in known_events if e['channel_id']==ch['id'] and (ch['id'],str(e['id'])) not in present}
+                    ids=list(missing)
+                    for offset in range(0,len(ids),50):
+                        if monotonic()>deadline: raise TimeoutError("Source import time limit")
+                        batch=ids[offset:offset+50]
+                        params={'channel_id':ch['id'],**{'id_'+str(i):item for i,item in enumerate(batch)}}
+                        names=','.join(':id_'+str(i) for i in range(len(batch)))
+                        cursor.execute("SELECT id,source_channel_id,title,description,start_datetime,end_datetime,raw_message_id FROM master_calendars WHERE source_channel_id=:channel_id AND id IN ("+names+")",**params)
+                        checked=cursor.fetchmany(len(batch)+1)
+                        if len(checked)>len(batch): raise ValueError("Invalid source lookup result")
+                        found=set()
+                        for row in checked:
+                            item=self._event(row,ch,tenant_id)
+                            if item['id'] not in batch or item['id'] in found: raise ValueError("Source ID mismatch")
+                            found.add(item['id']); results.append(item)
+                        for item_id in batch:
+                            if item_id not in found:
+                                results.append({**missing[item_id],'cancelled':True})
             connection.rollback()
         return results
 

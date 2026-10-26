@@ -98,6 +98,7 @@ node tests_web/test_beta_ui.cjs
 node tests_web/test_school_ui.cjs
 node tests_web/test_server_ui.cjs
 node tests_web/test_service_worker.cjs
+node tests_web/test_ui_review.cjs
 python -m pip check
 pip-audit -r requirements-school.txt
 ```
@@ -130,7 +131,15 @@ The test collector reads at most 30 replies per post for AI input. Later replies
 
 ## Verified implementation checks (2026-10-26)
 
-- Python: 116 passed, including authorization, persistent device revocation, encrypted credentials, source changes, reminder boundaries, push deduplication and concurrent logout guards. This workspace used offline ASGI requests and an event-loop adapter because local test sockets are restricted.
-- JavaScript: all five listed calendar/UI/service-worker checks passed with DOM/browser doubles.
-- Browser: the synthetic preview was exercised at desktop and mobile widths, including task creation, period calendar, source-change review/acceptance, and the unconfigured-notifications explanation.
-- These checks do not verify a real school Entra sign-in, Graph/OCR extraction quality, AI processing policy approval, push delivery, HTTPS hosting, or an online dependency audit. Complete the live checklist above on the test server before production deployment.
+- Python: 150 passed using standard pytest, including authorization, device revocation after viewing-session expiry, encrypted credentials, source-change reversions, Oracle reconciliation, transient token refresh failures, reminder boundaries, push deduplication and concurrent logout guards. External services were replaced with test doubles; no socketless event-loop adapter was needed for this run.
+- JavaScript: all six listed calendar/UI/service-worker checks passed with DOM/browser doubles, including delayed-response privacy guards and preservation of custom reminder settings.
+- Browser: the synthetic preview was exercised at desktop and mobile widths, including task creation, period calendar, source-change review/acceptance, and the unconfigured-notifications explanation. The review also verified that logout clears private schedules and that the login-screen device-disconnect action succeeds without an active viewing session. All browser checks used synthetic preview data.
+- These checks do not verify a real school Entra sign-in, live Microsoft Graph/OpenAI or Oracle connectivity, Graph/OCR extraction quality, AI processing policy approval, Web Push delivery, HTTPS hosting, or an online dependency audit. Complete the live checklist above on the test server before production deployment.
+
+## Review fixes (2026-10-26)
+
+- Device disconnect remains available after the viewing session expires. Secure-cookie deletion uses the attributes required by the HTTPS host-prefixed cookies, while same-origin and CSRF controls remain enforced.
+- Delayed requests cannot restore private UI after hide, expiry or logout. Reminder edits preserve unchanged custom times and remove previously saved times that have elapsed.
+- Source changes that revert to the accepted version clear obsolete candidates; a previously superseded current candidate can reopen. Failed hosted-image reads preserve the prior source state instead of implying deletion.
+- Oracle reconciliation rechecks previously shown events by ID within currently authorized channels, distinguishing a changed date from a confirmed deletion.
+- Temporary Microsoft token-refresh outages preserve encrypted credentials for retry; permanent authorization failures still revoke the connection.

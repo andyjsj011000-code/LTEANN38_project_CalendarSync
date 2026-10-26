@@ -1,5 +1,6 @@
 """Test-server entry point: persistent delegated ingestion, reviews and Web Push."""
 import asyncio
+import hmac
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime,timezone,timedelta
@@ -14,7 +15,7 @@ from .api import create_app
 from .config import Settings
 from .connections import PersistentIdentity,ConnectionTokens
 from .direct_source import TeamsGraph,direct_source_from_env
-from .oracle_source import source_from_env
+from .oracle_source import source_from_env,OracleSource
 from .push import sender_from_env,Subscription,Notifications
 from .school import SchoolIntegration
 from .school_graph import GraphFailure
@@ -58,7 +59,26 @@ class ServerIntegration(SchoolIntegration):
     def login_response(self,response,raw):
         device,age=self._cookie_responses.pop(digest(raw))
         response.set_cookie(self.device_cookie,device,max_age=age,secure=self.settings.secure_cookies,httponly=True,samesite='lax',path='/')
-    def logout_response(self,response): response.delete_cookie(self.device_cookie,path='/')
+    def logout_response(self,response):
+        response.delete_cookie(self.device_cookie,path='/',secure=self.settings.secure_cookies,httponly=True,samesite='lax')
+    def logout_request(self,request):
+        session=self.db.session(request.cookies.get(self.session_cookie))
+        if request.headers.get('x-calendarsync-logout')!='1':
+            # Retain session+CSRF compatibility for existing clients. The dedicated
+            # non-simple header also permits device revocation after session expiry.
+            if not session: raise HTTPException(401,'Sign in or request device logout')
+            supplied=request.headers.get('x-csrf-token','')
+            if not hmac.compare_digest(supplied.encode('utf-8'),session['csrf_token'].encode('ascii')):
+                raise HTTPException(403,'A valid CSRF token is required')
+        # SecurityBoundary rejects foreign Origin/Fetch-Site values. Cross-origin
+        # browsers cannot add the header because this app grants no CORS access.
+        raw=request.cookies.get(self.device_cookie)
+        if raw and len(raw)<=128:
+            self.db.revoke_device(digest(raw))
+        elif session:
+            try: device=self.db.session_device(session)
+            except Missing: return
+            self.db.revoke_device(device['id_hash'],session['user_id'])
     def explicit_logout(self,session): self.db.revoke_device(self.db.session_device(session)['id_hash'],session['user_id'])
     def status(self,session):
         result=super().status(session)
@@ -78,6 +98,9 @@ class ServerIntegration(SchoolIntegration):
                     events=self.source.collect(token,channels,device['tenant_id'],self.db,user)
                     self.db.mark_ingested(device['id_hash'])
                 else: events=self.db.catalog_events([ch['id'] for ch in channels])
+            elif isinstance(self.source,OracleSource):
+                known=self.db.known_oracle_events(user,device['tenant_id'],channels)
+                events=self.source.events(channels,device['tenant_id'],known_events=known)
             else: events=self.source.events(channels,device['tenant_id'])
             self.db.commit_snapshot(device,channels,events,self.settings.access_seconds,lease)
         except GraphFailure as error:
@@ -165,7 +188,7 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     @app.post('/auth/logout-all',status_code=204)
     def logout_all(session=Depends(require)):
         db.revoke_all(session['user_id']); response=Response(status_code=204)
-        response.delete_cookie(integration.session_cookie,path='/'); integration.logout_response(response); return response
+        response.delete_cookie(integration.session_cookie,path='/',secure=settings.secure_cookies,httponly=True,samesite='lax'); integration.logout_response(response); return response
     @app.get('/api/changes')
     def changes(session=Depends(require)): return {'items':db.changes(session['user_id'],session['tenant_id'])}
     @app.post('/api/changes/{change_id}')
@@ -194,8 +217,14 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     @app.put('/api/reminders/{source}/{item_id}')
     def save_reminders(source:str,item_id:str,body:ReminderRule,session=Depends(require)):
         accessible_item(session,source,item_id); now=datetime.fromtimestamp(db.clock(),timezone.utc)
-        if any(not now<datetime.fromisoformat(t)<=now+timedelta(days=366) for t in body.custom_times): raise HTTPException(422,'Custom reminders must be within the next year')
-        db.save_rules(session['user_id'],item_id,source,body.model_dump()); return {'saved':True}
+        existing=set(db.rules(session['user_id'],item_id,source)['custom_times'])
+        future=[]
+        for value in body.custom_times:
+            when=datetime.fromisoformat(value)
+            if when<=now and value in existing: continue
+            if not now<when<=now+timedelta(days=366): raise HTTPException(422,'Custom reminders must be within the next year')
+            future.append(value)
+        db.save_rules(session['user_id'],item_id,source,{**body.model_dump(),'custom_times':future}); return {'saved':True}
     @app.get('/api/push')
     def push_info(session=Depends(require)):
         device=db.session_device(session)

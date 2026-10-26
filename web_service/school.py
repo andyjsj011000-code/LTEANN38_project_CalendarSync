@@ -122,7 +122,7 @@ def create_school_app(settings=None,database=None,identity=None,graph=None,sourc
     @app.post("/auth/logout-all",status_code=204)
     def logout_all(session=Depends(require)):
         db.revoke_all(session["user_id"]); db.audit("logout_all",session["user_id"])
-        response=Response(status_code=204); response.delete_cookie(integration.session_cookie,path="/")
+        response=Response(status_code=204); response.delete_cookie(integration.session_cookie,path="/",secure=settings.secure_cookies,httponly=True,samesite="lax")
         return response
 
     @app.get("/privacy")

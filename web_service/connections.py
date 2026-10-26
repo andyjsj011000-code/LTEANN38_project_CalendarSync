@@ -1,5 +1,5 @@
 """MSAL caches belong to a device connection, independently of a viewing session."""
-import secrets
+from requests.exceptions import RequestException, Timeout, ConnectionError
 from .school_graph import GraphFailure, SCOPES
 from .school import SchoolIdentity
 
@@ -30,6 +30,8 @@ class PersistentIdentity(SchoolIdentity):
         accounts=[a for a in app.get_accounts() if a.get("local_account_id","").lower()==oid.lower() and a.get("realm","").lower()==tenant.lower()]
         if len(accounts)!=1: raise GraphFailure("reauth_required")
         result=app.acquire_token_silent_with_error(SCOPES,account=accounts[0])
+        if (result or {}).get("error") in {"temporarily_unavailable","server_error"}:
+            raise GraphFailure("refresh_unavailable")
         granted={s.lower().removeprefix("https://graph.microsoft.com/") for s in (result or {}).get("scope","").split()}
         if not result or not result.get("access_token") or not {s.lower() for s in SCOPES}<=granted: raise GraphFailure("reauth_required")
         return result["access_token"],min(int(result.get("expires_in",0)),3600),cache.serialize()
@@ -50,6 +52,18 @@ class ConnectionTokens:
             token,lifetime,cache=self.identity.refresh(payload["cache"],current["object_id"],current["tenant_id"])
             if lifetime<60 or not self.db.save_refresh(current["id_hash"],lease,token,lifetime,cache): raise GraphFailure("reauth_required")
             return token
+        except GraphFailure as error:
+            if error.state=="refresh_unavailable":
+                # Keep the encrypted cache and existing refresh lease as a short retry backoff.
+                raise GraphFailure("refresh_unavailable") from None
+            self.db.fail_connection(current["id_hash"],lease)
+            raise GraphFailure("reauth_required") from None
+        except RequestException as error:
+            status=error.response.status_code if error.response is not None else None
+            if isinstance(error,(Timeout,ConnectionError)) or status==429 or (status is not None and 500<=status<600):
+                raise GraphFailure("refresh_unavailable") from None
+            self.db.fail_connection(current["id_hash"],lease)
+            raise GraphFailure("reauth_required") from None
         except Exception:
             self.db.fail_connection(current["id_hash"],lease)
             raise GraphFailure("reauth_required") from None

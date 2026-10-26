@@ -2,10 +2,12 @@
 (() => {
   const $ = s => document.querySelector(s);
   const SCHOOL = document.documentElement?.dataset.mode === 'school';
-  let idleTimer;
+  let idleTimer, authEpoch = 0;
+  let reminderRules = null, reminderCustomInitial = '';
+  const activeView = epoch => epoch === authEpoch && !!S.me;
   const testServer = () => ['test-server','preview'].includes(S.service?.mode);
   let reviewItems = [];
-  const connectionText = {connected:'Teams 권한과 일정 연결을 확인했어요.', checking:'Teams 접근 권한을 확인하고 있어요.', not_connected:'Teams 연결을 확인해 주세요.', source_not_configured:'공지 수집 설정이 아직 준비되지 않았어요. 연결 상태에서 확인해 주세요.', source_unavailable:'학교 일정을 가져오지 못해 Teams 표시를 중단했어요. 개인 할 일은 사용할 수 있어요.', verification_failed:'Teams 접근 권한을 확인하지 못해 표시를 중단했어요.', reauth_required:'Microsoft 계정으로 다시 로그인해 주세요.', account_not_allowed:'학교 소속 계정인지 확인해 주세요.', refresh_busy:'Microsoft 연동을 갱신 중이에요. 잠시 후 다시 확인해 주세요.'};
+  const connectionText = {refresh_unavailable:'일시적으로 연결을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.', connected:'Teams 권한과 일정 연결을 확인했어요.', checking:'Teams 접근 권한을 확인하고 있어요.', not_connected:'Teams 연결을 확인해 주세요.', source_not_configured:'공지 수집 설정이 아직 준비되지 않았어요. 연결 상태에서 확인해 주세요.', source_unavailable:'학교 일정을 가져오지 못해 Teams 표시를 중단했어요. 개인 할 일은 사용할 수 있어요.', verification_failed:'Teams 접근 권한을 확인하지 못해 표시를 중단했어요.', reauth_required:'Microsoft 계정으로 다시 로그인해 주세요.', account_not_allowed:'학교 소속 계정인지 확인해 주세요.', refresh_busy:'Microsoft 연동을 갱신 중이에요. 잠시 후 다시 확인해 주세요.'};
   const root = $('#app'), modal = $('#modal'), topbar = $('#topbar');
   const C = window.BetaCalendar;
   const S = {me: null, view: 'today', day: '', month: '', selected: '', today: null, items: [], upcoming: [], channels: [], prefs: null, busy: false, epoch: 0};
@@ -20,7 +22,7 @@
   }
   async function api(path, options = {}) {
     const {body, ...rest} = options;
-    const response = await fetch(path, {...rest, credentials: 'same-origin', headers: {'Content-Type': 'application/json', ...(S.me ? {'x-csrf-token': S.me.csrf_token} : {})}, ...(body === undefined ? {} : {body: JSON.stringify(body)})});
+    const response = await fetch(path, {...rest, credentials: 'same-origin', headers: {'Content-Type': 'application/json', ...(testServer() && path === '/auth/logout' ? {'X-CalendarSync-Logout':'1'} : {}), ...(S.me ? {'x-csrf-token': S.me.csrf_token} : {})}, ...(body === undefined ? {} : {body: JSON.stringify(body)})});
     if (response.status === 204) return null;
     const value = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -34,27 +36,30 @@
     else toast(error.message || '연결하지 못했어요. 실행 창이 열려 있는지 확인해 주세요.', true);
   }
   function clearPrivate() {
-    clearTimeout(idleTimer);
+    clearTimeout(idleTimer); authEpoch++;
+    reviewItems = []; reminderRules = null; reminderCustomInitial = ''; S.connection = null;
     S.epoch++; S.me = null; S.items = []; S.upcoming = []; S.today = null; S.channels = []; S.prefs = null; S.busy = false;
     detailItem = null; hiddenItems = []; selectedDates.clear();
     if (modal.open) modal.close(); modal.replaceChildren(); topbar.hidden = true; $('#account-name').textContent = '';
   }
   function loginScreen() {
-    if (SCHOOL) {root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC</p><h1>학교 일정과 할 일,<br>한눈에.</h1><p>${S.service?.mode === 'preview' ? '학교 계정 없이 예시 화면을 확인하세요.' : '학교 Microsoft 계정으로 로그인하세요.'}</p><a class="primary school-signin" href="/auth/login?background=1">${S.service?.mode === 'preview' ? '예시 데이터로 시작하기 →' : 'Microsoft 로그인 · 이 기기 연동 유지 →'}</a><p class="fine muted">공유 기기에서는 <a href="/auth/login">이번 사용만 로그인</a>을 선택하세요.</p><p class="login-note">Microsoft 로그인 화면에서 인증해요. 이 서비스는 계정 비밀번호를 받지 않아요. 기기 연동을 유지하면 최대 30일 동안 서버가 공지를 갱신하며, 직접 로그아웃하면 이 기기의 연동과 알림을 끊어요. 본인이 접근할 수 있는 Teams 일정만 표시하며, 웹 알림은 로그인 후 이 기기에서 따로 켤 수 있어요. 외부 캘린더 등록은 아직 제공하지 않아요.</p><p><a href="/privacy">개인정보 안내</a></p><p class="error-message" id="login-error" role="alert">${location.search?.includes('login=failed') ? '로그인을 완료하지 못했어요. 학교 계정과 앱 권한을 확인하고 다시 시도해 주세요.' : ''}</p></div></section>`; return;}
+    if (SCHOOL) {root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC</p><h1>학교 일정과 할 일,<br>한눈에.</h1><p>${S.service?.mode === 'preview' ? '학교 계정 없이 예시 화면을 확인하세요.' : '학교 Microsoft 계정으로 로그인하세요.'}</p><a class="primary school-signin" href="/auth/login?background=1">${S.service?.mode === 'preview' ? '예시 데이터로 시작하기 →' : 'Microsoft 로그인 · 이 기기 연동 유지 →'}</a><p class="fine muted">공유 기기에서는 <a href="/auth/login">이번 사용만 로그인</a>을 선택하세요.</p><p class="login-note">Microsoft 로그인 화면에서 인증해요. 이 서비스는 계정 비밀번호를 받지 않아요. 기기 연동을 유지하면 최대 30일 동안 서버가 공지를 갱신하며, 직접 로그아웃하면 이 기기의 연동과 알림을 끊어요. 본인이 접근할 수 있는 Teams 일정만 표시하며, 웹 알림은 로그인 후 이 기기에서 따로 켤 수 있어요. 외부 캘린더 등록은 아직 제공하지 않아요.</p><p><a href="/privacy">개인정보 안내</a></p>${testServer() ? '<button class="secondary" type="button" data-action="disconnect-device">이 기기 연결 해제</button>' : ''}<p class="error-message" id="login-error" role="alert">${location.search?.includes('login=failed') ? '로그인을 완료하지 못했어요. 학교 계정과 앱 권한을 확인하고 다시 시도해 주세요.' : ''}</p></div></section>`; return;}
     root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC · BETA</p><h1>오늘 해야 할 일,<br>한눈에.</h1><p class="muted">학교 로그인 없이 초대 코드로 먼저 써보세요.</p><form id="login-form"><label class="field"><span class="field-label">테스트 계정 초대 코드</span><input name="code" type="password" required minlength="16" maxlength="128" autocomplete="off" spellcheck="false" placeholder="실행 창에 표시된 코드를 입력하세요"></label><p class="error-message" id="login-error" role="alert"></p><button class="primary" type="submit">베타 시작하기 →</button></form><p class="login-note">Teams 공지는 예시 데이터입니다. 개인 할 일은 계정별로 서버에 저장됩니다. 같은 코드로 로그인하면 같은 계정이 열려요.</p></div></section>`;
   }
   async function load() {
-    const epoch = ++S.epoch;
+    if (!S.me) return;
+    const epoch = ++S.epoch, sessionEpoch = authEpoch;
     const today = await api('/api/today');
+    if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
     const month = S.month || today.date.slice(0, 7), grid = C.monthGrid(month);
     const [calendar, upcoming, channels, settings] = await Promise.all([
       api(`/api/calendar?start=${grid.start}&end=${grid.end}`),
       api(`/api/calendar?start=${today.date}&end=${C.addDays(today.date, 7)}`),
       api('/api/channels'), api('/api/settings')
     ]);
-    if (epoch !== S.epoch || !S.me) return;
+    if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
     Object.assign(S, {today, day: today.date, month, selected: S.selected || today.date, items: calendar.items, upcoming: upcoming.items, channels, prefs: settings.preferences, connection: settings.connection});
-    if (testServer()) {const result = await api('/api/changes'); if (epoch !== S.epoch || !S.me) return; reviewItems = result.items;}
+    if (testServer()) {const result = await api('/api/changes'); if (epoch !== S.epoch || !activeView(sessionEpoch)) return; reviewItems = result.items;}
     render();
   }
   function row(e) {
@@ -114,27 +119,30 @@
   async function mutate(operation, message) {
     if (S.busy) return;
     S.busy = true;
-    const epoch = S.epoch;
+    const epoch = S.epoch, sessionEpoch = authEpoch;
     document.querySelectorAll('button,input,select,textarea').forEach(el => {if (!el.disabled) {el.disabled = true; el.dataset.locked = '1';}});
     let saved = false;
     try {
       await operation(); saved = true;
-      if (epoch !== S.epoch) return;
+      if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
       if (modal.open) modal.close(); modal.replaceChildren();
       await load(); toast(message);
     } catch (error) {
-      if (saved) toast('저장됐지만 화면을 다시 불러오지 못했어요. 새로고침해 주세요.', true);
+      if (sessionEpoch !== authEpoch) return;
+      if (saved && error.status !== 401) toast('저장됐지만 화면을 다시 불러오지 못했어요. 새로고침해 주세요.', true);
       else failure(error);
     } finally {
-      S.busy = false;
-      document.querySelectorAll('[data-locked]').forEach(el => {el.disabled = false; delete el.dataset.locked;});
+      if (sessionEpoch === authEpoch) {
+        S.busy = false;
+        document.querySelectorAll('[data-locked]').forEach(el => {el.disabled = false; delete el.dataset.locked;});
+      }
     }
   }
   function setState(e, values) {
     return api(`/api/${e.source === 'personal' ? 'tasks' : 'events'}/${encodeURIComponent(e.id)}/state`, {method: 'PATCH', body: {...values, ...(e.source === 'personal' ? {version: e.version} : {})}});
   }
   function filters() {
-    openDialog('표시 설정', `<form id="filters-form"><h3>Teams 채널</h3>${S.channels.map(ch => `<label class="toggle-row"><span>${esc(ch.name)}</span><input type="checkbox" name="channel" value="${esc(ch.id)}" ${ch.enabled ? 'checked' : ''}></label>`).join('')}<h3>일정 종류</h3>${Object.entries(kindName).map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" name="kind" value="${key}" ${S.prefs.disabled_kinds.includes(key) ? '' : 'checked'}></label>`).join('')}<p class="fine muted">설정은 내 계정에만 적용돼요.</p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">적용</button></div></form>`);
+    openDialog('표시 설정', `<form id="filters-form"><h3>Teams 채널</h3>${S.channels.map(ch => `<label class="toggle-row"><span>${esc(ch.name)}</span><input type="checkbox" name="channel" value="${esc(ch.id)}" ${ch.enabled ? 'checked' : ''}></label>`).join('')}<h3>일정 종류</h3>${Object.entries(kindName).filter(([key]) => key !== 'personal').map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" name="kind" value="${key}" ${S.prefs.disabled_kinds.includes(key) ? '' : 'checked'}></label>`).join('')}<p class="fine muted">설정은 내 계정에만 적용돼요.</p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">적용</button></div></form>`);
   }
   let hiddenItems = [];
   async function hidden() {
@@ -148,6 +156,7 @@
   }
   document.addEventListener('click', async event => {
     const button = event.target.closest('button'); if (!button || S.busy) return;
+    const sessionEpoch = authEpoch;
     try {
       if (button.dataset.changeDecision !== undefined) {const item = reviewItems[Number(button.dataset.changeIndex)]; return mutate(() => api('/api/changes/'+encodeURIComponent(item.id),{method:'POST',body:{accept:button.dataset.changeDecision==='accept'}}),'변경사항을 처리했어요.');}
       if (button.dataset.detail) {const e = find(button.dataset.detail, button.dataset.source); if (e) detail(e); return;}
@@ -164,14 +173,14 @@
       if (action === 'feedback') return feedback();
       if (action === 'sync-teams') return syncTeams();
       if (action === 'changes') return changesPanel();
-      if (action === 'notifications') return notificationsPanel();
-      if (action === 'push-enable') return enablePush();
-      if (action === 'push-disable') return disablePush();
+      if (action === 'notifications') return await notificationsPanel();
+      if (action === 'push-enable') return await enablePush();
+      if (action === 'push-disable') return await disablePush();
       if (action === 'push-test') {const result = await api('/api/push/test',{method:'POST'}); return toast(result.accepted ? '알림 전송을 요청했어요. 이 기기의 알림을 확인해 주세요.' : '알림 전송에 실패했어요. 서버 연결 상태를 확인해 주세요.', !result.accepted);}
-      if (action === 'reminders') return remindersPanel(detailItem);
+      if (action === 'reminders') return await remindersPanel(detailItem);
       if (action === 'override-detail') return taskForm(detailItem);
       if (action === 'security') return openDialog('연결 및 보안', `<p>${esc(connectionText[S.connection?.state] || connectionText.not_connected)}</p><p>Teams 권한은 최대 60초 동안만 재사용해요. 화면을 오래 사용하지 않으면 다시 로그인이 필요해요. 기기 연동을 유지했다면 화면 세션 만료 후에도 알림은 받을 수 있어요. 직접 로그아웃하면 이 기기의 연동과 알림을 끊어요.</p><p>외부 캘린더 등록과 Teams 채팅 발송은 아직 제공하지 않아요. 브라우저 알림은 알림 설정에서 켜 주세요.</p><p><a href="/privacy">개인정보 안내</a></p>`, '<button class="danger" data-action="logout-all">모든 기기 로그아웃</button><button class="secondary" data-action="close">닫기</button>');
-      if (action === 'logout-all') {await api('/auth/logout-all', {method:'POST'}); if (testServer()) await detachBrowserPush(); clearPrivate(); loginScreen(); return;}
+      if (action === 'logout-all') {await api('/auth/logout-all', {method:'POST'}); clearPrivate(); loginScreen(); if (testServer()) await detachBrowserPush(); return;}
       if (action === 'edit-detail') return taskForm(detailItem);
       if (action === 'hide-detail') return mutate(() => setState(detailItem, {hidden: true}), '숨겼어요. 숨긴 일정에서 복원할 수 있어요.');
       if (action === 'delete-detail') {
@@ -186,8 +195,8 @@
         else {const date = new Date(S.month + '-01T00:00:00Z'); date.setUTCMonth(date.getUTCMonth() + (action === 'next-month' ? 1 : -1)); S.month = date.toISOString().slice(0, 7); S.selected = S.month + '-01';}
         return await load();
       }
-      if (action === 'logout') {await api('/auth/logout', {method: 'POST'}); if (testServer()) await detachBrowserPush(); clearPrivate(); loginScreen();}
-    } catch (error) {failure(error);}
+      if (action === 'logout' || action === 'disconnect-device') {await api('/auth/logout', {method: 'POST'}); clearPrivate(); loginScreen(); if (action === 'disconnect-device') toast('이 기기의 연동과 알림을 해제했어요.'); if (testServer()) await detachBrowserPush();}
+    } catch (error) {if (sessionEpoch === authEpoch) failure(error);}
   });
   document.addEventListener('change', event => {
     const el = event.target;
@@ -201,7 +210,7 @@
     event.preventDefault(); const form = event.target;
     if (S.busy) return;
     if (form.id === 'notification-form') return mutate(() => api('/api/settings',{method:'PUT',body:{...S.prefs,morning_enabled:form.elements.morning_enabled.checked,morning_time:form.elements.morning_time.value}}),'아침 알림 설정을 저장했어요.');
-    if (form.id === 'reminder-form') {const item = detailItem; const offsets = []; if (form.elements.day.checked) offsets.push(-1440); if (form.elements.hour.checked) offsets.push(-60); const custom_times = form.elements.custom.value ? [new Date(form.elements.custom.value).toISOString()] : []; return mutate(() => api(`/api/reminders/${item.source}/${encodeURIComponent(item.id)}`,{method:'PUT',body:{offsets,custom_times}}),'예약 알림을 저장했어요.');}
+    if (form.id === 'reminder-form') {const item = detailItem; const offsets = (reminderRules?.offsets || []).filter(value => ![-1440,-60].includes(value)); if (form.elements.day.checked) offsets.push(-1440); if (form.elements.hour.checked) offsets.push(-60); const custom_times = form.elements.custom.value === reminderCustomInitial ? [...(reminderRules?.custom_times || [])] : form.elements.custom.value ? [new Date(form.elements.custom.value).toISOString()] : []; return mutate(() => api(`/api/reminders/${item.source}/${encodeURIComponent(item.id)}`,{method:'PUT',body:{offsets,custom_times}}),'예약 알림을 저장했어요.');}
     if (form.id === 'login-form') {
       S.busy = true; const button = form.querySelector('button'); button.disabled = true; $('#login-error').textContent = '';
       try {
@@ -236,48 +245,64 @@
     }
   });
   async function boot() {
+    const epoch = authEpoch;
     if (location.protocol === 'file:') {root.innerHTML = '<section class="login-wrap"><div class="login-card"><h1>실행 파일로 시작해 주세요</h1><p>압축을 푼 뒤 start_beta.cmd를 실행하면 브라우저가 열려요. HTML 파일만 열면 데이터를 저장할 서버가 실행되지 않아요.</p></div></section>'; return;}
     try {
-      S.service = await api(SCHOOL ? '/api/service' : '/api/beta/info');
+      const service = await api(SCHOOL ? '/api/service' : '/api/beta/info');
+      if (epoch !== authEpoch) return; S.service = service;
       if (S.service.mode === 'preview') {const footer = document.querySelector('footer'); if (footer) footer.textContent = 'CalendarSync · 예시 전용 미리보기 · 실제 Microsoft·Teams 연결 없음';}
-      try {S.me = await api('/api/me');} catch (error) {if (error.status === 401) {loginScreen(); return;} throw error;}
+      try {const me = await api('/api/me'); if (epoch !== authEpoch) return; S.me = me;} catch (error) {if (epoch !== authEpoch) return; if (error.status === 401) {loginScreen(); return;} throw error;}
       await load();
     } catch (error) {
+      if (epoch !== authEpoch) return;
       clearPrivate(); root.innerHTML = `<section class="login-wrap"><div class="login-card"><h1>베타를 연결하지 못했어요</h1><p>${esc(error.message)}</p><p class="muted">실행 창을 확인한 뒤 브라우저를 새로고침해 주세요.</p></div></section>`;
     }
   }
   async function syncTeams() {
     if (!testServer() || S.busy) return;
+    const epoch = authEpoch;
     S.busy = true; toast('Teams 공지를 가져오고 있어요. 처음에는 시간이 걸릴 수 있어요.');
-    try {const result = await api('/api/teams/sync',{method:'POST'}); await load(); toast(connectionText[result.state] || '연결 상태를 확인해 주세요.', result.state !== 'connected');} catch(error) {failure(error);} finally {S.busy = false;}
+    try {const result = await api('/api/teams/sync',{method:'POST'}); if (!activeView(epoch)) return; await load(); if (activeView(epoch)) toast(connectionText[result.state] || '연결 상태를 확인해 주세요.', result.state !== 'connected');} catch(error) {if (epoch === authEpoch) failure(error);} finally {if (epoch === authEpoch) S.busy = false;}
   }
   function changesPanel() {
     openDialog('변경사항 검토', `<p class="muted">원문이 바뀐 일정은 확인 후 반영해요. 변경을 반영하면 현재 내 수정 내용을 대체해요. 검토 중인 일정의 예약 알림은 잠시 멈춰요.</p>${reviewItems.length ? reviewItems.map((change,i) => `<section class="change-item"><h3>${esc(change.before.title)}</h3><p class="fine">기존 · ${esc(period(change.before))} ${esc(change.before.time || '종일')}</p><p>변경 · ${esc(period(change.after))} ${esc(change.after.time || '종일')} ${change.after.cancelled ? '· 취소 또는 원문 삭제' : ''}</p><div class="detail-notes">${esc(change.after.notes || '')}</div><div class="button-row"><button class="secondary small" data-change-index="${i}" data-change-decision="keep">기존 유지</button><button class="primary small" data-change-index="${i}" data-change-decision="accept">변경 반영</button></div></section>`).join('') : '<div class="empty">검토할 변경사항이 없어요.</div>'}`);
   }
   async function notificationsPanel() {
-    const push = await api('/api/push');
+    const epoch = authEpoch, push = await api('/api/push');
+    if (!activeView(epoch)) return;
     openDialog('이 기기의 알림', `<p>알림 상태: <strong>${push.registered ? '켜짐' : '꺼짐'}</strong></p><p class="muted">화면이 닫혀 있어도 지원되는 브라우저에서 알림을 받아요. 잠금화면에는 일정 제목 대신 확인 안내만 표시해요.</p>${!push.configured ? '<p class="error-message">서버의 Web Push 키가 아직 설정되지 않았어요.</p>' : ''}${!push.background_enabled ? '<p class="error-message">알림을 받으려면 다시 로그인할 때 이 기기 연동 유지를 선택해 주세요.</p>' : ''}<form id="notification-form"><label class="toggle-row">아침 요약 알림<input name="morning_enabled" type="checkbox" ${S.prefs.morning_enabled ? 'checked' : ''}></label><label class="field"><span class="field-label">아침 알림 시각</span><input name="morning_time" type="time" required value="${esc(S.prefs.morning_time || '07:00')}"></label><button class="secondary" type="submit">아침 설정 저장</button></form><p class="fine muted">아이폰·아이패드는 홈 화면에 추가한 웹앱에서 알림을 켜야 할 수 있어요. 브라우저·기기 설정에 따라 수신이 제한될 수 있어요.</p>`, `<button class="secondary" data-action="push-disable">이 기기 알림 끄기</button><button class="secondary" data-action="push-test" ${!push.registered ? 'disabled' : ''}>테스트 알림</button><button class="primary" data-action="push-enable" ${!push.configured || !push.background_enabled ? 'disabled' : ''}>이 기기 알림 켜기</button>`);
   }
   async function enablePush() {
+    const epoch = authEpoch;
     if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return toast('이 브라우저에서는 Web Push를 지원하지 않아요.',true);
-    const info = await api('/api/push'); if (!info.configured || !info.background_enabled) return toast('연동과 서버 알림 설정을 먼저 확인해 주세요.',true);
-    if (await Notification.requestPermission() !== 'granted') return toast('기기의 알림 권한이 허용되지 않았어요.',true);
+    if (!activeView(epoch)) return;
+    const permission = Notification.requestPermission().catch(() => 'denied');
+    const info = await api('/api/push'); if (!activeView(epoch)) return; if (!info.configured || !info.background_enabled) return toast('연동과 서버 알림 설정을 먼저 확인해 주세요.',true);
+    if (await permission !== 'granted') return toast('기기의 알림 권한이 허용되지 않았어요.',true);
+    if (!activeView(epoch)) return;
     const registration = await navigator.serviceWorker.register('/service-worker.js'); await navigator.serviceWorker.ready;
+    if (!activeView(epoch)) return;
     let subscription = await registration.pushManager.getSubscription();
+    if (!activeView(epoch)) return;
     if (subscription && !info.registered) {await subscription.unsubscribe(); subscription = null;}
+    if (!activeView(epoch)) return;
     if (!subscription) {
       const value = info.public_key.replace(/-/g,'+').replace(/_/g,'/'); const raw = atob(value + '='.repeat((4-value.length%4)%4));
       subscription = await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:Uint8Array.from(raw,c=>c.charCodeAt(0))});
     }
-    await api('/api/push',{method:'POST',body:subscription.toJSON()}); await load(); return notificationsPanel();
+    if (!activeView(epoch)) {if (subscription) await subscription.unsubscribe(); return;}
+    await api('/api/push',{method:'POST',body:subscription.toJSON()}); if (!activeView(epoch)) return; await load(); if (activeView(epoch)) return notificationsPanel();
   }
   async function detachBrowserPush() {
     try {if ('serviceWorker' in navigator) {const registration = await navigator.serviceWorker.getRegistration('/'); if (registration) {const subscription = await registration.pushManager.getSubscription(); if (subscription) await subscription.unsubscribe(); registration.active?.postMessage({type:'clear-notifications'});}}} catch {}
   }
-  async function disablePush() {await api('/api/push',{method:'DELETE'}); await detachBrowserPush(); return notificationsPanel();}
+  async function disablePush() {const epoch = authEpoch; await api('/api/push',{method:'DELETE'}); await detachBrowserPush(); if (activeView(epoch)) return notificationsPanel();}
   async function remindersPanel(item) {
-    const rules = await api(`/api/reminders/${item.source}/${encodeURIComponent(item.id)}`); detailItem = item;
-    openDialog('이 일정의 예약 알림', `<form id="reminder-form"><p>${esc(item.title)}</p><label class="toggle-row">하루 전<input name="day" type="checkbox" ${rules.offsets.includes(-1440) ? 'checked' : ''}></label><label class="toggle-row">1시간 전<input name="hour" type="checkbox" ${rules.offsets.includes(-60) ? 'checked' : ''}></label><label class="field"><span class="field-label">직접 지정 (선택)</span><input name="custom" type="datetime-local"></label><p class="fine muted">완료·취소·숨김 또는 꺼둔 채널의 일정은 알림에서 제외돼요. 직접 지정한 시각은 새로 저장한 값으로 바뀌어요.</p><div class="dialog-foot"><button class="primary" type="submit">저장</button></div></form>`);
+    const epoch = authEpoch, rules = await api(`/api/reminders/${item.source}/${encodeURIComponent(item.id)}`);
+    if (!activeView(epoch)) return; detailItem = item; reminderRules = rules;
+    const custom = rules.custom_times?.[0] ? new Date(rules.custom_times[0]) : null;
+    reminderCustomInitial = custom && !Number.isNaN(custom.getTime()) ? new Date(custom.getTime()-custom.getTimezoneOffset()*60000).toISOString().slice(0,16) : '';
+    openDialog('이 일정의 예약 알림', `<form id="reminder-form"><p>${esc(item.title)}</p><label class="toggle-row">하루 전<input name="day" type="checkbox" ${rules.offsets.includes(-1440) ? 'checked' : ''}></label><label class="toggle-row">1시간 전<input name="hour" type="checkbox" ${rules.offsets.includes(-60) ? 'checked' : ''}></label><label class="field"><span class="field-label">직접 지정 (기기 현지 시각, 선택)</span><input name="custom" type="datetime-local" value="${esc(reminderCustomInitial)}"></label><p class="fine muted">완료·취소·숨김 또는 꺼둔 채널의 일정은 알림에서 제외돼요. 직접 지정한 시각은 새로 저장한 값으로 바뀌어요.</p><div class="dialog-foot"><button class="primary" type="submit">저장</button></div></form>`);
   }
   function sourceLink(value) {
     if (!SCHOOL || !value) return '';
