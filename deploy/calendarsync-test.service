@@ -1,0 +1,28 @@
+[Unit]
+Description=CalendarSync school test server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=calendarsync
+Group=calendarsync
+WorkingDirectory=/opt/calendarsync
+EnvironmentFile=/etc/calendarsync/test.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/calendarsync/.venv-web/bin/python -m uvicorn web_service.server:create_test_server --factory --host 127.0.0.1 --port 8080 --workers 1 --limit-concurrency 32 --timeout-keep-alive 5 --no-access-log --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+UMask=0077
+StateDirectory=calendarsync-test
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/calendarsync-test
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

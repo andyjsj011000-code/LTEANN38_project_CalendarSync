@@ -84,7 +84,7 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
         if integration:
             integration.limit_login(request)
         try:
-            flow = provider.begin()
+            flow = integration.begin_login(provider, request) if integration and hasattr(integration, "begin_login") else provider.begin()
         except Exception:
             # Do not return provider errors, tokens, or credential configuration.
             raise HTTPException(503, "School sign-in is not available yet") from None
@@ -115,7 +115,10 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
                 db.revoke_session(old_session)
             raw = db.issue_session(user_id, settings.session_seconds)
             if integration:
-                integration.bind_sign_in(raw, user_id, claims)
+                if hasattr(integration, "complete_sign_in"):
+                    integration.complete_sign_in(raw, user_id, claims, request)
+                else:
+                    integration.bind_sign_in(raw, user_id, claims)
         except Unavailable:
             return JSONResponse({"detail": "School sign-in is not available yet"}, status_code=503)
         except Exception:
@@ -127,13 +130,19 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
         response = RedirectResponse("/", status_code=303)
         response.delete_cookie(flow_cookie, path="/")
         cookie(response, session_cookie, raw, settings.session_seconds)
+        if integration and hasattr(integration, "login_response"):
+            integration.login_response(response, raw)
         return response
 
     @app.post("/auth/logout", status_code=204)
     def logout(request: Request, session=Depends(current_session)):
+        if integration and hasattr(integration, "explicit_logout"):
+            integration.explicit_logout(session)
         db.revoke_session(request.cookies[session_cookie])
         response = Response(status_code=204)
         response.delete_cookie(session_cookie, path="/")
+        if integration and hasattr(integration, "logout_response"):
+            integration.logout_response(response)
         return response
 
     @app.get("/api/me")
@@ -151,7 +160,7 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
 
     @app.get("/api/settings")
     def preferences(session=Depends(current_session)):
-        return {"preferences": db.preferences(session["user_id"]), "capabilities": {"push_delivery": False, "teams_chat_delivery": False, "calendar_export": False, "live_teams_ingestion": bool(integration and integration.source.configured)}, "connection": integration.status(session) if integration else None}
+        return {"preferences": db.preferences(session["user_id"]), "capabilities": {"push_delivery": bool(integration and getattr(integration, "push_enabled", False)), "teams_chat_delivery": False, "calendar_export": False, "live_teams_ingestion": bool(integration and integration.source.configured)}, "connection": integration.status(session) if integration else None}
 
     @app.put("/api/settings")
     def save_preferences(body: Preferences, session=Depends(current_session)):

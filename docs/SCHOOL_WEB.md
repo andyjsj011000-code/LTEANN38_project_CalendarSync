@@ -1,3 +1,5 @@
+> 현재 테스트 서버는 [TEST_SERVER.md](TEST_SERVER.md)를 따른다. 이 문서는 이전 로그인/Oracle 기반 구현의 기록이다.
+
 # Microsoft 학교 계정 웹 연결
 
 현재 fork의 oracle 브랜치에서 사용하는 별도 웹 프로세스다. 기존 app/ 봇·수집 스케줄러와 Oracle 운영 테이블을 변경하거나 자동 실행하지 않는다. web_service.api:create_app은 기반 API, web_service.beta:create_beta_app은 예시 베타이며 **실제 로그인용 시작점은 web_service.school:create_school_app**이다.

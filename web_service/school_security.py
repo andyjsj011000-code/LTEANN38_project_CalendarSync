@@ -12,7 +12,7 @@ class SecurityBoundary:
         async def secure_send(message):
             if message["type"]=="http.response.start":
                 headers=list(message.get("headers",[]))
-                policy="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+                policy="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
                 values={"content-security-policy":policy,"x-frame-options":"DENY","x-content-type-options":"nosniff","referrer-policy":"no-referrer","cache-control":"no-store","cross-origin-opener-policy":"same-origin","permissions-policy":"camera=(), microphone=(), geolocation=()"}
                 if self.settings.secure_cookies:
                     values["strict-transport-security"]="max-age=31536000"

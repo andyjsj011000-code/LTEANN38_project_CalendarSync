@@ -228,3 +228,7 @@ __marimo__/
 # Local security checks (never publish databases, tokens or temporary files)
 .test-school-*/
 write-check.tmp
+
+# Private test-server environment and generated keys
+deploy/school.test.env
+*.private.env

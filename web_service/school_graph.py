@@ -16,13 +16,16 @@ class DelegatedGraph:
     def __init__(self, client_factory=None):
         self.client_factory = client_factory or (lambda: httpx.Client(timeout=8, follow_redirects=False, trust_env=False))
 
-    def _read(self, client, token, url):
+    def _read(self, client, token, url, *, forbidden_missing=True):
         parsed = urlsplit(url)
         if parsed.scheme != "https" or parsed.netloc != "graph.microsoft.com" or not parsed.path.startswith("/v1.0/") or parsed.fragment:
             raise GraphFailure()
         try:
             with client.stream("GET", url, headers={"Authorization":"Bearer "+token}) as response:
-                if response.status_code in (403,404):
+                if response.status_code == 403:
+                    if forbidden_missing: return None
+                    raise GraphFailure()
+                if response.status_code == 404:
                     return None
                 if response.status_code == 401:
                     raise GraphFailure("reauth_required")

@@ -1,3 +1,4 @@
-# Install in a dedicated web virtualenv, never over the legacy bot environment.
+# Isolated web virtualenv. The Oracle adapter is optional when WEB_INGESTION_MODE=direct.
 -r requirements-web.txt
 oracledb>=3,<4
+pywebpush>=2.1,<3
