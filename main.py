@@ -245,30 +245,30 @@ async def send_teams_reply(service_url: str, conversation_id: str, text: str):
         logger.warning("service_url 또는 conversation_id가 없어 메시지를 전송하지 못했습니다.")
         return
 
-    # 1. http_client가 생성된 후 토큰 발급 함수 호출
-    bot_token = await get_bot_token(http_client)
-    if not bot_token:
-        logger.error("Bot Token 발급 실패로 메시지 발송 중단")
-        return
-
-    # 2. 메시지 전송 URL 및 헤더 설정
     base_url = service_url.rstrip("/")
     reply_url = f"{base_url}/v3/conversations/{conversation_id}/activities"
-
-    headers = {
-        "Authorization": f"Bearer {bot_token}",
-        "Content-Type": "application/json"
-    }
 
     payload = {
         "type": "message",
         "text": text
     }
 
-    # 3. 메시지 발송
     try:
-        async with httpx.AsyncClient(limits=limits, timeout=timeout) as http_client:
-            res = await http_client.post(reply_url, headers=headers, json=payload)
+        # 토큰 발급과 메시지 발송을 같은 로컬 클라이언트로 처리 (전역 http_client는 None이라 사용 불가)
+        async with httpx.AsyncClient(limits=limits, timeout=timeout) as reply_client:
+            # 1. 토큰 발급
+            bot_token = await get_bot_token(reply_client)
+            if not bot_token:
+                logger.error("Bot Token 발급 실패로 메시지 발송 중단")
+                return
+
+            headers = {
+                "Authorization": f"Bearer {bot_token}",
+                "Content-Type": "application/json"
+            }
+
+            # 2. 메시지 발송
+            res = await reply_client.post(reply_url, headers=headers, json=payload)
         if res.status_code not in (200, 201, 202):
             logger.error(f"[Teams 메시지 발송 실패] Status: {res.status_code}, Body: {res.text}")
     except Exception as e:
@@ -435,8 +435,10 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
     profile_res = None
     
     tracemalloc.start()
-    
-    if not http_client:
+
+    # 외부(폴링 잡)에서 받은 공유 클라이언트는 여기서 닫지 않음
+    owns_http_client = http_client is None
+    if owns_http_client:
         http_client = httpx.AsyncClient(limits=limits, timeout=timeout)
         
     try:
@@ -648,8 +650,8 @@ async def async_single_user(user_id: str, now_utc: datetime, access_token: str =
         results = None
         profile_res = None
         db.close()
-        await http_client.aclose()
-        engine.dispose()
+        if owns_http_client:
+            await http_client.aclose()
         gc.collect()
 
 def sync_single_user(user_id: str, now_utc: datetime, access_token: str):
@@ -720,8 +722,11 @@ async def teams_event_webhook(
                 )
                 db.add(sync_state)
             else:
-                # 재설치인 경우 기준 시각 업데이트
-                latest_sync_time = max(initial_sync_time, sync_state.last_sync_time)
+                # 재설치인 경우 기준 시각 업데이트 (최대 INITIAL_SYNC_LOOKBACK_DAYS 이전까지만 거슬러 올라감)
+                prev_sync_time = sync_state.last_synced_at
+                if prev_sync_time.tzinfo is None:
+                    prev_sync_time = prev_sync_time.replace(tzinfo=timezone.utc)
+                sync_state.last_synced_at = max(initial_sync_time, prev_sync_time)
             
             #로그
             install_log = models.CalendarEventLog(

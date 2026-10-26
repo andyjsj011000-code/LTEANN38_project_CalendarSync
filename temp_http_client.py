@@ -17,14 +17,9 @@ async def safe_http_request(
 ):
     #method는 GET, POST, PATCH, DELETE
     method = method.upper()
-    current_loop = asyncio.get_running_loop()
-    
-    is_same_loop = (
-        http_client is not None 
-        and hasattr(http_client, "_transport") 
-        and getattr(http_client._transport, "_loop", None) == current_loop
-    )
-    if is_same_loop and not http_client.is_closed:
+    # httpx 트랜스포트에는 _loop 속성이 없어 루프 비교가 항상 실패했음
+    # -> 열려 있으면 공유 클라이언트를 쓰고, 다른 루프 문제(RuntimeError) 등은 아래 except에서 임시 클라이언트로 전환
+    if http_client is not None and not http_client.is_closed:
         try:
             return await http_client.request(
                 method=method, url=url, headers=headers, data=data, json=json, params=params, follow_redirects=follow_redirects, timeout=timeout
