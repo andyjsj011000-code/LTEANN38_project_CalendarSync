@@ -1,6 +1,9 @@
 'use strict';
 (() => {
   const $ = s => document.querySelector(s);
+  const SCHOOL = document.documentElement?.dataset.mode === 'school';
+  let idleTimer;
+  const connectionText = {connected:'Teams 권한과 일정 연결을 확인했어요.', checking:'Teams 접근 권한을 확인하고 있어요.', not_connected:'Teams 연결을 확인해 주세요.', source_not_configured:'학교 일정 저장소가 아직 연결되지 않았어요. 개인 할 일은 사용할 수 있어요.', source_unavailable:'학교 일정을 가져오지 못해 Teams 표시를 중단했어요. 개인 할 일은 사용할 수 있어요.', verification_failed:'Teams 접근 권한을 확인하지 못해 표시를 중단했어요.', reauth_required:'Microsoft 계정으로 다시 로그인해 주세요.', account_not_allowed:'학교 소속 계정인지 확인해 주세요.'};
   const root = $('#app'), modal = $('#modal'), topbar = $('#topbar');
   const C = window.BetaCalendar;
   const S = {me: null, view: 'today', day: '', month: '', selected: '', today: null, items: [], upcoming: [], channels: [], prefs: null, busy: false, epoch: 0};
@@ -29,11 +32,13 @@
     else toast(error.message || '연결하지 못했어요. 실행 창이 열려 있는지 확인해 주세요.', true);
   }
   function clearPrivate() {
+    clearTimeout(idleTimer);
     S.epoch++; S.me = null; S.items = []; S.upcoming = []; S.today = null; S.channels = []; S.prefs = null; S.busy = false;
     detailItem = null; hiddenItems = []; selectedDates.clear();
     if (modal.open) modal.close(); modal.replaceChildren(); topbar.hidden = true; $('#account-name').textContent = '';
   }
   function loginScreen() {
+    if (SCHOOL) {root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC</p><h1>학교 일정과 할 일,<br>한눈에.</h1><p>학교 Microsoft 계정으로 로그인하세요.</p><a class="primary school-signin" href="/auth/login">Microsoft 학교 계정으로 로그인 →</a><p class="login-note">Microsoft 로그인 화면에서 인증해요. 이 서비스는 계정 비밀번호를 받지 않아요. 본인이 접근할 수 있는 Teams 일정만 표시하며, 외부 캘린더 등록과 알림은 아직 제공하지 않아요.</p><p><a href="/privacy">개인정보 안내</a></p><p class="error-message" id="login-error" role="alert">${location.search?.includes('login=failed') ? '로그인을 완료하지 못했어요. 학교 계정과 앱 권한을 확인하고 다시 시도해 주세요.' : ''}</p></div></section>`; return;}
     root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC · BETA</p><h1>오늘 해야 할 일,<br>한눈에.</h1><p class="muted">학교 로그인 없이 초대 코드로 먼저 써보세요.</p><form id="login-form"><label class="field"><span class="field-label">테스트 계정 초대 코드</span><input name="code" type="password" required minlength="16" maxlength="128" autocomplete="off" spellcheck="false" placeholder="실행 창에 표시된 코드를 입력하세요"></label><p class="error-message" id="login-error" role="alert"></p><button class="primary" type="submit">베타 시작하기 →</button></form><p class="login-note">Teams 공지는 예시 데이터입니다. 개인 할 일은 계정별로 서버에 저장됩니다. 같은 코드로 로그인하면 같은 계정이 열려요.</p></div></section>`;
   }
   async function load() {
@@ -46,7 +51,7 @@
       api('/api/channels'), api('/api/settings')
     ]);
     if (epoch !== S.epoch || !S.me) return;
-    Object.assign(S, {today, day: today.date, month, selected: S.selected || today.date, items: calendar.items, upcoming: upcoming.items, channels, prefs: settings.preferences});
+    Object.assign(S, {today, day: today.date, month, selected: S.selected || today.date, items: calendar.items, upcoming: upcoming.items, channels, prefs: settings.preferences, connection: settings.connection});
     render();
   }
   function row(e) {
@@ -54,6 +59,7 @@
   }
   function list(items, empty = '표시할 할 일이 없어요.') {return items.length ? items.map(row).join('') : `<div class="empty">${empty}</div>`;}
   function intro(title, subtitle) {
+    if (SCHOOL) return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions"><button class="secondary" data-action="refresh">새로고침</button><button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div><div class="beta-banner" role="status"><strong>학교 계정 연결</strong><span>${esc(connectionText[S.connection?.state] || connectionText.not_connected)}</span><a href="/auth/login">다시 로그인</a><button data-action="security">연결 및 보안</button></div>`;
     return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions"><button class="secondary" data-action="refresh">새로고침</button><button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div><div class="beta-banner"><strong>학교 로그인 전 베타</strong><span>Teams 일정은 예시예요. 직접 추가한 할 일은 저장돼요. 알림 발송과 실제 Teams 연결은 준비 중이에요.</span></div>`;
   }
   function render() {
@@ -62,7 +68,7 @@
     if (S.view === 'calendar') return renderCalendar();
     const all = [...S.today.teams, ...S.today.personal].filter(e => !e.cancelled), done = all.filter(e => e.completed).length;
     const upcoming = S.upcoming.filter(e => e.end_date > S.day && !e.completed && !e.cancelled).sort((a, b) => a.end_date.localeCompare(b.end_date) || (a.time || '').localeCompare(b.time || '')).slice(0, 5);
-    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${S.today.teams.length}</span></h2><span class="muted fine">예시 공지</span></div><div class="list">${list(S.today.teams, '오늘의 Teams 일정이 없어요.')}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${S.today.personal.length}</span></h2></div><div class="list">${list(S.today.personal, '오늘 할 일을 가볍게 적어보세요.')}</div><form class="quick-form" id="quick-form"><input name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">완료한 항목은 원래 위치에 남아요.</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? 'Teams 예시' : '개인')}</small></span></button>`).join('') : '<div class="empty">일주일 안에 다가오는 마감이 없어요.</div>'}</div></section><section class="card help-card"><h2>함께 시험해 보세요</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button><button class="secondary small" data-action="feedback">의견 남기기</button></div></section></aside></div>`;
+    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${S.today.teams.length}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${list(S.today.teams, '오늘의 Teams 일정이 없어요.')}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${S.today.personal.length}</span></h2></div><div class="list">${list(S.today.personal, '오늘 할 일을 가볍게 적어보세요.')}</div><form class="quick-form" id="quick-form"><input name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">완료한 항목은 원래 위치에 남아요.</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : '<div class="empty">일주일 안에 다가오는 마감이 없어요.</div>'}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
   }
   function renderCalendar() {
     const weeks = C.layoutRanges(S.items, S.month);
@@ -72,7 +78,7 @@
     }).join('');
     const selected = S.items.filter(e => e.start_date <= S.selected && e.end_date >= S.selected);
     const monthLabel = `${S.month.slice(0, 4)}년 ${Number(S.month.slice(5))}월`;
-    root.innerHTML = intro('캘린더', '기간이 있는 일정은 시작일부터 마감일까지 이어져요.') + `<section class="card calendar-card"><div class="calendar-toolbar"><h2>${monthLabel}</h2><div class="month-actions"><button class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button><button class="secondary small" data-action="this-month">이번 달</button><button class="icon-button" aria-label="다음 달" data-action="next-month">›</button></div></div><div class="calendar-legend"><span><i class="dot"></i>Teams 예시</span><span><i class="dot personal"></i>개인 할 일</span><span class="muted">날짜를 누르면 아래에 상세 목록이 보여요.</span></div><div class="calendar-grid"><div class="weekdays">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="weekday">${d}</div>`).join('')}</div>${gridHtml}</div></section><section class="card" style="margin-top:20px"><div class="card-head selected-heading"><h2>${esc(pretty(S.selected))}</h2><span class="muted fine">기간 전체 기준 · 오늘 표시는 선택한 날짜를 따릅니다</span></div><div class="date-detail">${list(selected, '이 날짜에는 표시할 일정이 없어요.')}</div></section>`;
+    root.innerHTML = intro('캘린더', '기간이 있는 일정은 시작일부터 마감일까지 이어져요.') + `<section class="card calendar-card"><div class="calendar-toolbar"><h2>${monthLabel}</h2><div class="month-actions"><button class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button><button class="secondary small" data-action="this-month">이번 달</button><button class="icon-button" aria-label="다음 달" data-action="next-month">›</button></div></div><div class="calendar-legend"><span><i class="dot"></i>${SCHOOL ? 'Teams' : 'Teams 예시'}</span><span><i class="dot personal"></i>개인 할 일</span><span class="muted">날짜를 누르면 아래에 상세 목록이 보여요.</span></div><div class="calendar-grid"><div class="weekdays">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="weekday">${d}</div>`).join('')}</div>${gridHtml}</div></section><section class="card" style="margin-top:20px"><div class="card-head selected-heading"><h2>${esc(pretty(S.selected))}</h2><span class="muted fine">기간 전체 기준 · 오늘 표시는 선택한 날짜를 따릅니다</span></div><div class="date-detail">${list(selected, '이 날짜에는 표시할 일정이 없어요.')}</div></section>`;
   }
   function openDialog(title, content, footer = '') {
     if (modal.open) modal.close();
@@ -83,7 +89,7 @@
   let detailItem = null;
   function detail(e) {
     detailItem = e;
-    openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 예시 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>'}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : ''}`);
+    openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + sourceLink(e.source_url) : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : ''}`);
   }
   function taskForm(e = null) {
     detailItem = e;
@@ -129,10 +135,10 @@
   }
   let hiddenItems = [];
   async function hidden() {
-    const epoch = S.epoch, result = await api('/api/beta/hidden');
+    const epoch = S.epoch, result = await api(SCHOOL ? `/api/hidden?start=${S.day.slice(0,4)}-01-01&end=${S.day.slice(0,4)}-12-31` : '/api/beta/hidden');
     if (epoch !== S.epoch) return;
     hiddenItems = result.items;
-    openDialog('숨긴 일정', `<p class="muted">개별적으로 숨긴 일정이에요. 복원해도 꺼둔 채널·종류 설정은 유지돼요.</p><div class="hidden-list">${hiddenItems.length ? hiddenItems.map((e, i) => `<div class="hidden-item"><div><strong>${esc(e.title)}</strong><p class="fine muted">${esc(period(e))} · ${esc(e.source === 'teams' ? 'Teams 예시' : '개인')}</p></div><button class="secondary small" data-restore="${i}">복원</button></div>`).join('') : '<div class="empty">숨긴 일정이 없어요.</div>'}</div>`);
+    openDialog('숨긴 일정', `<p class="muted">개별적으로 숨긴 일정이에요. 복원해도 꺼둔 채널·종류 설정은 유지돼요.</p><div class="hidden-list">${hiddenItems.length ? hiddenItems.map((e, i) => `<div class="hidden-item"><div><strong>${esc(e.title)}</strong><p class="fine muted">${esc(period(e))} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</p></div><button class="secondary small" data-restore="${i}">복원</button></div>`).join('') : '<div class="empty">숨긴 일정이 없어요.</div>'}</div>`);
   }
   function feedback() {
     openDialog('베타 의견 남기기', `<form id="feedback-form"><p class="muted">불편한 점이나 원하는 기능을 적어주세요. 이 베타 서버에 저장되며, 운영자가 나중에 확인할 수 있어요.</p><label class="field"><span class="field-label">의견</span><textarea name="message" rows="6" required maxlength="4000" placeholder="어느 화면에서 무엇이 불편했나요?"></textarea></label><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">저장</button></div></form>`);
@@ -152,6 +158,8 @@
       if (action === 'filters') return filters();
       if (action === 'hidden') return await hidden();
       if (action === 'feedback') return feedback();
+      if (action === 'security') return openDialog('연결 및 보안', `<p>${esc(connectionText[S.connection?.state] || connectionText.not_connected)}</p><p>Teams 권한은 최대 60초 동안만 재사용해요. 활동이 없으면 15분 뒤 로그아웃되며, 토큰이 만료되면 다시 로그인해야 해요.</p><p>외부 캘린더 등록과 알림 전송은 현재 제공하지 않아요.</p><p><a href="/privacy">개인정보 안내</a></p>`, '<button class="danger" data-action="logout-all">모든 기기 로그아웃</button><button class="secondary" data-action="close">닫기</button>');
+      if (action === 'logout-all') {await api('/auth/logout-all', {method:'POST'}); clearPrivate(); loginScreen(); return;}
       if (action === 'edit-detail') return taskForm(detailItem);
       if (action === 'hide-detail') return mutate(() => setState(detailItem, {hidden: true}), '숨겼어요. 숨긴 일정에서 복원할 수 있어요.');
       if (action === 'delete-detail') {
@@ -204,6 +212,7 @@
     if (form.id === 'filters-form') {
       const channels = Object.fromEntries([...form.querySelectorAll('[name=channel]')].map(el => [el.value, el.checked]));
       const disabled_kinds = [...form.querySelectorAll('[name=kind]')].filter(el => !el.checked).map(el => el.value);
+      if (SCHOOL) return mutate(async () => {for (const [id, enabled] of Object.entries(channels)) await api(`/api/channels/${encodeURIComponent(id)}/preference`, {method:'PUT',body:{enabled}}); await api('/api/settings', {method:'PUT',body:{...S.prefs,disabled_kinds}});}, '표시 설정을 저장했어요.');
       return mutate(() => api('/api/beta/display-settings', {method: 'PUT', body: {channels, disabled_kinds}}), '표시 설정을 저장했어요.');
     }
     if (form.id === 'feedback-form') {
@@ -214,12 +223,26 @@
   async function boot() {
     if (location.protocol === 'file:') {root.innerHTML = '<section class="login-wrap"><div class="login-card"><h1>실행 파일로 시작해 주세요</h1><p>압축을 푼 뒤 start_beta.cmd를 실행하면 브라우저가 열려요. HTML 파일만 열면 데이터를 저장할 서버가 실행되지 않아요.</p></div></section>'; return;}
     try {
-      await api('/api/beta/info');
+      await api(SCHOOL ? '/api/service' : '/api/beta/info');
       try {S.me = await api('/api/me');} catch (error) {if (error.status === 401) {loginScreen(); return;} throw error;}
       await load();
     } catch (error) {
       clearPrivate(); root.innerHTML = `<section class="login-wrap"><div class="login-card"><h1>베타를 연결하지 못했어요</h1><p>${esc(error.message)}</p><p class="muted">실행 창을 확인한 뒤 브라우저를 새로고침해 주세요.</p></div></section>`;
     }
+  }
+  function sourceLink(value) {
+    if (!SCHOOL || !value) return '';
+    try {const url = new URL(value); if (url.protocol !== 'https:' || url.hostname !== 'teams.microsoft.com' || !url.pathname.startsWith('/l/message/')) return ''; return `<p><a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer">Teams 원문 보기 →</a></p>`;} catch {return '';}
+  }
+  function resetIdle() {
+    if (!SCHOOL) return;
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(async () => {if (S.me) {try {await api('/auth/logout',{method:'POST'});} catch {} clearPrivate(); loginScreen();}}, 15 * 60 * 1000);
+  }
+  if (SCHOOL) {
+    for (const type of ['pointerdown','keydown','touchstart']) document.addEventListener(type,resetIdle,{passive:true});
+    document.addEventListener('visibilitychange', () => {if (document.hidden) {clearPrivate(); root.innerHTML = '<div class="loading">화면을 다시 열면 계정을 확인해요.</div>';} else {boot(); resetIdle();}});
+    resetIdle();
   }
   boot();
 })();

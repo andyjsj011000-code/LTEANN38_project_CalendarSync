@@ -4,7 +4,7 @@ from pathlib import Path
 import zipfile
 
 
-def build():
+def build(release_directory=None):
     beta = Path(__file__).resolve().parent
     repo = beta.parent
     source = repo / "web_service"
@@ -13,8 +13,8 @@ def build():
     files.update({"web_service/" + name: source / name for name in allowed_web})
     files.update({"web_service/static/" + name: source / "static" / name for name in ("index.html", "beta.css", "beta-calendar.js", "beta.js")})
     files["LICENSE"] = repo / "LICENSE"
-    release_dir = beta / "releases"
-    release_dir.mkdir(exist_ok=True)
+    release_dir = Path(release_directory) if release_directory is not None else beta / "releases"
+    release_dir.mkdir(parents=True, exist_ok=True)
     target = release_dir / "CalendarSync_Beta_0.1.1.zip"
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name, path in sorted(files.items()):

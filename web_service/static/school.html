@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko" data-mode="school">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#315bd4">
+  <title>CalendarSync</title>
+  <link rel="stylesheet" href="/assets/beta.css">
+  <script defer src="/assets/beta-calendar.js"></script>
+  <script defer src="/assets/beta.js"></script>
+</head>
+<body>
+  <header id="topbar" class="topbar" hidden><div class="topbar-inner">
+    <button class="brand" data-action="today" aria-label="오늘 할 일로 이동"><span class="brand-icon">C</span><span>CalendarSync <small>SCHOOL</small></span></button>
+    <nav aria-label="주요 메뉴"><button data-action="today" id="nav-today">오늘 할 일</button><button data-action="calendar" id="nav-calendar">캘린더</button></nav>
+    <div class="account"><span id="account-name"></span><button class="text-button" data-action="logout">로그아웃</button></div>
+  </div></header>
+  <main id="app" class="app"><div class="loading" role="status">일정을 불러오는 중이에요…</div></main>
+  <dialog id="modal" aria-labelledby="dialog-title"></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <noscript>JavaScript를 켜 주세요.</noscript>
+  <footer>CalendarSync · 학교 일정과 개인 할 일 · <a href="/privacy">개인정보 안내</a></footer>
+</body>
+</html>

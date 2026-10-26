@@ -224,3 +224,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local security checks (never publish databases, tokens or temporary files)
+.test-school-*/
+write-check.tmp

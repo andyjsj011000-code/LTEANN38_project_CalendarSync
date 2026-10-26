@@ -14,9 +14,9 @@ def test_release_is_clean_and_extracted_launcher_reopens_persistent_data(tmp_pat
     spec = importlib.util.spec_from_file_location('beta_build_release', repo / 'beta' / 'build_release.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    archive = module.build()
+    archive = module.build(tmp_path / "releases")
     original_bytes = archive.read_bytes()
-    assert module.build().read_bytes() == original_bytes
+    assert module.build(tmp_path / "releases").read_bytes() == original_bytes
     extracted = tmp_path / 'extracted'
     with zipfile.ZipFile(archive) as package:
         assert len(package.namelist()) == 17

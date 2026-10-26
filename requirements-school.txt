@@ -1,0 +1,3 @@
+# Install in a dedicated web virtualenv, never over the legacy bot environment.
+-r requirements-web.txt
+oracledb>=3,<4

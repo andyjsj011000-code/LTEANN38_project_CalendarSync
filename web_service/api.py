@@ -15,12 +15,14 @@ FLOW_COOKIE = "calendarsync_login"
 KST = timezone(timedelta(hours=9))
 
 
-def create_app(settings=None, database=None, identity=None, frontend_directory=None):
+def create_app(settings=None, database=None, identity=None, frontend_directory=None, integration=None, frontend_entry="index.html"):
     settings = settings or Settings.from_env()
+    session_cookie = "__Host-calendarsync_session" if integration and settings.secure_cookies else SESSION_COOKIE
+    flow_cookie = "__Host-calendarsync_login" if integration and settings.secure_cookies else FLOW_COOKIE
     db = database or Database(settings.database_path, settings.data_key)
     db.initialize()
     provider = identity or MicrosoftIdentity(settings)
-    app = FastAPI(title="CalendarSync Web Foundation", version="0.1.0")
+    app = FastAPI(title="CalendarSync", version="0.2.0", docs_url=None if integration else "/docs", redoc_url=None if integration else "/redoc", openapi_url=None if integration else "/openapi.json")
     app.state.database = db
 
     @app.middleware("http")
@@ -40,7 +42,7 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
         return JSONResponse({"detail": "Item changed on another device; reload before editing"}, status_code=409)
 
     def current_session(request: Request):
-        session = db.session(request.cookies.get(SESSION_COOKIE))
+        session = db.session(request.cookies.get(session_cookie))
         if not session or (settings.tenant_id and session["tenant_id"] != settings.tenant_id):
             raise HTTPException(401, "Sign in with your school account")
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
@@ -50,6 +52,8 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
             supplied = request.headers.get("x-csrf-token", "")
             if not hmac.compare_digest(supplied.encode("utf-8"), session["csrf_token"].encode("ascii")):
                 raise HTTPException(403, "A valid CSRF token is required")
+        if integration:
+            integration.check_request(session, request)
         return session
 
     app.state.require_session = current_session
@@ -69,14 +73,16 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
     @app.get("/")
     def index():
         if frontend_directory is not None:
-            return FileResponse(frontend_directory / "index.html")
+            return FileResponse(frontend_directory / frontend_entry)
         return {"service": "CalendarSync Web Foundation", "sign_in": "/auth/login", "api_docs": "/docs", "ui_connected": False}
 
     if frontend_directory is not None:
         app.mount("/assets", StaticFiles(directory=frontend_directory), name="web-assets")
 
     @app.get("/auth/login")
-    def login():
+    def login(request: Request):
+        if integration:
+            integration.limit_login(request)
         try:
             flow = provider.begin()
         except Exception:
@@ -84,41 +90,50 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
             raise HTTPException(503, "School sign-in is not available yet") from None
         raw = db.store_flow(flow)
         response = RedirectResponse(flow["auth_uri"], status_code=303)
-        cookie(response, FLOW_COOKIE, raw, 600)
+        cookie(response, flow_cookie, raw, 600)
         return response
 
     @app.get("/auth/callback")
     def callback(request: Request):
+        raw = None
         try:
+            if integration:
+                integration.limit_login(request)
             if len(request.url.query) > 16000:
                 raise ValueError("Invalid authorization response")
             query = dict(request.query_params)
             if any(len(request.query_params.getlist(k)) != 1 for k in query):
                 raise ValueError("Duplicate authorization fields")
-            flow = db.consume_flow(request.cookies.get(FLOW_COOKIE))
+            flow = db.consume_flow(request.cookies.get(flow_cookie))
             claims = provider.finish(flow, query)
             tenant, oid, profile = validate_identity(claims, settings, db.clock())
+            if integration:
+                integration.validate_sign_in(claims)
             user_id = db.save_user(tenant, oid, profile)
-            old_session = request.cookies.get(SESSION_COOKIE)
+            old_session = request.cookies.get(session_cookie)
             if old_session:
                 db.revoke_session(old_session)
             raw = db.issue_session(user_id, settings.session_seconds)
+            if integration:
+                integration.bind_sign_in(raw, user_id, claims)
         except Unavailable:
             return JSONResponse({"detail": "School sign-in is not available yet"}, status_code=503)
         except Exception:
-            response = JSONResponse({"detail": "Sign-in failed; start again"}, status_code=400)
-            response.delete_cookie(FLOW_COOKIE, path="/")
+            if raw:
+                db.revoke_session(raw)
+            response = RedirectResponse("/?login=failed", status_code=303) if integration else JSONResponse({"detail": "Sign-in failed; start again"}, status_code=400)
+            response.delete_cookie(flow_cookie, path="/")
             return response
         response = RedirectResponse("/", status_code=303)
-        response.delete_cookie(FLOW_COOKIE, path="/")
-        cookie(response, SESSION_COOKIE, raw, settings.session_seconds)
+        response.delete_cookie(flow_cookie, path="/")
+        cookie(response, session_cookie, raw, settings.session_seconds)
         return response
 
     @app.post("/auth/logout", status_code=204)
     def logout(request: Request, session=Depends(current_session)):
-        db.revoke_session(request.cookies[SESSION_COOKIE])
+        db.revoke_session(request.cookies[session_cookie])
         response = Response(status_code=204)
-        response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(session_cookie, path="/")
         return response
 
     @app.get("/api/me")
@@ -136,7 +151,7 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
 
     @app.get("/api/settings")
     def preferences(session=Depends(current_session)):
-        return {"preferences": db.preferences(session["user_id"]), "capabilities": {"push_delivery": False, "teams_chat_delivery": False, "calendar_export": False, "live_teams_ingestion": False}}
+        return {"preferences": db.preferences(session["user_id"]), "capabilities": {"push_delivery": False, "teams_chat_delivery": False, "calendar_export": False, "live_teams_ingestion": bool(integration and integration.source.configured)}, "connection": integration.status(session) if integration else None}
 
     @app.put("/api/settings")
     def save_preferences(body: Preferences, session=Depends(current_session)):
