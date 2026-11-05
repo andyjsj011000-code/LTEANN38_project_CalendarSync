@@ -1,8 +1,9 @@
 """Explicit PostgreSQL beta factory and read-only deployment preflight.
 
-This module does not provision/migrate a database or change the default server
-entry point. Configuration checks do not connect or import a PostgreSQL driver.
-The database check only validates an already provisioned isolated schema.
+The default server entry point is unchanged. Configuration checks do not connect
+or import a PostgreSQL driver. The database check is read-only. Only the separate
+app factory's explicit bootstrap flag can create a previously absent schema;
+it never migrates or overwrites an existing one.
 """
 import argparse
 from dataclasses import dataclass,field
@@ -22,11 +23,12 @@ class HostedConfig:
     ai_key: str=field(repr=False)
     model: str='gpt-4o-mini'
     images: bool=True
+    bootstrap_new_schema: bool=False
 
     def describe(self):
         return {'storage_backend':'postgresql-experimental','callback_url':self.settings.callback_url,
                 'auth_configured':self.settings.auth_configured,'ai_configured':bool(self.ai_key),
-                'ingestion_mode':'direct','automatic_schema_changes':False,
+                'ingestion_mode':'direct','automatic_schema_changes':self.bootstrap_new_schema,
                 'connection':self.connection.describe()}
 
 
@@ -37,7 +39,7 @@ def configuration(environ=None):
     if env.get('WEB_INGESTION_MODE','direct')!='direct':
         raise ValueError('The separate beta factory supports direct ingestion only')
     settings=Settings(database_path=Path('unused-postgres-storage'),
-        data_key=env.get('WEB_DATA_KEY',''),origin=env.get('WEB_ORIGIN',''),
+        data_key=env.get('WEB_DATA_KEY',''),origin=env.get('WEB_ORIGIN') or env.get('RENDER_EXTERNAL_URL',''),
         tenant_id=env.get('WEB_ENTRA_TENANT_ID','').lower(),
         client_id=env.get('WEB_ENTRA_CLIENT_ID','').lower(),
         client_secret=env.get('WEB_ENTRA_CLIENT_SECRET',''),
@@ -55,12 +57,20 @@ def configuration(environ=None):
         raise ValueError('A separate beta AI credential is required for direct ingestion')
     if env.get('WEB_AI_IMAGES_ENABLED','1') not in {'0','1'}:
         raise ValueError('Invalid beta image ingestion setting')
+    if env.get('WEB_BOOTSTRAP_NEW_SCHEMA','0') not in {'0','1'}:
+        raise ValueError('Invalid beta schema bootstrap setting')
     return HostedConfig(settings,factory,ai_key,env.get('WEB_LLM_MODEL','gpt-4o-mini'),
-                        env.get('WEB_AI_IMAGES_ENABLED','1')=='1')
+                        env.get('WEB_AI_IMAGES_ENABLED','1')=='1',env.get('WEB_BOOTSTRAP_NEW_SCHEMA','0')=='1')
 
 
 def create_hosted_app(environ=None,*,identity=None,graph=None,source=None,sender=None,worker=True):
     config=configuration(environ)
+    if config.bootstrap_new_schema:
+        from .postgres_bootstrap import schema_exists,apply_bootstrap
+        # Explicit opt-in for the confirmed new beta DB. Existing namespaces
+        # are validated below and never migrated or overwritten here.
+        if not schema_exists(config.connection):
+            apply_bootstrap(config.connection)
     from .direct_source import TeamsGraph,DirectSource,AIExtractor
     from .server import create_test_server
     graph=graph if graph is not None else TeamsGraph()

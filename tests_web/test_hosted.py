@@ -42,6 +42,7 @@ def test_config_preflight_does_not_import_driver_or_reveal_secrets(config_env,mo
     {'WEB_OPENAI_API_KEY':''}, {'WEB_DATABASE_SCHEMA':'public'},
     {'WEB_DATABASE_SCHEMA':'information_schema'}, {'WEB_DATABASE_SCHEMA':'other;DROP'},
     {'WEB_AI_IMAGES_ENABLED':'maybe'}, {'WEB_DATABASE_SSLMODE':'disable'},
+    {'WEB_BOOTSTRAP_NEW_SCHEMA':'maybe'},
 ])
 def test_unready_or_unsafe_hosted_configuration_is_rejected(config_env,change):
     with pytest.raises(ValueError): hosted.configuration({**config_env,**change})
@@ -67,3 +68,38 @@ def test_explicit_hosted_factory_passes_separate_pg_adapter_without_notification
     assert db.connect.describe()['schema']=='calendarsync_web'
     assert (provider,actual_graph,actual_source,actual_sender)==(identity,graph,source,sender)
     assert kwargs=={'worker':False}
+
+
+def test_render_origin_fallback_is_explicit_https_and_keeps_operator_override(config_env):
+    env={**config_env,'WEB_ORIGIN':'','RENDER_EXTERNAL_URL':'https://assigned.onrender.com'}
+    assert hosted.configuration(env).settings.origin=='https://assigned.onrender.com'
+    assert hosted.configuration({**env,'WEB_ORIGIN':'https://custom.example.test'}).settings.origin=='https://custom.example.test'
+    with pytest.raises(ValueError):
+        hosted.configuration({**env,'RENDER_EXTERNAL_URL':'http://untrusted.example.test'})
+
+
+@pytest.mark.parametrize('exists',[False,True])
+def test_schema_creation_requires_opt_in_and_never_applies_to_existing_namespace(config_env,monkeypatch,exists):
+    import web_service.postgres_bootstrap as bootstrap
+    import web_service.server as server
+    applied=[]
+    monkeypatch.setattr(bootstrap,'schema_exists',lambda factory:exists)
+    monkeypatch.setattr(bootstrap,'apply_bootstrap',lambda factory:applied.append(factory.schema))
+    monkeypatch.setattr(server,'create_test_server',lambda *args,**kwargs:'app')
+    hosted.create_hosted_app(config_env,worker=False)
+    assert applied==[]
+    configured={**config_env,'WEB_BOOTSTRAP_NEW_SCHEMA':'1'}
+    assert hosted.configuration(configured).describe()['automatic_schema_changes'] is True
+    assert hosted.create_hosted_app(configured,worker=False)=='app'
+    assert applied==([] if exists else ['calendarsync_web'])
+
+
+def test_failed_schema_creation_does_not_launch_or_fall_back_to_sqlite(config_env,monkeypatch):
+    import web_service.postgres_bootstrap as bootstrap
+    import web_service.server as server
+    def fail(factory): raise bootstrap.BootstrapRejected('Rejected test bootstrap')
+    monkeypatch.setattr(bootstrap,'schema_exists',lambda factory:False)
+    monkeypatch.setattr(bootstrap,'apply_bootstrap',fail)
+    monkeypatch.setattr(server,'create_test_server',lambda *args,**kwargs:pytest.fail('A failed bootstrap must not start the app'))
+    with pytest.raises(bootstrap.BootstrapRejected):
+        hosted.create_hosted_app({**config_env,'WEB_BOOTSTRAP_NEW_SCHEMA':'1'},worker=False)

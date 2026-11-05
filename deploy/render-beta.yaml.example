@@ -19,6 +19,10 @@ services:
         value: direct
       - key: WEB_DATABASE_SCHEMA
         value: calendarsync_web
+      # Explicit first-start creation for the confirmed empty beta database.
+      # Existing schemas are validated, never migrated or overwritten.
+      - key: WEB_BOOTSTRAP_NEW_SCHEMA
+        value: '1'
       # Explicit TLS for Render's private self-signed internal connection.
       - key: WEB_DATABASE_SSLMODE
         value: require

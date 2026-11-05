@@ -17,7 +17,19 @@ results do not establish real Render TLS, live school sign-in, production
 migrations, large-group throughput or external delivery. No actual Render or
 Oracle resources were changed. Web source-package tests also passed in CI.
 
-Last completed local verification (2026-11-05): the restricted runner completed with
+New first-start work: the user confirmed the Render database is new, beta-only
+and unused by another service. `postgres_bootstrap.py` prepares a creation-only
+transaction for an absent dedicated schema (35 tables, 4 indexes). The explicit
+`WEB_BOOTSTRAP_NEW_SCHEMA=1` hosted option creates only an absent namespace and
+otherwise leaves existing objects untouched while the adapter validates them.
+The default is off. Config/schema preflight remains read-only. New bootstrap and
+worker-recovery tests are awaiting CI; no real Render DDL was executed.
+
+The hosted origin can use Render's own RENDER_EXTERNAL_URL when WEB_ORIGIN is
+unset. The web worker now contains audit failures so temporary DB outages do
+not terminate its retry loop. This preserves the existing polling cadence.
+
+Historical local verification (2026-11-05): the restricted runner completed with
 398 passed and 13 skipped. The skips require a real disposable PostgreSQL DB.
 Packaging tests were explicitly excluded. Python-level external connection
 and child-process restrictions reported zero denied operations; this does

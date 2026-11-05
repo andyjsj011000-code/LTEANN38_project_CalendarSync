@@ -80,6 +80,7 @@ jobs:
           mkdir -p test-results
           for module in \
             test_postgres_auth_integration \
+            test_postgres_bootstrap_integration \
             test_postgres_database_integration \
             test_postgres_notification_integration \
             test_postgres_server_integration \
@@ -94,6 +95,7 @@ jobs:
 
           modules = (
               'test_postgres_auth_integration',
+              'test_postgres_bootstrap_integration',
               'test_postgres_database_integration',
               'test_postgres_notification_integration',
               'test_postgres_server_integration',

@@ -81,6 +81,7 @@ REQUIRED_FILES = (
 OPTIONAL_FILES = (
     'tools/build_web_release.py',
     'web_service/hosted.py',
+    'web_service/postgres_bootstrap.py',
     'web_service/postgres_connection.py',
     'web_service/static/icon-192.png',
     'web_service/static/icon-512.png',

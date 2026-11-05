@@ -48,15 +48,23 @@ Render의 내부 연결은 자체 서명 인증서를 사용하므로 예시에 
 
 1. GitHub의 임시 PostgreSQL 18 검사가 실제로 실행되고 통과했는지 확인합니다. 테스트는
    Render DB나 학교 계정 비밀값을 사용하지 않습니다.
-2. 실제 DB의 기존 테이블과 사용 여부를 확인한 뒤 전용 `calendarsync_web` 스키마 생성
-   계획을 검토해야 합니다. `postgresql_schema_draft.sql`은 초안이며 자동 실행하지 않습니다.
+2. 사용자가 `calendarsync-beta-test`를 새 베타 전용 DB로 확인했습니다. 전용
+   `calendarsync_web` 공간에 테이블 35개·인덱스 4개를 한 트랜잭션으로 처음 생성하는
+   `postgres_bootstrap` 절차를 준비했습니다. `--plan`은 접속 없이 계획을 출력하고
+   `--apply`는 이미 존재하는 공간이면 변경 없이 거절합니다.
 3. `web_service.hosted`의 `--check-config`는 설정 형식만 확인하고 DB에 접속하지 않습니다.
    `--check-database`는 이미 준비된 스키마를 조회·검증하며 생성·변경·마이그레이션을 하지 않습니다.
 4. 이후 학교 테스트 계정으로 로그인, 공지 수집, 브라우저 알림을 실제로 확인해야 합니다.
 
 기존 기본 서버의 Render 실행 차단은 유지합니다. 새 `web_service.hosted:create_hosted_app`은
-위 설정과 사전 준비된 스키마를 명시적으로 사용하는 별도 베타 진입점입니다. 스키마가
-없거나 맞지 않으면 실행이 실패하며 SQLite로 자동 전환하지 않습니다.
+별도 베타 진입점입니다. `WEB_BOOTSTRAP_NEW_SCHEMA=1`을 명시한 경우에만 공간이 없으면
+처음 생성합니다. 이미 있으면 읽기 검증만 하고 테이블을 자동 수정·초기화하지 않습니다.
+이 설정의 기본값은 0이며, 예시의 1은 이번에 확인된 새 베타 DB를 위한 선택입니다.
+스키마가 맞지 않으면 실행이 실패하며 SQLite로 자동 전환하지 않습니다.
+
+`WEB_ORIGIN`을 비워두면 Render의 `RENDER_EXTERNAL_URL`을 사용합니다. 서비스가 생성된
+뒤 실제 주소에 `/auth/callback`을 붙여 학교 앱의 웹 리디렉션 URI로 추가해야 합니다.
+공식 설명: https://render.com/docs/environment-variables
 
 ## 참고 문서
 

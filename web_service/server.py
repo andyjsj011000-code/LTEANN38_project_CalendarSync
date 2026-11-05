@@ -184,7 +184,12 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
                     await asyncio.to_thread(integration.tick)
                     if notification_runtime is not None:
                         await asyncio.to_thread(notification_runtime.tick)
-                except Exception: db.audit('worker_failed','worker')
+                except Exception:
+                    try: db.audit('worker_failed','worker')
+                    except Exception:
+                        # A database outage can also prevent the audit write.
+                        # Keep the retry loop alive without logging private errors.
+                        pass
                 try: await asyncio.wait_for(stop.wait(),timeout=60)
                 except TimeoutError: pass
         task=asyncio.create_task(loop()) if worker else None
