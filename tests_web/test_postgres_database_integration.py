@@ -6,17 +6,21 @@ never target a student, shared, or production database. Local shim results do
 not substitute for running these cases on PostgreSQL.
 """
 import os
+import ipaddress
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 from cryptography.fernet import Fernet
 
 from web_service.postgres_database import PostgresDatabase
+from web_service.postgres_connection import PostgresConnectionFactory
 from web_service.storage import Missing, digest
 
 
@@ -66,7 +70,7 @@ def postgres_database():
             raw, _ = repo.add_connection(session, user, 'test-token-' + name, 3600,
                                           'test-cache-' + name, background=True)
             users[name], devices[name] = user, repo.device(digest(raw))
-        yield SimpleNamespace(repo=repo, connect=connect, users=users,
+        yield SimpleNamespace(repo=repo, connect=connect, schema=schema, users=users,
                               devices=devices, now=now)
     finally:
         if created:
@@ -84,6 +88,53 @@ def source(title):
 
 
 CHANNELS = [{'id': 'class', 'name': 'Class', 'team_id': 'team'}]
+
+
+def test_native_connection_factory_scopes_transactions_and_rolls_back(postgres_database):
+    p = postgres_database
+    # CI's explicitly disposable loopback server has no TLS. Never lower the
+    # factory's remote TLS policy or put the DSN into fixture metadata/repr.
+    host = urlsplit(os.environ['CALENDARSYNC_DISPOSABLE_POSTGRES_DSN']).hostname
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == 'localhost'
+    options = {'sslmode': 'disable'} if loopback else {}
+    connect = PostgresConnectionFactory(
+        os.environ['CALENDARSYNC_DISPOSABLE_POSTGRES_DSN'], p.schema,
+        statement_timeout_ms=17000, lock_timeout_ms=6000, **options)
+
+    with connect() as connection:
+        settings = connection.execute('''SELECT current_schema(),
+            current_setting('statement_timeout')::interval,
+            current_setting('lock_timeout')::interval''').fetchone()
+        assert isinstance(settings, tuple)
+        assert settings == (p.schema, timedelta(seconds=17), timedelta(seconds=6))
+        connection.execute('''CREATE TABLE connection_factory_probe (
+            id INTEGER PRIMARY KEY,payload TEXT NOT NULL)''')
+        connection.execute('INSERT INTO connection_factory_probe VALUES(%s,%s)',
+                           (1, 'committed'))
+
+    with pytest.raises(Missing):
+        with connect() as connection:
+            connection.execute('INSERT INTO connection_factory_probe VALUES(%s,%s)',
+                               (2, 'must-roll-back'))
+            raise Missing()
+    with connect() as connection:
+        assert connection.execute('''SELECT id,payload FROM connection_factory_probe
+            ORDER BY id''').fetchall() == [(1, 'committed')]
+        connection.execute('INSERT INTO connection_factory_probe VALUES(%s,%s)',
+                           (3, 'committed-after-rollback'))
+
+    # A native driver error is redacted and also rolls its transaction back.
+    with pytest.raises(RuntimeError, match='connection or transaction failed'):
+        with connect() as connection:
+            connection.execute('INSERT INTO connection_factory_probe VALUES(%s,%s)',
+                               (1, 'duplicate-must-not-replace'))
+    with p.connect() as connection:
+        assert connection.execute('''SELECT id,payload FROM connection_factory_probe
+            ORDER BY id''').fetchall() == [
+                (1, 'committed'), (3, 'committed-after-rollback')]
 
 
 def test_facade_initialize_validates_without_resetting_existing_data(postgres_database):
