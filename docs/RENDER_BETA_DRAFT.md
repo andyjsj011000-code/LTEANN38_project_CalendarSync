@@ -1,0 +1,60 @@
+# Render 베타 배포 설정 초안
+
+이 문서는 검토용입니다. 실제 Render 서비스·DB를 변경하거나 배포하지 않았습니다.
+현재 실행 결과와 미완료 항목은 `BETA_PREPARATION_STATUS_KO.md`를 함께 확인합니다.
+
+## 준비한 설정
+
+새 웹서비스 이름은 `calendarsync-beta`, 브랜치는 개인 fork의 `oracle`, 지역은
+이미 만든 DB와 같은 Singapore를 기준으로 했습니다. 예시는 무료 웹서비스 하나만
+정의하며 DB·도메인·유료 리소스를 새로 만들지 않습니다. 자동 배포는 끈 상태입니다.
+기존 Oracle 데몬, systemd 파일, 기존 Render 서비스에는 적용하지 않습니다.
+
+`deploy/render-beta.yaml.example`은 비활성 예시 파일입니다. 저장소에 올려도 이 파일
+자체가 Blueprint 배포를 시작하지 않습니다. 실제 서비스 생성은 별도 작업입니다.
+
+| 항목 | 값 |
+| --- | --- |
+| Build Command | `pip install -r requirements-postgres-experimental.txt` |
+| Start Command | `python -m uvicorn web_service.hosted:create_hosted_app --factory --host 0.0.0.0 --port $PORT --workers 1 --no-access-log` |
+| Health Check | `/health` |
+| 수집 방식 | 기존 5분 반복 수집을 기준으로 한 direct 모드 |
+| 자동 배포 | Off |
+
+## 환경변수
+
+`deploy/render-beta.env.example`은 항목 이름만 담았습니다. 실제 비밀값을 파일·채팅·GitHub에
+넣지 않고 새 서비스의 Environment 화면에 입력해야 합니다. `WEB_DATA_KEY`와 알림 키는
+재배포 때 새로 만들지 않고 유지해야 기존 암호화 데이터와 기기 연결을 사용할 수 있습니다.
+
+- `DATABASE_URL`: 새 서비스와 DB가 같은 지역일 때 Render DB의 Internal Database URL.
+- `WEB_ORIGIN`: 새 웹서비스에 실제로 부여된 `https://…onrender.com` 주소. 끝에 `/`를 넣지 않습니다.
+- `WEB_ENTRA_*`: 사용하기로 한 학교 앱 등록의 테넌트·앱 ID·유효한 비밀값.
+- `WEB_OPENAI_API_KEY`: 베타 공지 분석에 사용할 키.
+- Microsoft 앱의 웹 리디렉션 URI에는 실제 `WEB_ORIGIN` 뒤에 `/auth/callback`을 붙입니다.
+- 브라우저 알림을 사용할 때는 `WEB_VAPID_PRIVATE_KEY`·`WEB_VAPID_SUBJECT`도 별도로 설정합니다.
+
+Render의 내부 연결은 자체 서명 인증서를 사용하므로 예시에 TLS `require`를 명시했습니다.
+코드는 TLS 검증 실패 뒤 암호화 설정을 자동으로 낮춰 재접속하지 않습니다. 외부 접속에는
+인증서·CA 구성을 검토하고 기본 `verify-full`을 사용하거나 접속 정책을 명시적으로 결정합니다.
+이번 작업에서는 네트워크·접속 허용 범위·인증서 설정을 실제로 변경하지 않았습니다.
+
+## DB를 변경하기 전에
+
+1. GitHub의 임시 PostgreSQL 18 검사가 실제로 실행되고 통과했는지 확인합니다. 테스트는
+   Render DB나 학교 계정 비밀값을 사용하지 않습니다.
+2. 실제 DB의 기존 테이블과 사용 여부를 확인한 뒤 전용 `calendarsync_web` 스키마 생성
+   계획을 검토해야 합니다. `postgresql_schema_draft.sql`은 초안이며 자동 실행하지 않습니다.
+3. `web_service.hosted`의 `--check-config`는 설정 형식만 확인하고 DB에 접속하지 않습니다.
+   `--check-database`는 이미 준비된 스키마를 조회·검증하며 생성·변경·마이그레이션을 하지 않습니다.
+4. 이후 학교 테스트 계정으로 로그인, 공지 수집, 브라우저 알림을 실제로 확인해야 합니다.
+
+기존 기본 서버의 Render 실행 차단은 유지합니다. 새 `web_service.hosted:create_hosted_app`은
+위 설정과 사전 준비된 스키마를 명시적으로 사용하는 별도 베타 진입점입니다. 스키마가
+없거나 맞지 않으면 실행이 실패하며 SQLite로 자동 전환하지 않습니다.
+
+## 참고 문서
+
+- https://render.com/docs/blueprint-spec
+- https://render.com/docs/postgresql-creating-connecting
+- https://docs.github.com/en/actions/tutorials/use-containerized-services/create-postgresql-service-containers

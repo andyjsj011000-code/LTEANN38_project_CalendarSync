@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse,JSONResponse
 from pydantic import Field,model_validator
 from .api import create_app
 from .config import Settings
-from .connections import PersistentIdentity,ConnectionTokens
+from .connections import PersistentIdentity,ConnectionTokens,acquire_snapshot
 from .direct_source import TeamsGraph,direct_source_from_env
 from .oracle_source import source_from_env,OracleSource
 from .push import sender_from_env,Subscription,Notifications
@@ -45,6 +45,7 @@ class ServerIntegration(SchoolIntegration):
         super().__init__(settings,db,graph,source)
         self.identity=identity; self.tokens=ConnectionTokens(db,identity)
         self.sender=sender; self.notifications=Notifications(db,sender); self._cookie_responses={}
+        self.notification_runtime=None
         self.device_cookie='__Host-calendarsync_device' if settings.secure_cookies else 'calendarsync_device'
     @property
     def push_enabled(self): return self.sender.configured
@@ -89,7 +90,7 @@ class ServerIntegration(SchoolIntegration):
         user=device['user_id']; lease=self.db.begin_sync(user,0 if ingest else self.settings.access_seconds)
         if not lease: return
         try:
-            token=self.tokens.acquire(device)
+            token,device=acquire_snapshot(self.tokens,device,self.db)
             channels=self.graph.channels(token,device['object_id'],device['tenant_id'])
             if not self.source.configured:
                 self.db.fail_sync(user,'source_not_configured',lease); return
@@ -125,12 +126,17 @@ class ServerIntegration(SchoolIntegration):
             self.db.maintenance()
             for device in self.db.due_devices(3):
                 self.db.defer_device(device['id_hash'],60)
-                self.run_sync(device,ingest=device['ingest_at']<=self.db.clock())
+                # In injected notification mode, do not poll Graph on the timer.
+                if self.notification_runtime is None or not hasattr(self.source,'collect'):
+                    self.run_sync(device,ingest=device['ingest_at']<=self.db.clock())
                 current=self.db.device(device['id_hash'])
                 if current and current['state']!='reauth_required': self.notifications.dispatch(current)
         finally: self.db.worker_unlock(owner)
 
-def create_test_server(settings=None,database=None,identity=None,graph=None,source=None,sender=None,worker=True,preview=False):
+def create_test_server(settings=None,database=None,identity=None,graph=None,source=None,sender=None,worker=True,preview=False,notification_runtime=None):
+    if database is None:
+        from .render_guard import ensure_hosted_storage_supported
+        ensure_hosted_storage_supported()
     if settings is None:
         settings=Settings.from_env()
         # Screen sessions and background device connections have independent lifetimes.
@@ -138,16 +144,29 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     if not settings.auth_configured: raise ValueError('Configure school Entra authentication')
     if not settings.secure_cookies and not settings.allow_local_login: raise ValueError('HTTPS required')
     db=database or TestDatabase(settings.database_path,settings.data_key)
-    if not isinstance(db,TestDatabase): raise ValueError('Test server requires its separate storage')
+    if not isinstance(db,TestDatabase):
+        # Local SQLite packages do not need to import optional PG candidates.
+        from .postgres_database import PostgresDatabase
+        if not isinstance(db,PostgresDatabase):
+            raise ValueError('Test server requires its separate storage')
+        if preview or db.tenant_id!=settings.tenant_id:
+            raise ValueError('Experimental PostgreSQL storage requires its configured school tenant')
+        if notification_runtime is not None:
+            raise ValueError('PostgreSQL notification runtime integration is not implemented')
     provider=identity or PersistentIdentity(settings); graph=graph or TeamsGraph()
     if source is None:
         mode=os.environ.get('WEB_INGESTION_MODE','direct')
         if mode not in {'direct','oracle'}: raise ValueError('Invalid ingestion mode')
         source=direct_source_from_env(graph) if mode=='direct' else source_from_env()
     integration=ServerIntegration(settings,db,provider,graph,source,sender if sender is not None else sender_from_env())
+    integration.notification_runtime=notification_runtime
     static=Path(__file__).with_name('static')
     app=create_app(settings,db,provider,frontend_directory=static,integration=integration,frontend_entry='school.html')
     app.state.integration=integration
+    if notification_runtime is not None:
+        # Explicit injection only: the default entry point is not ready for deployment.
+        from .notification_webhook import create_notification_router
+        app.include_router(create_notification_router(notification_runtime.inbox))
     app.add_middleware(SecurityBoundary,settings=settings)
     require=app.state.require_session
 
@@ -161,7 +180,10 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
         stop=asyncio.Event()
         async def loop():
             while not stop.is_set():
-                try: await asyncio.to_thread(integration.tick)
+                try:
+                    await asyncio.to_thread(integration.tick)
+                    if notification_runtime is not None:
+                        await asyncio.to_thread(notification_runtime.tick)
                 except Exception: db.audit('worker_failed','worker')
                 try: await asyncio.wait_for(stop.wait(),timeout=60)
                 except TimeoutError: pass
@@ -196,6 +218,10 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
         db.resolve_change(session['user_id'],session['tenant_id'],change_id,body.accept); return {'saved':True}
     @app.put('/api/events/{event_id}/override')
     def override(event_id:str,body:TaskInput,session=Depends(require)):
+        if hasattr(db,'override_event'):
+            db.override_event(session['user_id'],session['tenant_id'],event_id,
+                              body.model_dump(mode='json',exclude={'display_mode','selected_dates'}))
+            return {'saved':True}
         events={e['id']:e for e in db._shared(session['user_id'],session['tenant_id'])}
         if event_id not in events: raise Missing()
         item={**events[event_id],**body.model_dump(mode='json',exclude={'display_mode','selected_dates'})}

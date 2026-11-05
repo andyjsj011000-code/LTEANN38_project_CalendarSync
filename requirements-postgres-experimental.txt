@@ -1,0 +1,5 @@
+# Explicit experimental direct-ingestion / disposable PostgreSQL tests only.
+# The hosted entry point remains blocked until real integration is verified.
+-r requirements-web.txt
+pywebpush>=2.1,<3
+psycopg[binary]>=3.2,<4

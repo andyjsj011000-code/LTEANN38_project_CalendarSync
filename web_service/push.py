@@ -108,11 +108,19 @@ class Notifications:
             for key,payload in self.due(device['user_id'],device['tenant_id']):
                 delivery=digest(subscription['id']+'|'+key)
                 if not self.db.device(device['id_hash']): return sent
-                if not self.db.claim_delivery(delivery,subscription['id']): continue
+                fenced=hasattr(self.db,'claim_delivery_lease')
+                lease=(self.db.claim_delivery_lease(delivery,subscription['id']) if fenced else
+                       self.db.claim_delivery(delivery,subscription['id']))
+                if not lease: continue
+                # A successful storage claim may race a logout. Recheck before
+                # contacting the external push endpoint; completion also fences.
+                current=self.db.device(device['id_hash'])
+                if not current or current.get('state')=='reauth_required': return sent
                 try: outcome=self.sender.send(subscription['subscription'],payload)
                 except Exception: outcome='retry'
                 if outcome=='expired':
                     self.db.unsubscribe_subscription(device['id_hash'],subscription['id']); break
-                self.db.finish_delivery(delivery,outcome=='sent')
+                if fenced: self.db.finish_delivery_lease(delivery,lease,outcome=='sent')
+                else: self.db.finish_delivery(delivery,outcome=='sent')
                 sent+=int(outcome=='sent')
         return sent

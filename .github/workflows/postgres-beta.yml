@@ -1,0 +1,112 @@
+name: CalendarSync PostgreSQL beta checks
+
+on:
+  push:
+    branches: [oracle]
+    paths:
+      - web_service/**
+      - tests_web/**
+      - requirements-web.txt
+      - requirements-postgres-experimental.txt
+      - tools/**
+      - .github/workflows/postgres-beta.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-beta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: calendarsync
+          POSTGRES_PASSWORD: test-only-calendarsync
+          POSTGRES_DB: calendarsync_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U calendarsync -d calendarsync_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out the tested oracle commit
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-postgres-experimental.txt
+
+      - name: Verify the disposable PostgreSQL 18 server and driver
+        env:
+          CALENDARSYNC_DISPOSABLE_POSTGRES_DSN: postgresql://calendarsync:test-only-calendarsync@127.0.0.1:5432/calendarsync_test
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+
+          with psycopg.connect(os.environ['CALENDARSYNC_DISPOSABLE_POSTGRES_DSN'], connect_timeout=5) as connection:
+              version = connection.execute("SELECT current_setting('server_version_num')::integer").fetchone()[0]
+          if version // 10000 != 18:
+              raise SystemExit('The test database must run PostgreSQL 18')
+          print(f'Connected to disposable PostgreSQL: server_version_num={version}')
+          PY
+
+      - name: Run the web test suite
+        env:
+          CALENDARSYNC_DISPOSABLE_POSTGRES_DSN: postgresql://calendarsync:test-only-calendarsync@127.0.0.1:5432/calendarsync_test
+          CALENDARSYNC_ALLOW_TEMP_SCHEMA: 'yes'
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: python -m pytest tests_web --ignore=tests_web/test_beta_package.py -q -p no:cacheprovider
+
+      - name: Prove every PostgreSQL integration module ran without skips
+        env:
+          CALENDARSYNC_DISPOSABLE_POSTGRES_DSN: postgresql://calendarsync:test-only-calendarsync@127.0.0.1:5432/calendarsync_test
+          CALENDARSYNC_ALLOW_TEMP_SCHEMA: 'yes'
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          for module in \
+            test_postgres_auth_integration \
+            test_postgres_database_integration \
+            test_postgres_notification_integration \
+            test_postgres_personal_tasks_integration
+          do
+            python -m pytest "tests_web/${module}.py" -q -p no:cacheprovider \
+              --junitxml="test-results/${module}.xml"
+          done
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          modules = (
+              'test_postgres_auth_integration',
+              'test_postgres_database_integration',
+              'test_postgres_notification_integration',
+              'test_postgres_personal_tasks_integration',
+          )
+          total = 0
+          for module in modules:
+              report = Path('test-results') / (module + '.xml')
+              cases = list(ET.parse(report).getroot().iter('testcase'))
+              if not cases:
+                  raise SystemExit(f'{module}: no PostgreSQL tests were recorded')
+              for case in cases:
+                  if any(case.find(tag) is not None for tag in ('skipped', 'failure', 'error')):
+                      raise SystemExit(f'{module}: a PostgreSQL test did not execute successfully')
+              total += len(cases)
+              print(f'{module}: {len(cases)} PostgreSQL tests executed, zero skipped')
+          print(f'PostgreSQL integration evidence: {total} passed, zero skipped')
+          PY

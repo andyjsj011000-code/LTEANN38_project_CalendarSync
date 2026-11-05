@@ -3,6 +3,15 @@ from requests.exceptions import RequestException, Timeout, ConnectionError
 from .school_graph import GraphFailure, SCOPES
 from .school import SchoolIdentity
 
+def acquire_snapshot(tokens,device,db):
+    """Use the current credential generation after a possible token refresh."""
+    token=tokens.acquire(device)
+    current=db.device(device['id_hash'])
+    if (not current or current['user_id']!=device['user_id'] or
+            current['tenant_id']!=device['tenant_id'] or current.get('state')=='reauth_required'):
+        raise GraphFailure('reauth_required')
+    return token,current
+
 class PersistentIdentity(SchoolIdentity):
     def application(self,cache=None,background=True):
         from msal import ConfidentialClientApplication

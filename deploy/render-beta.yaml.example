@@ -1,0 +1,38 @@
+# REVIEW TEMPLATE ONLY. No database creation, migrations or paid resources.
+# Uses the already-created DB via a private environment variable.
+services:
+  - type: web
+    name: calendarsync-beta
+    runtime: python
+    plan: free
+    region: singapore
+    repo: https://github.com/andyjsj011000-code/LTEANN38_project_CalendarSync
+    branch: oracle
+    autoDeployTrigger: 'off'
+    buildCommand: pip install -r requirements-postgres-experimental.txt
+    startCommand: python -m uvicorn web_service.hosted:create_hosted_app --factory --host 0.0.0.0 --port $PORT --workers 1 --no-access-log
+    healthCheckPath: /health
+    envVars:
+      - key: WEB_STORAGE_BACKEND
+        value: postgresql
+      - key: WEB_INGESTION_MODE
+        value: direct
+      - key: WEB_DATABASE_SCHEMA
+        value: calendarsync_web
+      # Explicit TLS for Render's private self-signed internal connection.
+      - key: WEB_DATABASE_SSLMODE
+        value: require
+      - key: DATABASE_URL
+        sync: false
+      - key: WEB_ORIGIN
+        sync: false
+      - key: WEB_DATA_KEY
+        sync: false
+      - key: WEB_ENTRA_TENANT_ID
+        sync: false
+      - key: WEB_ENTRA_CLIENT_ID
+        sync: false
+      - key: WEB_ENTRA_CLIENT_SECRET
+        sync: false
+      - key: WEB_OPENAI_API_KEY
+        sync: false

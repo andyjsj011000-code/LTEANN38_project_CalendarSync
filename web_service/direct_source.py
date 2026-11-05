@@ -7,7 +7,7 @@ from time import monotonic
 from urllib.parse import quote,urlsplit,urlencode,unquote
 import httpx
 from pydantic import BaseModel,ConfigDict,Field,model_validator
-from .oracle_source import plain
+from .oracle_source import plain,PlainText
 from .school_graph import DelegatedGraph,GraphFailure,BASE
 from .storage import digest
 
@@ -30,6 +30,17 @@ class Extraction(BaseModel):
     model_config=ConfigDict(extra='forbid')
     events:list[ExtractedEvent]=Field(max_length=20)
 
+
+def complete_plain(value):
+    # The legacy plain() helper truncates at 10000 characters. Exact-target
+    # work must measure the complete text before deciding whether it fits.
+    parser=PlainText()
+    parser.feed(value or '')
+    text=''.join(parser.parts).strip()
+    if len(text)>16000:
+        raise GraphFailure('source_unavailable')
+    return text
+
 class TeamsGraph(DelegatedGraph):
     def message_path(self,channel,message=None):
         root=f"/teams/{quote(channel['team_id'],safe='')}/channels/{quote(channel['id'],safe='')}/messages"
@@ -42,15 +53,61 @@ class TeamsGraph(DelegatedGraph):
         messages=data.get('value')
         if not isinstance(messages,list): raise GraphFailure()
         return messages[:50]
-    def message(self,token,channel,message_id):
+    def message(self,token,channel,message_id,*,complete_replies=False,deadline=None):
+        if complete_replies and deadline is None:
+            deadline=monotonic()+80
         with self.client_factory() as client:
             path=BASE+self.message_path(channel,message_id)
+            if complete_replies and monotonic()>deadline:
+                raise GraphFailure('source_unavailable')
             message=self._read(client,token,path,forbidden_missing=False)
+            if complete_replies and monotonic()>deadline:
+                raise GraphFailure('source_unavailable')
             if message is None or message.get('deletedDateTime'): return message
+            if complete_replies:
+                message['replies']=self._complete_replies(client,token,path,message_id,deadline)
+                return message
             replies=self._read(client,token,path+'/replies?$top=30',forbidden_missing=False)
             if replies is None or not isinstance(replies.get('value'),list): raise GraphFailure()
             message['replies']=replies['value'][:30]
             return message
+    def _complete_replies(self,client,token,message_path,message_id,deadline):
+        """Read a bounded complete thread; partial reads must never look complete."""
+        expected_path=urlsplit(message_path+'/replies').path
+        url=message_path+'/replies?$top=50'
+        visited=set(); replies=[]; seen_ids=set()
+        for _ in range(20):
+            if (not isinstance(url,str) or not 0<len(url)<=4096 or
+                    monotonic()>deadline or url in visited):
+                raise GraphFailure('source_unavailable')
+            try:
+                parsed=urlsplit(url)
+            except ValueError:
+                raise GraphFailure('verification_failed') from None
+            if (parsed.scheme!='https' or parsed.netloc!='graph.microsoft.com' or
+                    parsed.path!=expected_path or parsed.fragment):
+                raise GraphFailure('verification_failed')
+            visited.add(url)
+            data=self._read(client,token,url,forbidden_missing=False)
+            if data is None or not isinstance(data.get('value'),list) or monotonic()>deadline:
+                raise GraphFailure('source_unavailable')
+            values=data['value']
+            if len(replies)+len(values)>500:
+                raise GraphFailure('source_unavailable')
+            for reply in values:
+                if (not isinstance(reply,dict) or not isinstance(reply.get('id'),str) or
+                        not 1<=len(reply['id'])<=200 or reply['id'] in seen_ids or
+                        reply.get('replyToId') not in (None,message_id)):
+                    raise GraphFailure('source_unavailable')
+                seen_ids.add(reply['id']); replies.append(reply)
+            next_link=data.get('@odata.nextLink')
+            if next_link is None:
+                return replies
+            # Empty or malformed continuation links are not proof of completion.
+            if not isinstance(next_link,str) or not next_link:
+                raise GraphFailure('source_unavailable')
+            url=next_link
+        raise GraphFailure('source_unavailable')
     def hosted_image(self,token,channel,message_id,url):
         prefix=BASE+self.message_path(channel,message_id)+'/hostedContents/'
         parsed=urlsplit(url)
@@ -106,22 +163,61 @@ class DirectSource:
     def __init__(self,graph,extractor,images=True): self.graph,self.extractor,self.images=graph,extractor,images
     @property
     def configured(self): return self.extractor.configured
-    def collect(self,token,channels,tenant,db,user_id):
+    def collect(self,token,channels,tenant,db,user_id,*,selected_channels=None,selected_messages=None):
         if not self.configured: raise ValueError('AI is not configured')
+        targeted=None
+        if selected_messages is not None:
+            # Identifiers are not URLs. Fetch them only inside one channel that
+            # was independently verified by the caller using delegated Graph.
+            if (selected_channels is None or not isinstance(selected_messages,list) or
+                    not 1<=len(selected_messages)<=20):
+                raise GraphFailure('verification_failed')
+            for message_id in selected_messages:
+                if (not isinstance(message_id,str) or not 1<=len(message_id)<=200 or
+                        message_id in {'.','..'} or any(ord(c)<32 or ord(c)==127 or c in '/\\?#%' for c in message_id)):
+                    raise GraphFailure('verification_failed')
+            targeted=list(dict.fromkeys(selected_messages))
         deadline=monotonic()+80
+        def expired():
+            if monotonic() <= deadline:
+                return False
+            # A notification job must not acknowledge a partial channel scan.
+            # Cached entries already written may be reused on the retry.
+            if selected_channels is not None:
+                raise GraphFailure('source_unavailable')
+            return True
         # Rotate channels so a large school account is ingested incrementally.
-        selected=db.next_channels(user_id,channels,5)
+        if selected_channels is None:
+            selected=db.next_channels(user_id,channels,5)
+        else:
+            # The caller supplies a verified channel list and selects only within it.
+            requested={(c['team_id'],c['id']) for c in selected_channels}
+            selected=[c for c in channels if (c['team_id'],c['id']) in requested]
+            if not requested or len(requested)!=len(selected):
+                raise GraphFailure('verification_failed')
+        if targeted is not None and len(selected)!=1:
+            raise GraphFailure('verification_failed')
         for channel in selected:
-            if monotonic()>deadline: break
-            messages=self.graph.messages(token,channel)
-            known=db.cached_messages(channel['id']); returned={str(m.get('id','')) for m in messages}
-            # Missing from a limited list is not proof of deletion. Fetch known sources explicitly.
-            for message_id in list(known)[:5]:
-                if message_id not in returned and monotonic()<deadline:
-                    msg=self.graph.message(token,channel,message_id)
+            if expired(): break
+            known=db.cached_messages(channel['id'])
+            if targeted is not None:
+                messages=[]
+                for message_id in targeted:
+                    expired()
+                    msg=self.graph.message(token,channel,message_id,complete_replies=True,deadline=deadline)
+                    if msg is not None and (not isinstance(msg,dict) or str(msg.get('id',''))!=message_id):
+                        raise GraphFailure('source_unavailable')
                     messages.append(msg or {'id':message_id,'deletedDateTime':'verified-missing'})
+            else:
+                messages=self.graph.messages(token,channel)
+                returned={str(m.get('id','')) for m in messages}
+                # Missing from a limited list is not proof of deletion. Fetch known sources explicitly.
+                for message_id in list(known)[:5]:
+                    if message_id not in returned and not expired():
+                        msg=self.graph.message(token,channel,message_id)
+                        messages.append(msg or {'id':message_id,'deletedDateTime':'verified-missing'})
             for message in messages:
-                if monotonic()>deadline: break
+                if expired(): break
                 mid=str(message.get('id',''))
                 if not mid or len(mid)>200: continue
                 key=digest(channel['id']+'|'+mid)
@@ -133,13 +229,24 @@ class DirectSource:
                     events=[{**e,'cancelled':True,'source_version':version} for e in (old['events'] if old else [])]
                     db.cache_analysis(key,channel['id'],mid,version,events); continue
                 created=message.get('createdDateTime','')
-                if created and not old:
+                if created and not old and targeted is None:
                     created_at=datetime.fromisoformat(created.replace('Z','+00:00'))
                     if created_at<datetime.fromtimestamp(db.clock(),timezone.utc)-timedelta(days=30): continue
                 html=(message.get('body') or {}).get('content','')
                 replies=message.get('replies') or []
-                text='작성일: '+created+'\n제목: '+str(message.get('subject') or '')+'\n본문: '+plain(html)
-                for reply in replies[:30]: text+='\n답글: '+plain((reply.get('body') or {}).get('content',''))
+                as_text=complete_plain if targeted is not None else plain
+                text='작성일: '+created+'\n제목: '+str(message.get('subject') or '')+'\n본문: '+as_text(html)
+                for reply in (replies if targeted is not None else replies[:30]):
+                    reply_html=(reply.get('body') or {}).get('content','')
+                    if targeted is not None and self.images and '<img' in reply_html.lower():
+                        # Reply hosted images need their own Graph resource path;
+                        # do not acknowledge a thread while ignoring them.
+                        raise GraphFailure('source_unavailable')
+                    text+='\n답글: '+as_text(reply_html)
+                if targeted is not None and (len(replies)>500 or len(text)>16000):
+                    # AIExtractor has a 16000-character input bound. A complete
+                    # targeted thread must not silently lose its tail there.
+                    raise GraphFailure('source_unavailable')
                 images=[]
                 if self.images and '<img' in html:
                     from html.parser import HTMLParser
@@ -161,6 +268,8 @@ class DirectSource:
                 found={e['id'] for e in events}
                 events.extend({**e,'cancelled':True,'source_version':version} for e in previous if e['id'] not in found)
                 db.cache_analysis(key,channel['id'],mid,version,events)
+        if selected_channels is not None:
+            expired()
         return db.catalog_events([ch['id'] for ch in channels])
 
 def direct_source_from_env(graph):
