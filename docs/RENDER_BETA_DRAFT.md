@@ -3,6 +3,26 @@
 이 문서는 검토용입니다. 실제 Render 서비스·DB를 변경하거나 배포하지 않았습니다.
 현재 실행 결과와 미완료 항목은 `BETA_PREPARATION_STATUS_KO.md`를 함께 확인합니다.
 
+최신 검증은 **541개 통과·실제 PostgreSQL 통합 24개 통과·건너뜀 없음**입니다.
+새 DB 공간 생성·기존 공간 보호·실패 시 전체 취소·재시작 시 기존 데이터 유지도 검사했습니다.
+https://github.com/andyjsj011000-code/LTEANN38_project_CalendarSync/actions/runs/42001139649
+
+## 현재 화면에서 필요한 입력
+
+서비스 생성 폼에 무료 요금제·Singapore·`oracle`·빌드/실행 명령·자동 배포 Off를
+작성했고 암호화 키·알림 키·기존 앱의 Client ID도 준비했습니다. 아래 네 값은
+해당 서비스의 Environment Variables 값 칸에 직접 입력해야 합니다. 채팅에는 보내지 않습니다.
+
+| 변수 | 가져오는 곳 |
+| --- | --- |
+| `DATABASE_URL` | `calendarsync-beta-test` DB의 Connect → Internal → Database URL |
+| `WEB_ENTRA_TENANT_ID` | 학교 앱 등록 → 개요 → 디렉터리(테넌트) ID |
+| `WEB_ENTRA_CLIENT_SECRET` | 기존 앱 담당자가 보관한 클라이언트 암호의 **값**. 암호 ID나 Microsoft 계정 비밀번호가 아닙니다. |
+| `WEB_OPENAI_API_KEY` | 베타 공지 분석에 사용할 OpenAI API 키 |
+
+이 값들은 실제로 확인하지 못했으므로 비어 있습니다. 값을 입력한 뒤에도 실제
+배포·학교 로그인·권한 동의·공지 수집 검증은 다음 단계로 남아 있습니다.
+
 GitHub 임시 PostgreSQL 18 검증은 완료됐습니다. 전체 웹 테스트 504개와 실제 DB 통합
 검사 20개가 통과했고 건너뛴 검사는 없습니다. 실제 학교 계정·Graph·AI·외부 알림과
 Render의 TLS·기존 DB 상태까지 검증했다는 뜻은 아닙니다.

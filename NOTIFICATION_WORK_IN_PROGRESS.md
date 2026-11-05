@@ -3,7 +3,20 @@
 This isolated development snapshot is based on fork `oracle` commit
 `fa8de299e99171d40ca6e98082fa5d2effdc994e`. It is not a deployable release.
 
-Latest completed verification (2026-11-05): GitHub Actions on source commit
+Latest verification (2026-11-05): source commit
+`1deea99ecb5e0a15940ae4a370bde92b589caa82` passed 541 tests, with one existing
+test-client warning and zero skips. All 24 native PostgreSQL 18 cases passed;
+these include atomic schema creation, preservation/refusal of existing schemas,
+rollback of a middle-DDL failure and hosted first-start/restart behavior.
+Evidence: https://github.com/andyjsj011000-code/LTEANN38_project_CalendarSync/actions/runs/42001139649
+The default bootstrap setting remains off. The new Render draft explicitly opts
+in for the user's confirmed dedicated database. No real schema creation or
+Render deployment has occurred. The browser form is prepared, but DATABASE_URL,
+school tenant ID, the existing Entra client-secret value and the AI API key need
+the user's private input. Generated data-encryption/push keys stay outside source
+control and source archives. Original Oracle daemon files are unchanged.
+
+Previous completed verification (2026-11-05): GitHub Actions on source commit
 `4682f345af5f50deef7fe5a0dcc85114920e8c8e` passed all 504 web tests, with one
 existing test-client deprecation warning and no skipped tests. The legacy
 synthetic-launcher package tests were explicitly excluded. The job verified a
@@ -23,7 +36,7 @@ transaction for an absent dedicated schema (35 tables, 4 indexes). The explicit
 `WEB_BOOTSTRAP_NEW_SCHEMA=1` hosted option creates only an absent namespace and
 otherwise leaves existing objects untouched while the adapter validates them.
 The default is off. Config/schema preflight remains read-only. New bootstrap and
-worker-recovery tests are awaiting CI; no real Render DDL was executed.
+worker-recovery tests passed the CI run above; no real Render DDL was executed.
 
 The hosted origin can use Render's own RENDER_EXTERNAL_URL when WEB_ORIGIN is
 unset. The web worker now contains audit failures so temporary DB outages do
