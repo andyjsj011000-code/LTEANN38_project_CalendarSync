@@ -3,6 +3,20 @@
 This isolated development snapshot is based on fork `oracle` commit
 `fa8de299e99171d40ca6e98082fa5d2effdc994e`. It is not a deployable release.
 
+Latest completed verification (2026-11-05): GitHub Actions on source commit
+`4682f345af5f50deef7fe5a0dcc85114920e8c8e` passed all 504 web tests, with one
+existing test-client deprecation warning and no skipped tests. The legacy
+synthetic-launcher package tests were explicitly excluded. The job verified a
+real disposable PostgreSQL 18 server (server_version_num 180006), then separately
+reran the native modules: auth 1, adapter/connection factory 5, queue 5, real web
+routes 6, personal tasks 3: 20 passed, zero skipped.
+Evidence: https://github.com/andyjsj011000-code/LTEANN38_project_CalendarSync/actions/runs/41995178273
+Real web-route checks use the actual PostgreSQL connection factory and adapter;
+school identity, Graph, AI and push delivery providers remain simulated. These
+results do not establish real Render TLS, live school sign-in, production
+migrations, large-group throughput or external delivery. No actual Render or
+Oracle resources were changed. Web source-package tests also passed in CI.
+
 Last completed local verification (2026-11-05): the restricted runner completed with
 398 passed and 13 skipped. The skips require a real disposable PostgreSQL DB.
 Packaging tests were explicitly excluded. Python-level external connection
@@ -19,13 +33,12 @@ revocation and full logout. These are local behavior checks,
 not real PostgreSQL locking, Graph or Render tests. One existing FastAPI/Starlette
 test-client deprecation warning remains.
 
-New connection/preflight/package changes have not yet completed a local test run.
-The additional run was blocked by automatic approval review; no passing result
-is claimed for it. `.github/workflows/postgres-beta.yml` prepares an isolated
+The additional local run was blocked by automatic approval review and replaced
+by the successful isolated CI above. `.github/workflows/postgres-beta.yml` uses an isolated
 PostgreSQL 18 service on pushes to this fork's oracle branch. It uses only
 disposable credentials and checks JUnit evidence that all native PostgreSQL
-integration modules ran without skips. Its actual run/result must be checked
-in GitHub Actions; writing the workflow alone does not establish a pass.
+integration modules ran without skips. The linked Actions run records the result
+for this source; writing a workflow alone does not establish a pass.
 
 `postgres_connection.py` adds a lazily imported psycopg 3 transaction factory
 with explicit schema, timeout, TLS and redacted diagnostics. `hosted.py` adds
@@ -50,20 +63,22 @@ require load validation before promising a five-minute result to every student.
 
 Work required before release:
 
-* Integration-test PostgreSQL access and transaction semantics.
+* Complete Render-specific PostgreSQL provisioning and deployment validation.
   `web_service/postgresql_schema_draft.sql` is a non-deployable schema draft,
   not an automatic migration. `postgres_database.py` now combines the explicit
   PostgreSQL equivalents and can be supplied as the `database` argument of
   `create_test_server`. Its `initialize()` only validates schema columns/version
   and the single-school tenant boundary; it never provisions or migrates tables.
   The default hosted entry point does not select this experimental adapter.
-  SQLite SQL-shim tests passed, but actual locking, conflict syntax, connection
-  methods, constraints and row handling still need real PostgreSQL verification.
+  SQLite SQL-shim and the linked real PostgreSQL integration checks passed.
+  Core conflicts, rollback and shared-user transactions are covered; exhaustive
+  concurrency, load and deployed connection behavior remain pending.
   The Render startup guard intentionally rejects hosted runs until this is done.
   `postgres_notification_queue.py` is an isolated PostgreSQL queue candidate;
-  its logic has been exercised with a SQLite shim, not PostgreSQL. The opt-in
+  its logic has been exercised with a SQLite shim and PostgreSQL 18. The opt-in
   candidate now sorts multi-subscription batches before locking to reduce
-  reversed-order deadlocks; this change has not been tested on PostgreSQL.
+  reversed-order deadlocks; reverse-order batches and revision/target tests passed
+  on the disposable PostgreSQL server.
   integration tests require psycopg 3 and an explicitly designated disposable
   database through `CALENDARSYNC_DISPOSABLE_POSTGRES_DSN`, plus explicit
   `CALENDARSYNC_ALLOW_TEMP_SCHEMA=yes`. Never use a real
@@ -84,8 +99,8 @@ Work required before release:
   identity, and reject payloads from another channel. The cache schema still has no
   tenant column; only verified channels from the configured single-school tenant may
   be passed. The combined adapter supports the tested web-server contract but
-  remains experimental; schema provisioning, real PostgreSQL behavior, deployment
-  configuration and the optional subscription registry integration remain pending.
+  remains experimental; real Render schema provisioning, deployed connection
+  configuration and optional subscription registry integration remain pending.
   `postgres_sync.py` is the sync/snapshot candidate. It uses an opaque
   random `lease_token` distinct from `lease_until`, fences same-second retries and
   expired leases, and rechecks user/device ownership, tenant, version, state and
@@ -100,8 +115,9 @@ Work required before release:
   Both sync and delivery tables now have nullable lease_token columns in the
   draft. Existing databases require explicit migrations; none were applied.
   `requirements-postgres-experimental.txt` lists the optional driver dependencies;
-  installation was not exercised. Four new opt-in facade/concurrency tests are
-  prepared in `test_postgres_database_integration.py` and are currently skipped.
+  installation succeeded in CI; the local Windows installation was not changed.
+  The adapter/connection factory and real web-route checks passed as part of the
+  20 native integration cases above.
 * Before enabling notification mode: wire production configuration, subscription creation, renewal and lifecycle
   handling; select and revalidate the owner and handle revocation and transfer.
 * Resolve ambiguous creation/renewal outcomes and recover after restart; expose
@@ -116,7 +132,8 @@ Work required before release:
   Unknown resources and oversized batches stay pending as reconciliation work.
   Local mocked-Graph and SQLite logic tests passed; no live service tests ran.
   Exact-target PostgreSQL parity and complete-reply traversal are implemented
-  as candidates; real PostgreSQL behavior remains untested. Targeted threads fail closed above 20 reply
+  as candidates; queue parity passed native tests, but live Graph behavior remains
+  untested. Targeted threads fail closed above 20 reply
   pages, 500 replies, 16000 text characters or the shared time budget; reply
   images are deferred until their resource fetching is implemented.
   Reconciliation execution and production

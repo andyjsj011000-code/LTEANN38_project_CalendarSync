@@ -3,6 +3,11 @@
 이 문서는 검토용입니다. 실제 Render 서비스·DB를 변경하거나 배포하지 않았습니다.
 현재 실행 결과와 미완료 항목은 `BETA_PREPARATION_STATUS_KO.md`를 함께 확인합니다.
 
+GitHub 임시 PostgreSQL 18 검증은 완료됐습니다. 전체 웹 테스트 504개와 실제 DB 통합
+검사 20개가 통과했고 건너뛴 검사는 없습니다. 실제 학교 계정·Graph·AI·외부 알림과
+Render의 TLS·기존 DB 상태까지 검증했다는 뜻은 아닙니다.
+검증: https://github.com/andyjsj011000-code/LTEANN38_project_CalendarSync/actions/runs/41995178273
+
 ## 준비한 설정
 
 새 웹서비스 이름은 `calendarsync-beta`, 브랜치는 개인 fork의 `oracle`, 지역은
