@@ -3,12 +3,13 @@
   const $ = s => document.querySelector(s);
   const SCHOOL = document.documentElement?.dataset.mode === 'school';
   let idleTimer, idleDeadline = 0, authEpoch = 0, resumeCheck = null;
-  let activeLoad = null;
+  let activeLoad = null, monthRequest = null, monthEpoch = 0;
+  let mutationSettled = Promise.resolve(), mutationRevision = 0;
   const readRequests = new Set();
   let reminderRules = null, reminderCustomInitial = '';
   const activeView = epoch => epoch === authEpoch && !!S.me;
   const testServer = () => ['test-server','preview'].includes(S.service?.mode);
-  let reviewItems = [];
+  let reviewItems = [], reviewDialogItems = new Map();
   const connectionText = {refresh_unavailable:'일시적으로 연결을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.', connected:'Teams 권한과 일정 연결을 확인했어요.', checking:'Teams 접근 권한을 확인하고 있어요.', not_connected:'Teams 연결을 확인해 주세요.', source_not_configured:'공지 수집 설정이 아직 준비되지 않았어요. 연결 상태에서 확인해 주세요.', source_unavailable:'학교 일정을 가져오지 못해 Teams 표시를 중단했어요. 개인 할 일은 사용할 수 있어요.', verification_failed:'Teams 접근 권한을 확인하지 못해 표시를 중단했어요.', reauth_required:'Microsoft 계정으로 다시 로그인해 주세요.', account_not_allowed:'학교 소속 계정인지 확인해 주세요.', refresh_busy:'Microsoft 연동을 갱신 중이에요. 잠시 후 다시 확인해 주세요.'};
   const root = $('#app'), modal = $('#modal'), topbar = $('#topbar');
   const C = window.BetaCalendar;
@@ -23,11 +24,11 @@
     clearTimeout(toastTimer); toastTimer = setTimeout(() => {el.hidden = true;}, 6000);
   }
   async function api(path, options = {}) {
-    const {body, signal, ...rest} = options;
+    const {body, signal, timeout, ...rest} = options;
     const read = ['GET', 'HEAD'].includes((rest.method || 'GET').toUpperCase());
-    const controller = read ? new AbortController() : null;
+    const controller = new AbortController();
     let expired = false, timer, onAbort, abortRead;
-    const abortError = () => {const error = new Error(expired ? '서버 응답이 늦어 요청을 마치지 못했어요. 잠시 후 다시 시도해 주세요.' : 'Request aborted'); error.name = expired ? 'TimeoutError' : 'AbortError'; return error;};
+    const abortError = () => {const error = new Error(expired ? (read ? '서버 응답이 늦어 요청을 마치지 못했어요. 잠시 후 다시 시도해 주세요.' : '처리 결과를 아직 확인하지 못했어요. 서버에서는 계속 처리 중일 수 있어요. 잠시 후 새로고침으로 결과를 확인해 주세요.') : 'Request aborted'); error.name = expired ? 'TimeoutError' : 'AbortError'; return error;};
     const cancelled = controller ? new Promise((resolve, reject) => {
       abortRead = () => reject(abortError());
       controller.signal.addEventListener('abort', abortRead, {once: true});
@@ -37,7 +38,7 @@
       onAbort = () => controller.abort();
       if (signal?.aborted) controller.abort();
       else signal?.addEventListener('abort', onAbort, {once: true});
-      timer = setTimeout(() => {expired = true; controller.abort();}, ['/api/service', '/api/beta/info', '/api/me'].includes(path) ? 20000 : 90000);
+      timer = setTimeout(() => {expired = true; controller.abort();}, timeout || (['/api/service', '/api/beta/info', '/api/me'].includes(path) ? 20000 : 90000));
     }
     const request = async () => {
       const response = await fetch(path, {...rest, credentials: 'same-origin', ...(controller || signal ? {signal: controller?.signal || signal} : {}), headers: {'Content-Type': 'application/json', ...(testServer() && path === '/auth/logout' ? {'X-CalendarSync-Logout':'1'} : {}), ...(S.me ? {'x-csrf-token': S.me.csrf_token} : {})}, ...(body === undefined ? {} : {body: JSON.stringify(body)})});
@@ -51,7 +52,7 @@
         const message = response.status === 409 ? '다른 화면에서 변경되었어요. 새로고침한 뒤 다시 시도해 주세요.' : typeof value.detail === 'string' ? value.detail : '입력 내용과 날짜를 확인해 주세요.';
         const error = new Error(message); error.status = response.status; throw error;
       }
-      if (read && invalidJson) throw new Error('서버 응답을 확인하지 못했어요. 잠시 후 다시 연결해 주세요.');
+      if (invalidJson) throw new Error(read ? '서버 응답을 확인하지 못했어요. 잠시 후 다시 연결해 주세요.' : '처리 결과를 확인하지 못했어요. 다시 저장하기 전에 새로고침으로 결과를 확인해 주세요.');
       return value;
     };
     try {return await (controller ? Promise.race([request(), cancelled]) : request());}
@@ -68,6 +69,8 @@
   function clearPrivate() {
     clearTimeout(idleTimer); idleDeadline = 0; resumeCheck = null; authEpoch++;
     activeLoad?.abort(); activeLoad = null;
+    monthRequest?.abort(); monthRequest = null; monthEpoch++;
+    S.pendingMonth = ''; S.syncing = false; S.syncUncertain = false; S.syncMessage = ''; S.quickDraft = ''; reviewDialogItems.clear();
     for (const controller of readRequests) controller.abort();
     reviewItems = []; reminderRules = null; reminderCustomInitial = ''; S.connection = null;
     S.epoch++; S.me = null; S.items = []; S.upcoming = []; S.today = null; S.channels = []; S.prefs = null; S.busy = false; S.loading = false; S.loadError = false;
@@ -84,16 +87,32 @@
     $('#nav-today').classList.toggle('active', S.view === 'today'); $('#nav-calendar').classList.toggle('active', S.view === 'calendar');
     root.innerHTML = `<section data-load-state="${error ? 'error' : 'loading'}" aria-busy="${!error}"><div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${S.view === 'calendar' ? '캘린더' : '오늘 할 일'}</h1><p class="muted">${error ? '로그인한 계정의 일정을 다시 불러와 주세요.' : '로그인을 확인했어요. 일정 정보를 불러오고 있어요.'}</p></div><div class="actions"><button class="${error ? 'primary' : 'secondary'}" data-action="refresh" ${error ? '' : 'disabled'}>${error ? '다시 불러오기' : '불러오는 중'}</button></div></div><section class="card" role="${error ? 'alert' : 'status'}" aria-live="polite"><div class="card-head"><h2>${error ? '일정을 아직 불러오지 못했어요' : '일정을 확인하고 있어요'}</h2></div><div class="empty">${error ? '서버 응답이 늦거나 연결이 불안정할 수 있어요. 잠시 후 다시 불러와 주세요.' : '학교 일정의 접근 권한을 확인하는 데 시간이 걸릴 수 있어요. 완료되면 자동으로 표시해요.'}</div></section><div class="today-layout"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정</h2></div><div class="empty">${error ? '일정을 불러온 뒤 확인할 수 있어요.' : 'Teams 일정을 불러오는 중이에요.'}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일</h2></div><div class="empty">${error ? '할 일을 불러온 뒤 추가하거나 수정할 수 있어요.' : '개인 할 일을 불러오는 중이에요.'}</div></section></div></section>`;
   }
-  async function load() {
+  async function ensureCollectionReady() {
+    if (!S.syncUncertain) return;
+    const epoch = authEpoch, settings = await api('/api/settings');
+    if (!activeView(epoch)) return;
+    if (settings.connection?.state === 'checking') throw new Error('Teams 공지를 아직 확인 중이에요. 현재 일정은 유지했어요. 잠시 후 새로고침해 주세요.');
+    S.syncUncertain = false;
+  }
+  async function load({background = false, afterSync = false, mutationVersion} = {}) {
     if (!S.me) return;
+    if (S.syncing && !afterSync) {toast('Teams 공지를 가져온 뒤 화면을 갱신해요. 현재 일정은 계속 볼 수 있어요.'); return;}
+    const initialSession = authEpoch;
+    await ensureCollectionReady();
+    if (!activeView(initialSession)) return;
     const epoch = ++S.epoch, sessionEpoch = authEpoch;
+    if (!background) {monthRequest?.abort(); monthRequest = null; monthEpoch++; S.pendingMonth = '';}
+    const calendarEpoch = monthEpoch;
     activeLoad?.abort();
     const controller = new AbortController(); activeLoad = controller;
     const timer = setTimeout(() => controller.abort(), 100000);
-    S.loading = true; S.loadError = false;
-    S.today = null; S.items = []; S.upcoming = []; S.channels = []; S.prefs = null; reviewItems = [];
-    if (modal.open) modal.close(); modal.replaceChildren();
-    renderLoadState();
+    S.loading = !background; S.loadError = false;
+    if (!background) {
+      rememberQuickDraft();
+      S.today = null; S.items = []; S.upcoming = []; S.channels = []; S.prefs = null; reviewItems = [];
+      if (modal.open) modal.close(); modal.replaceChildren();
+      renderLoadState();
+    }
     const read = path => api(path, {signal: controller.signal});
     try {
       const today = await read('/api/today');
@@ -107,12 +126,14 @@
       if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
       let changes = [];
       if (testServer()) {const result = await read('/api/changes'); if (epoch !== S.epoch || !activeView(sessionEpoch)) return; changes = result.items;}
-      Object.assign(S, {today, day: today.date, month, selected: S.selected || today.date, items: calendar.items, upcoming: upcoming.items, channels, prefs: settings.preferences, connection: settings.connection, loading: false});
+      if (afterSync && (S.busy || mutationVersion !== mutationRevision)) return;
+      Object.assign(S, {today, day: today.date, ...(calendarEpoch === monthEpoch ? {month, items: calendar.items} : {}), selected: S.selected || today.date, upcoming: upcoming.items, channels, prefs: settings.preferences, connection: settings.connection, loading: false});
       reviewItems = changes; render();
     } catch (error) {
       if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
       controller.abort(); S.loading = false;
       if (error.status === 401) {failure(error); return;}
+      if (background) throw new Error('최신 일정을 불러오지 못했어요. 현재 표시된 일정은 유지했어요. 새로고침으로 다시 확인해 주세요.');
       S.loadError = true; renderLoadState(true);
       const displayed = new Error('일정을 불러오지 못했어요. 다시 불러오기를 눌러 주세요.'); displayed.status = error.status; displayed.loadPresented = true; throw displayed;
     } finally {
@@ -125,10 +146,20 @@
   }
   function list(items, empty = '표시할 할 일이 없어요.') {return items.length ? items.map(row).join('') : `<div class="empty">${empty}</div>`;}
   function intro(title, subtitle) {
-    if (SCHOOL) return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions"><button class="secondary" data-action="refresh">새로고침</button><button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div><div class="beta-banner" role="status"><strong>${S.service?.mode === 'preview' ? '예시 화면' : '학교 계정 연결'}</strong><span>${esc(S.service?.mode === 'preview' ? '실제 학교 계정이나 공지와 연결되지 않은 미리보기예요.' : (connectionText[S.connection?.state] || connectionText.not_connected))}</span><a href="/auth/login">다시 로그인</a><button data-action="security">연결 및 보안</button></div>${testServer() ? `<div class="test-toolbar"><span class="badge">${S.service.mode === 'preview' ? '예시 전용 미리보기 · 실제 학교 계정 연결 없음' : '테스트 서버'}</span><button class="secondary small" data-action="sync-teams">Teams 공지 가져오기</button><button class="secondary small" data-action="changes">변경사항 <b>${reviewItems.length}</b></button><button class="secondary small" data-action="notifications">알림 설정</button><button class="secondary small" data-action="feedback">오류·의견 보내기</button></div>` : ''}`;
+    if (SCHOOL) return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions"><button class="secondary" data-action="refresh">새로고침</button><button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div><div class="beta-banner" role="status"><strong>${S.service?.mode === 'preview' ? '예시 화면' : '학교 계정 연결'}</strong><span>${esc(S.service?.mode === 'preview' ? '실제 학교 계정이나 공지와 연결되지 않은 미리보기예요.' : (connectionText[S.connection?.state] || connectionText.not_connected))}</span><a href="/auth/login">다시 로그인</a><button data-action="security">연결 및 보안</button></div>${testServer() ? `<div class="test-toolbar"><span class="badge">${S.service.mode === 'preview' ? '예시 전용 미리보기 · 실제 학교 계정 연결 없음' : '테스트 서버'}</span><button class="secondary small" data-action="sync-teams" ${S.syncing ? 'disabled aria-busy="true"' : ''}>${S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'}</button><span id="sync-status" role="status" aria-live="polite">${esc(S.syncMessage || '')}</span><button class="secondary small" data-action="changes">변경사항 <b>${reviewItems.length}</b></button><button class="secondary small" data-action="notifications">알림 설정</button><button class="secondary small" data-action="feedback">오류·의견 보내기</button></div>` : ''}`;
     return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions"><button class="secondary" data-action="refresh">새로고침</button><button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div><div class="beta-banner"><strong>학교 로그인 전 베타</strong><span>Teams 일정은 예시예요. 직접 추가한 할 일은 저장돼요. 알림 발송과 실제 Teams 연결은 준비 중이에요.</span></div>`;
   }
+  function rememberQuickDraft() {
+    const input = $('#quick-form')?.elements?.title;
+    if (input) S.quickDraft = input.value;
+  }
+  function updateSyncStatus() {
+    const button = document.querySelector('[data-action="sync-teams"]'), status = $('#sync-status');
+    if (button) {button.disabled = !!S.syncing; button.textContent = S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'; button.setAttribute('aria-busy', String(!!S.syncing));}
+    if (status) status.textContent = S.syncMessage || '';
+  }
   function render() {
+    rememberQuickDraft();
     if (!S.me) return;
     if (!S.today || !S.prefs) return renderLoadState();
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
@@ -139,7 +170,7 @@
     const teamsPending = SCHOOL && S.service?.mode !== 'preview' && S.connection?.state !== 'connected';
     const teamsCount = teamsPending && !S.today.teams.length ? (S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : S.today.teams.length;
     const teamsEmpty = teamsPending ? (connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
-    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${list(S.today.teams, teamsEmpty)}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${S.today.personal.length}</span></h2></div><div class="list">${list(S.today.personal, '오늘 할 일을 가볍게 적어보세요.')}</div><form class="quick-form" id="quick-form"><input name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">완료한 항목은 원래 위치에 남아요.</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : '<div class="empty">일주일 안에 다가오는 마감이 없어요.</div>'}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
+    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${list(S.today.teams, teamsEmpty)}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${S.today.personal.length}</span></h2></div><div class="list">${list(S.today.personal, '오늘 할 일을 가볍게 적어보세요.')}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">완료한 항목은 원래 위치에 남아요.</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : '<div class="empty">일주일 안에 다가오는 마감이 없어요.</div>'}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
   }
   function renderCalendar() {
     const weeks = C.layoutRanges(S.items, S.month);
@@ -149,7 +180,31 @@
     }).join('');
     const selected = S.items.filter(e => e.start_date <= S.selected && e.end_date >= S.selected);
     const monthLabel = `${S.month.slice(0, 4)}년 ${Number(S.month.slice(5))}월`;
-    root.innerHTML = intro('캘린더', '기간이 있는 일정은 시작일부터 마감일까지 이어져요.') + `<section class="card calendar-card"><div class="calendar-toolbar"><h2>${monthLabel}</h2><div class="month-actions"><button class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button><button class="secondary small" data-action="this-month">이번 달</button><button class="icon-button" aria-label="다음 달" data-action="next-month">›</button></div></div><div class="calendar-legend"><span><i class="dot"></i>${SCHOOL ? 'Teams' : 'Teams 예시'}</span><span><i class="dot personal"></i>개인 할 일</span><span class="muted">날짜를 누르면 아래에 상세 목록이 보여요.</span></div><div class="calendar-grid"><div class="weekdays">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="weekday">${d}</div>`).join('')}</div>${gridHtml}</div></section><section class="card" style="margin-top:20px"><div class="card-head selected-heading"><h2>${esc(pretty(S.selected))}</h2><span class="muted fine">기간 전체 기준 · 오늘 표시는 선택한 날짜를 따릅니다</span></div><div class="date-detail">${list(selected, '이 날짜에는 표시할 일정이 없어요.')}</div></section>`;
+    root.innerHTML = intro('캘린더', '기간이 있는 일정은 시작일부터 마감일까지 이어져요.') + `<section class="card calendar-card"><div class="calendar-toolbar"><h2>${monthLabel}</h2><span role="status" aria-live="polite">${S.pendingMonth ? esc(S.pendingMonth + ' 일정을 불러오는 중…') : ''}</span><div class="month-actions"><button class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button><button class="secondary small" data-action="this-month">이번 달</button><button class="icon-button" aria-label="다음 달" data-action="next-month">›</button></div></div><div class="calendar-legend"><span><i class="dot"></i>${SCHOOL ? 'Teams' : 'Teams 예시'}</span><span><i class="dot personal"></i>개인 할 일</span><span class="muted">날짜를 누르면 아래에 상세 목록이 보여요.</span></div><div class="calendar-grid"><div class="weekdays">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="weekday">${d}</div>`).join('')}</div>${gridHtml}</div></section><section class="card" style="margin-top:20px"><div class="card-head selected-heading"><h2>${esc(pretty(S.selected))}</h2><span class="muted fine">기간 전체 기준 · 오늘 표시는 선택한 날짜를 따릅니다</span></div><div class="date-detail">${list(selected, '이 날짜에는 표시할 일정이 없어요.')}</div></section>`;
+  }
+  async function changeMonth(action) {
+    const date = new Date((S.pendingMonth || S.month) + '-01T00:00:00Z');
+    if (action !== 'this-month') date.setUTCMonth(date.getUTCMonth() + (action === 'next-month' ? 1 : -1));
+    const month = action === 'this-month' ? S.day.slice(0, 7) : date.toISOString().slice(0, 7);
+    return loadMonth(month, action === 'this-month' ? S.day : month + '-01');
+  }
+  async function loadMonth(month, selected) {
+    const epoch = ++monthEpoch, sessionEpoch = authEpoch;
+    monthRequest?.abort();
+    S.pendingMonth = month; S.pendingMonthSelected = selected; render();
+    if (S.syncing) return;
+    const controller = new AbortController(); monthRequest = controller;
+    try {
+      await ensureCollectionReady();
+      if (epoch !== monthEpoch || !activeView(sessionEpoch)) return;
+      const grid = C.monthGrid(month), result = await api(`/api/calendar?start=${grid.start}&end=${grid.end}`, {signal: controller.signal});
+      if (epoch !== monthEpoch || !activeView(sessionEpoch)) return;
+      S.month = month; S.items = result.items; S.selected = selected;
+    } catch (error) {
+      if (epoch === monthEpoch && activeView(sessionEpoch)) failure(error);
+    } finally {
+      if (epoch === monthEpoch && activeView(sessionEpoch)) {monthRequest = null; S.pendingMonth = ''; render();}
+    }
   }
   function openDialog(title, content, footer = '') {
     if (modal.open) modal.close();
@@ -179,15 +234,19 @@
     $('#pick-date').min = a; $('#pick-date').max = b; $('#pick-date').value = a;
     $('#date-chips').innerHTML = [...new Set([...selectedDates, b])].filter(Boolean).sort().map(d => `<button type="button" class="secondary small" data-remove-date="${d}" ${d === b ? 'disabled' : ''}>${esc(d)} ${d === b ? '· 마지막 날' : '×'}</button>`).join('');
   }
-  async function mutate(operation, message) {
+  async function mutate(operation, message, clearQuick = false) {
     if (S.busy) return;
     S.busy = true;
-    const epoch = S.epoch, sessionEpoch = authEpoch;
+    let finishMutation;
+    mutationSettled = new Promise(resolve => {finishMutation = resolve;});
+    const sessionEpoch = authEpoch;
     document.querySelectorAll('button,input,select,textarea').forEach(el => {if (!el.disabled) {el.disabled = true; el.dataset.locked = '1';}});
     let saved = false;
     try {
       await operation(); saved = true;
-      if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
+      if (!activeView(sessionEpoch)) return;
+      mutationRevision++;
+      if (clearQuick) {S.quickDraft = ''; const input = $('#quick-form')?.elements?.title; if (input) input.value = '';}
       if (modal.open) modal.close(); modal.replaceChildren();
       await load(); toast(message);
     } catch (error) {
@@ -195,6 +254,7 @@
       if (saved && error.status !== 401) toast('저장됐지만 화면을 다시 불러오지 못했어요. 새로고침해 주세요.', true);
       else failure(error);
     } finally {
+      finishMutation();
       if (sessionEpoch === authEpoch) {
         S.busy = false;
         document.querySelectorAll('[data-locked]').forEach(el => {el.disabled = false; delete el.dataset.locked;});
@@ -224,7 +284,7 @@
     if (!S.today && !['today', 'calendar', 'refresh', 'retry-boot', 'logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
     const sessionEpoch = authEpoch;
     try {
-      if (button.dataset.changeDecision !== undefined) {const item = reviewItems[Number(button.dataset.changeIndex)]; return mutate(() => api('/api/changes/'+encodeURIComponent(item.id),{method:'POST',body:{accept:button.dataset.changeDecision==='accept'}}),'변경사항을 처리했어요.');}
+      if (button.dataset.changeDecision !== undefined) {const item = reviewDialogItems.get(button.dataset.changeId); if (!item) return; return mutate(() => api('/api/changes/'+encodeURIComponent(item.id),{method:'POST',body:{accept:button.dataset.changeDecision==='accept'}}),'변경사항을 처리했어요.');}
       if (button.dataset.detail) {const e = find(button.dataset.detail, button.dataset.source); if (e) detail(e); return;}
       if (button.dataset.day) {S.selected = button.dataset.day; render(); return;}
       if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); return;}
@@ -256,11 +316,7 @@
       }
       if (action === 'confirm-delete') return mutate(() => api(`/api/tasks/${encodeURIComponent(detailItem.id)}?version=${detailItem.version}`, {method: 'DELETE'}), '삭제했어요.');
       if (action === 'pick-date') {const d = $('#pick-date'); if (d.value && d.checkValidity()) {selectedDates.add(d.value); syncDates();} else d.reportValidity(); return;}
-      if (['prev-month', 'next-month', 'this-month'].includes(action)) {
-        if (action === 'this-month') {S.month = S.day.slice(0, 7); S.selected = S.day;}
-        else {const date = new Date(S.month + '-01T00:00:00Z'); date.setUTCMonth(date.getUTCMonth() + (action === 'next-month' ? 1 : -1)); S.month = date.toISOString().slice(0, 7); S.selected = S.month + '-01';}
-        return await load();
-      }
+      if (['prev-month', 'next-month', 'this-month'].includes(action)) return await changeMonth(action);
       if (action === 'logout' || action === 'disconnect-device') {await api('/auth/logout', {method: 'POST'}); clearPrivate(); loginScreen(); if (action === 'disconnect-device') toast('이 기기의 연동과 알림을 해제했어요.'); if (testServer()) await detachBrowserPush();}
     } catch (error) {if (sessionEpoch === authEpoch) failure(error);}
   });
@@ -291,7 +347,7 @@
     }
     if (form.id === 'quick-form') {
       const title = form.elements.title.value.trim(); if (!title) return;
-      return mutate(() => api('/api/tasks', {method: 'POST', body: {title, start_date: S.day, end_date: S.day, display_mode: 'daily'}}), '오늘 할 일에 추가했어요.');
+      return mutate(() => api('/api/tasks', {method: 'POST', body: {title, start_date: S.day, end_date: S.day, display_mode: 'daily'}}), '오늘 할 일에 추가했어요.', true);
     }
     if (form.id === 'task-form') {
       const data = Object.fromEntries(new FormData(form));
@@ -304,7 +360,18 @@
     if (form.id === 'filters-form') {
       const channels = Object.fromEntries([...form.querySelectorAll('[name=channel]')].map(el => [el.value, el.checked]));
       const disabled_kinds = [...form.querySelectorAll('[name=kind]')].filter(el => !el.checked).map(el => el.value);
-      if (SCHOOL) return mutate(async () => {for (const [id, enabled] of Object.entries(channels)) await api(`/api/channels/${encodeURIComponent(id)}/preference`, {method:'PUT',body:{enabled}}); await api('/api/settings', {method:'PUT',body:{...S.prefs,disabled_kinds}});}, '표시 설정을 저장했어요.');
+      if (SCHOOL) {
+        const changed = S.channels.filter(ch => channels[ch.id] !== undefined && channels[ch.id] !== ch.enabled);
+        const kindsChanged = JSON.stringify([...disabled_kinds].sort()) !== JSON.stringify([...S.prefs.disabled_kinds].sort());
+        if (!changed.length && !kindsChanged) {modal.close(); toast('변경된 설정이 없어요.'); return;}
+        return mutate(async () => {
+          for (const channel of changed) {
+            await api(`/api/channels/${encodeURIComponent(channel.id)}/preference`, {method:'PUT',body:{enabled:channels[channel.id]}});
+            channel.enabled = channels[channel.id];
+          }
+          if (kindsChanged) await api('/api/settings', {method:'PUT',body:{...S.prefs,disabled_kinds}});
+        }, '표시 설정을 저장했어요.');
+      }
       return mutate(() => api('/api/beta/display-settings', {method: 'PUT', body: {channels, disabled_kinds}}), '표시 설정을 저장했어요.');
     }
     if (form.id === 'feedback-form') {
@@ -329,13 +396,43 @@
     }
   }
   async function syncTeams() {
-    if (!testServer() || S.busy) return;
+    if (!testServer() || S.syncing) return;
     const epoch = authEpoch;
-    S.busy = true; toast('Teams 공지를 가져오고 있어요. 처음에는 시간이 걸릴 수 있어요.');
-    try {const result = await api('/api/teams/sync',{method:'POST'}); if (!activeView(epoch)) return; await load(); if (activeView(epoch)) toast(connectionText[result.state] || '연결 상태를 확인해 주세요.', result.state !== 'connected');} catch(error) {if (epoch === authEpoch) failure(error);} finally {if (epoch === authEpoch) S.busy = false;}
+    monthEpoch++; monthRequest?.abort(); monthRequest = null;
+    S.syncing = true; S.syncMessage = 'Teams 공지를 가져오고 있어요. 다른 화면도 계속 사용할 수 있어요.'; updateSyncStatus();
+    let ready = false;
+    try {
+      const result = await api('/api/teams/sync', {method:'POST', timeout:210000});
+      if (!activeView(epoch)) return;
+      const report = result.ingestion;
+      const incomplete = !!(report?.partial || report?.messages_failed);
+      S.syncMessage = report?.state === 'busy' ? '이미 Teams 공지를 확인하고 있어요. 잠시 후 새로고침으로 결과를 확인해 주세요.' : incomplete ? `최근 공지 중 일부를 확인했어요 (${report.channels_scanned}/${report.channels_total}개 채널).${report.messages_failed ? ' 처리하지 못한 공지가 있어 다음 수집에서 다시 확인해요.' : ' 남은 채널은 다음 수집에서 이어서 확인해요.'}` : connectionText[result.state] || '연결 상태를 확인해 주세요.';
+      S.syncUncertain = report?.state === 'busy';
+      if (S.syncUncertain) {toast(S.syncMessage); return;}
+      ready = true;
+      let revision;
+      do {
+        await mutationSettled;
+        if (!activeView(epoch)) return;
+        revision = mutationRevision;
+        await load({background:true, afterSync:true, mutationVersion:revision});
+      } while (activeView(epoch) && (S.busy || revision !== mutationRevision));
+      if (activeView(epoch)) toast(S.syncMessage, incomplete || result.state !== 'connected');
+    } catch (error) {
+      if (activeView(epoch)) {S.syncUncertain = !ready; S.syncMessage = error.message || 'Teams 공지 수집 결과를 확인하지 못했어요.'; failure(error);}
+    } finally {
+      if (epoch === authEpoch) {
+        S.syncing = false; updateSyncStatus();
+        if (S.pendingMonth) {
+          if (ready) await loadMonth(S.pendingMonth, S.pendingMonthSelected);
+          else {S.pendingMonth = ''; render();}
+        }
+      }
+    }
   }
   function changesPanel() {
-    openDialog('변경사항 검토', `<p class="muted">원문이 바뀐 일정은 확인 후 반영해요. 변경을 반영하면 현재 내 수정 내용을 대체해요. 검토 중인 일정의 예약 알림은 잠시 멈춰요.</p>${reviewItems.length ? reviewItems.map((change,i) => `<section class="change-item"><h3>${esc(change.before.title)}</h3><p class="fine">기존 · ${esc(period(change.before))} ${esc(change.before.time || '종일')}</p><p>변경 · ${esc(period(change.after))} ${esc(change.after.time || '종일')} ${change.after.cancelled ? '· 취소 또는 원문 삭제' : ''}</p><div class="detail-notes">${esc(change.after.notes || '')}</div><div class="button-row"><button class="secondary small" data-change-index="${i}" data-change-decision="keep">기존 유지</button><button class="primary small" data-change-index="${i}" data-change-decision="accept">변경 반영</button></div></section>`).join('') : '<div class="empty">검토할 변경사항이 없어요.</div>'}`);
+    reviewDialogItems = new Map(reviewItems.map(item => [String(item.id), item]));
+    openDialog('변경사항 검토', `<p class="muted">원문이 바뀐 일정은 확인 후 반영해요. 변경을 반영하면 현재 내 수정 내용을 대체해요. 검토 중인 일정의 예약 알림은 잠시 멈춰요.</p>${reviewItems.length ? reviewItems.map((change,i) => `<section class="change-item"><h3>${esc(change.before.title)}</h3><p class="fine">기존 · ${esc(period(change.before))} ${esc(change.before.time || '종일')}</p><p>변경 · ${esc(period(change.after))} ${esc(change.after.time || '종일')} ${change.after.cancelled ? '· 취소 또는 원문 삭제' : ''}</p><div class="detail-notes">${esc(change.after.notes || '')}</div><div class="button-row"><button class="secondary small" data-change-id="${esc(change.id)}" data-change-decision="keep">기존 유지</button><button class="primary small" data-change-id="${esc(change.id)}" data-change-decision="accept">변경 반영</button></div></section>`).join('') : '<div class="empty">검토할 변경사항이 없어요.</div>'}`);
   }
   async function notificationsPanel() {
     const epoch = authEpoch, push = await api('/api/push');
