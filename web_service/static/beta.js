@@ -186,21 +186,33 @@
     return `<div class="task-row ${e.source === 'personal' ? 'personal' : ''} ${e.completed ? 'done' : ''} ${e.cancelled ? 'cancelled' : ''}"><input aria-label="${esc(e.title)} 완료" type="checkbox" data-complete="${esc(e.id)}" data-source="${e.source}" ${e.completed ? 'checked' : ''} ${e.cancelled ? 'disabled' : ''}><button class="task-main" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="task-title">${esc(e.title)} ${e.cancelled ? '<span class="badge">취소</span>' : ''}</span><span class="task-meta">${esc(e.channel || '개인 할 일')} · ${esc(e.start_date !== e.end_date ? period(e) : kindName[e.kind] || e.kind)}</span></button><span class="task-time">${esc(e.time || '종일')}</span></div>`;
   }
   function list(items, empty = '표시할 할 일이 없어요.') {return items.length ? items.map(row).join('') : `<div class="empty">${empty}</div>`;}
+  function connectionNotice() {
+    if (S.service?.mode === 'preview') return '<div class="beta-banner" role="status"><strong>예시 화면</strong><span>실제 학교 계정이나 공지와 연결되지 않은 미리보기예요.</span></div>';
+    const state = S.connection?.state || 'not_connected';
+    if (['connected', 'checking', 'refresh_busy'].includes(state)) return '';
+    const signIn = ['not_connected', 'reauth_required', 'account_not_allowed'].includes(state);
+    const retry = ['refresh_unavailable', 'source_unavailable', 'verification_failed'].includes(state);
+    return `<div class="beta-banner" role="status"><strong>Teams 연결 확인</strong><span>${esc(connectionText[state] || connectionText.not_connected)}</span>${signIn ? '<a href="/auth/login">다시 로그인</a>' : retry ? '<button data-action="refresh">다시 확인</button>' : ''}<button data-action="security">연결 및 보안</button></div>`;
+  }
   function intro(title, subtitle) {
-    if (SCHOOL) return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions">${refreshAction()}<button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div><div class="beta-banner" role="status"><strong>${S.service?.mode === 'preview' ? '예시 화면' : '학교 계정 연결'}</strong><span>${esc(S.service?.mode === 'preview' ? '실제 학교 계정이나 공지와 연결되지 않은 미리보기예요.' : (connectionText[S.connection?.state] || connectionText.not_connected))}</span><a href="/auth/login">다시 로그인</a><button data-action="security">연결 및 보안</button></div>${testServer() ? `<div class="test-toolbar"><span class="badge">${S.service.mode === 'preview' ? '예시 전용 미리보기 · 실제 학교 계정 연결 없음' : '테스트 서버'}</span><button class="secondary small" data-action="sync-teams" ${S.syncing ? 'disabled aria-busy="true"' : ''}>${S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'}</button><span id="sync-status" role="status" aria-live="polite">${esc(S.syncMessage || '')}</span><button class="secondary small" data-action="changes">변경사항 <b>${reviewItems.length}</b></button><button class="secondary small" data-action="notifications">알림 설정</button><button class="secondary small" data-action="feedback">오류·의견 보내기</button></div>` : ''}`;
+    if (SCHOOL) return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions">${refreshAction()}<button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div>${connectionNotice()}${testServer() ? `<div class="test-toolbar"><span class="badge">${S.service.mode === 'preview' ? '예시 전용 미리보기 · 실제 학교 계정 연결 없음' : '테스트 서버'}</span><button class="secondary small" data-action="sync-teams" ${S.syncing ? 'disabled aria-busy="true"' : ''}>${S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'}</button><span id="sync-status" role="status" aria-live="polite">${esc(S.syncMessage || '')}</span><button class="secondary small" data-action="changes">변경사항 <b>${reviewItems.length}</b></button><button class="secondary small" data-action="notifications">알림 설정</button><button class="secondary small" data-action="feedback">오류·의견 보내기</button></div>` : ''}`;
     return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions">${refreshAction()}<button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div><div class="beta-banner"><strong>학교 로그인 전 베타</strong><span>Teams 일정은 예시예요. 직접 추가한 할 일은 저장돼요. 알림 발송과 실제 Teams 연결은 준비 중이에요.</span></div>`;
   }
   function rememberQuickDraft() {
     const input = $('#quick-form')?.elements?.title;
     if (input) S.quickDraft = input.value;
   }
+  function refreshMessage() {
+    const pending = SCHOOL && S.service?.mode !== 'preview' && ['checking', 'refresh_busy'].includes(S.connection?.state);
+    return S.refreshError || (pending ? connectionText[S.connection.state] : S.refreshing ? '최신 일정을 확인하고 있어요.' : '');
+  }
   function refreshAction() {
-    return `<button class="secondary" data-action="refresh" ${S.refreshing ? 'disabled aria-busy="true"' : ''}>${S.refreshing ? '갱신 중…' : '새로고침'}</button><span id="refresh-status" role="status" aria-live="polite">${esc(S.refreshError || (S.refreshing ? '최신 일정을 확인하고 있어요.' : ''))}</span>`;
+    return `<button class="secondary" data-action="refresh" ${S.refreshing ? 'disabled aria-busy="true"' : ''}>${S.refreshing ? '갱신 중…' : '새로고침'}</button><span id="refresh-status" role="status" aria-live="polite">${esc(refreshMessage())}</span>`;
   }
   function updateRefreshStatus() {
     const button = document.querySelector('[data-action="refresh"]'), status = $('#refresh-status');
     if (button) {button.disabled = !!(S.refreshing || S.busy); button.textContent = S.refreshing ? '갱신 중…' : '새로고침'; button.setAttribute('aria-busy', String(!!S.refreshing));}
-    if (status) status.textContent = S.refreshError || (S.refreshing ? '최신 일정을 확인하고 있어요.' : '');
+    if (status) status.textContent = refreshMessage();
   }
   function updateSyncStatus() {
     const button = document.querySelector('[data-action="sync-teams"]'), status = $('#sync-status');
