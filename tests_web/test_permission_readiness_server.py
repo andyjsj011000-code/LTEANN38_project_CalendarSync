@@ -1,4 +1,6 @@
 """Access refresh must not masquerade as an empty calendar or a missing item."""
+from datetime import datetime, timezone
+
 import pytest
 
 from conftest import CLIENT
@@ -204,3 +206,64 @@ def test_collection_recovery_remains_fail_closed_when_fresh_permission_verificat
     assert s.db.channels(session['user_id'], session['tenant_id']) == []
     assert client.get('/api/today').json()['teams'] == []
     assert s.db.device(device['id_hash'])['ingest_at'] == 0
+
+
+def personal_task(s, user, day='2026-10-22'):
+    return s.db.add_task(user, {
+        'title': 'My personal task', 'notes': '', 'start_date': day, 'end_date': day,
+        'time': None, 'display_mode': 'daily', 'selected_dates': []})
+
+
+def test_personal_today_remains_available_while_initial_teams_permission_is_pending(access_server, monkeypatch):
+    s = access_server
+    s.db.shared_ingestion_enabled = True
+    s.integration.source = CatalogSource()
+    client = s.client()
+    session, device = session_device(s, client)
+    item = personal_task(s, session['user_id'])
+    assert s.db.begin_sync(session['user_id'], 0, preserve_access=True)
+    status = s.db.sync_status(session['user_id'])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Personal agenda must not query or synchronize Teams')
+
+    monkeypatch.setattr(s.graph, 'channels', forbidden)
+    monkeypatch.setattr(s.db, 'agenda', forbidden)
+    monkeypatch.setattr(s.db, 'calendar', forbidden)
+    assert client.get('/api/today').status_code == 503
+    response = client.get('/api/personal/today')
+    assert response.status_code == 200
+    assert response.json() == {'date': '2026-10-22', 'personal': [item]}
+    assert s.graph.calls == 0 and s.integration.source.calls == 0
+    assert s.db.sync_status(session['user_id']) == status
+    assert s.db.channels(session['user_id'], session['tenant_id']) == []
+    assert s.db.device(device['id_hash'])['ingest_at'] == 0
+    assert client.get('/api/service').json()['personal_agenda'] is True
+
+
+def test_personal_today_uses_korean_date_and_rejects_invalid_dates(access_server, monkeypatch):
+    s = access_server
+    s.now[0] = int(datetime(2026, 10, 22, 16, tzinfo=timezone.utc).timestamp())
+    client = s.client()
+    session, _ = session_device(s, client)
+    item = personal_task(s, session['user_id'], '2026-10-23')
+    personal_task(s, session['user_id'], '2026-10-22')
+    assert client.get('/api/personal/today').json() == {'date': '2026-10-23', 'personal': [item]}
+    assert len(client.get('/api/personal/today?day=2026-10-22').json()['personal']) == 1
+    assert client.get('/api/personal/today?day=invalid').status_code == 422
+    assert s.graph.calls == 0
+
+
+@pytest.mark.parametrize('access', ['anonymous', 'expired', 'revoked'])
+def test_personal_today_still_requires_a_valid_school_session(access_server, access):
+    s = access_server
+    client = s.client(None) if access == 'anonymous' else s.client()
+    if access != 'anonymous':
+        session, device = session_device(s, client)
+        personal_task(s, session['user_id'])
+        if access == 'revoked':
+            s.db.revoke_device(device['id_hash'])
+        else:
+            s.now[0] += s.settings.session_seconds + 1
+    assert client.get('/api/personal/today').status_code == 401
+    assert s.graph.calls == 0

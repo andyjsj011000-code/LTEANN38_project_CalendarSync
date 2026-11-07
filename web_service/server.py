@@ -338,7 +338,7 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     app.router.lifespan_context=lifespan
 
     @app.get('/api/service')
-    def info(): return {'mode':'preview' if preview else 'test-server','school_login':not preview,'synthetic_data_only':preview,'idle_seconds':settings.idle_seconds,'shared_channel_ingestion':integration.shared_ingestion_enabled}
+    def info(): return {'mode':'preview' if preview else 'test-server','school_login':not preview,'synthetic_data_only':preview,'idle_seconds':settings.idle_seconds,'shared_channel_ingestion':integration.shared_ingestion_enabled,'personal_agenda':True}
     @app.get('/service-worker.js')
     def service_worker(): return FileResponse(static/'service-worker.js',media_type='text/javascript',headers={'Service-Worker-Allowed':'/','Cache-Control':'no-store'})
     @app.get('/manifest.webmanifest')

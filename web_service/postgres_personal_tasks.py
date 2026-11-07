@@ -10,7 +10,7 @@ must also be revalidated by the authenticated application boundary.
 """
 from uuid import uuid4
 
-from .storage import Conflict, Missing
+from .storage import Conflict, Missing, personal_agenda_result
 
 
 class PostgresPersonalTasks:
@@ -50,6 +50,16 @@ class PostgresPersonalTasks:
             if row is None:
                 raise Missing()
             return self._value(row)
+
+    def personal_agenda(self, user_id, tenant_id, day):
+        columns = ','.join('t.' + column for column in self._TASK_COLUMNS.split(','))
+        with self.connect() as db:
+            rows = db.execute(f'''SELECT {columns} FROM web_personal_tasks t
+                JOIN web_users u ON u.id=t.user_id
+                WHERE t.user_id=%s AND u.tenant_id=%s AND u.active=1
+                AND t.start_date<=%s AND t.end_date>=%s AND t.hidden=0''',
+                (user_id, tenant_id, day, day)).fetchall()
+        return personal_agenda_result([self._value(row) for row in rows], day)
 
     @staticmethod
     def _missing_or_conflict(db, user_id, item_id):

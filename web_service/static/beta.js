@@ -17,7 +17,7 @@
   const root = $('#app'), modal = $('#modal'), topbar = $('#topbar');
   const C = window.BetaCalendar;
   const S = {me: null, view: 'today', day: '', month: '', selected: '', today: null, items: [], upcoming: [], channels: [], prefs: null, busy: false, loading: false, loadError: false, epoch: 0};
-  const partNames = ['today','calendar','upcoming','channels','settings','changes'];
+  const partNames = ['personal','today','calendar','upcoming','channels','settings','changes'];
   S.ready = Object.fromEntries(partNames.map(name => [name,false])); S.partErrors = {};
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const kindName = {personal: '개인', assignment: '과제', application: '신청', event: '행사·일정'};
@@ -99,9 +99,10 @@
   function renderLoadState(error = S.loadError) {
     lastRenderKey = null;
     if (!S.me) return;
+    const pending = !!S.permissionPending, failed = error && !pending;
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
     $('#nav-today').classList.toggle('active', S.view === 'today'); $('#nav-calendar').classList.toggle('active', S.view === 'calendar');
-    root.innerHTML = `<section data-load-state="${error ? 'error' : 'loading'}" aria-busy="${!error}"><div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${S.view === 'calendar' ? '캘린더' : '오늘 할 일'}</h1><p class="muted">${error ? '로그인한 계정의 일정을 다시 불러와 주세요.' : '로그인을 확인했어요. 일정 정보를 불러오고 있어요.'}</p></div><div class="actions"><button class="${error ? 'primary' : 'secondary'}" data-action="refresh" ${error ? '' : 'disabled'}>${error ? '다시 불러오기' : '불러오는 중'}</button></div></div><section class="card" role="${error ? 'alert' : 'status'}" aria-live="polite"><div class="card-head"><h2>${error ? (S.permissionPending ? 'Teams 권한 확인을 기다리고 있어요' : '일정을 아직 불러오지 못했어요') : '일정을 확인하고 있어요'}</h2></div><div class="empty">${error ? '서버 응답이 늦거나 연결이 불안정할 수 있어요. 잠시 후 다시 불러와 주세요.' : '학교 일정의 접근 권한을 확인하는 데 시간이 걸릴 수 있어요. 완료되면 자동으로 표시해요.'}</div></section><div class="today-layout"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정</h2></div><div class="empty">${error ? '일정을 불러온 뒤 확인할 수 있어요.' : 'Teams 일정을 불러오는 중이에요.'}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일</h2></div><div class="empty">${error ? '할 일을 불러온 뒤 추가하거나 수정할 수 있어요.' : '개인 할 일을 불러오는 중이에요.'}</div></section></div></section>`;
+    root.innerHTML = `<section data-load-state="${pending ? 'checking' : failed ? 'error' : 'loading'}" aria-busy="${!failed}"><div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${S.view === 'calendar' ? '캘린더' : '오늘 할 일'}</h1><p class="muted">${failed ? '로그인한 계정의 일정을 다시 불러와 주세요.' : '로그인을 확인했어요. 일정 정보를 불러오고 있어요.'}</p></div><div class="actions"><button class="${failed ? 'primary' : 'secondary'}" data-action="refresh" ${failed || pending ? '' : 'disabled'}>${pending ? '다시 확인' : failed ? '다시 불러오기' : '불러오는 중'}</button></div></div><section class="card" role="${failed ? 'alert' : 'status'}" aria-live="polite"><div class="card-head"><h2>${pending ? 'Teams 권한 확인을 기다리고 있어요' : failed ? '일정을 아직 불러오지 못했어요' : '일정을 확인하고 있어요'}</h2></div><div class="empty">${pending ? '접근 권한을 확인하면 Teams 일정이 자동으로 표시돼요.' : failed ? '서버 응답이 늦거나 연결이 불안정할 수 있어요. 잠시 후 다시 불러와 주세요.' : '학교 일정의 접근 권한을 확인하는 데 시간이 걸릴 수 있어요. 완료되면 자동으로 표시해요.'}</div></section><div class="today-layout"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정</h2></div><div class="empty">${failed ? '일정을 불러온 뒤 확인할 수 있어요.' : 'Teams 일정을 불러오는 중이에요.'}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일</h2></div><div class="empty">${failed ? '할 일을 불러온 뒤 추가하거나 수정할 수 있어요.' : '개인 할 일을 불러오는 중이에요.'}</div></section></div></section>`;
   }
   async function ensureCollectionReady() {
     if (!S.syncUncertain) return;
@@ -203,18 +204,32 @@
       } catch (error) {
         if (!current() || (ingestionRetry && document.hidden)) return;
         if ([401,403].includes(error.status)) {failure(error); return;}
+        if (name === 'personal' && applied.has('today')) return;
         S.partErrors[name] = error.code === 'permission_check_pending' ? 'Teams 접근 권한을 확인하고 있어요.' : '불러오지 못했어요. 새로고침으로 다시 확인해 주세요.';
         if (presentPermissionPending(error)) {if (S.today) render(); return;}
-        errors.push(error);
+        errors.push({name,error});
         if (S.today) render();
       }
     };
+    const personal = S.service?.personal_agenda ? part('personal', '/api/personal/today', value => {
+      // A combined snapshot owns both sources once it has arrived in this load.
+      if (applied.has('today') || (S.today?.date && value.date < S.today.date)) return false;
+      const sameDay = S.today?.date === value.date;
+      if (!sameDay) S.ready.today = false;
+      Object.assign(S, {today:{date:value.date,personal:value.personal,teams:sameDay ? S.today.teams : []}, day:value.date,
+        month:S.month || value.date.slice(0,7), selected:S.selected || value.date, loading:false, refreshing:true});
+    }) : Promise.resolve();
     try {
       const today = await part('today', '/api/today', value => {
+        if (S.today?.date && value.date < S.today.date) {
+          S.partErrors.today = '날짜가 바뀌었어요. 새로고침으로 오늘의 Teams 일정을 확인해 주세요.';
+          render(); return false;
+        }
+        S.ready.personal = true; delete S.partErrors.personal;
         Object.assign(S, {today:value, day:value.date, month:S.month || value.date.slice(0,7), selected:S.selected || value.date, loading:false, refreshing:true, permissionPending:false});
       });
       if (!today || !publishable()) {
-        if (current() && !S.today && errors.length) {S.loadError = true; renderLoadState(true);}
+        // A personal-only response may still make the screen useful.
       } else {
         const month = S.month, grid = C.monthGrid(month);
         const jobs = [
@@ -242,7 +257,10 @@
         else S.ready.changes = true;
         await Promise.allSettled(jobs);
       }
-      if (current() && errors.length) {
+      if (!applied.has('today')) await personal;
+      const failures = errors.filter(({name}) => name !== 'personal' || !applied.has('today'));
+      if (current() && failures.length) {
+        if (!S.today) {S.loadError = true; renderLoadState(true);}
         S.refreshError = S.today ? '일부 최신 정보를 불러오지 못했어요. 마지막으로 확인한 일정은 유지했어요. 새로고침으로 다시 확인해 주세요.' : '일정을 불러오지 못했어요. 다시 불러오기를 눌러 주세요.';
         const error = new Error(S.refreshError); error.loadPresented = !S.today; throw error;
       }
@@ -312,10 +330,10 @@
     if (S.view === 'calendar') return renderCalendar();
     const all = [...S.today.teams, ...S.today.personal].filter(e => !e.cancelled), done = all.filter(e => e.completed).length;
     const upcoming = S.upcoming.filter(e => e.end_date > S.day && !e.completed && !e.cancelled).sort((a, b) => a.end_date.localeCompare(b.end_date) || (a.time || '').localeCompare(b.time || '')).slice(0, 5);
-    const teamsPending = SCHOOL && S.service?.mode !== 'preview' && (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state !== 'connected');
-    const teamsCount = teamsPending && !S.today.teams.length ? (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : S.today.teams.length;
-    const teamsEmpty = teamsPending ? (S.connection?.ingestion_pending || !S.ready.settings ? 'Teams 일정을 확인하는 대로 표시해요.' : connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
-    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${list(S.today.teams, teamsEmpty)}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${S.today.personal.length}</span></h2></div><div class="list">${list(S.today.personal, '오늘 할 일을 가볍게 적어보세요.')}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">완료한 항목은 원래 위치에 남아요.</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : '<div class="empty">일주일 안에 다가오는 마감이 없어요.</div>'}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
+    const teamsPending = !S.ready.today || (SCHOOL && S.service?.mode !== 'preview' && (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state !== 'connected'));
+    const teamsCount = teamsPending && !S.today.teams.length ? (!S.ready.today || !S.ready.settings || S.connection?.ingestion_pending || S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : S.today.teams.length;
+    const teamsEmpty = !S.ready.today ? (S.partErrors.today || 'Teams 일정을 확인하는 대로 표시해요.') : teamsPending ? (S.connection?.ingestion_pending || !S.ready.settings ? 'Teams 일정을 확인하는 대로 표시해요.' : connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
+    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${!S.ready.today && !S.today.teams.length ? `<div class="empty" role="${S.partErrors.today && !S.permissionPending ? 'alert' : 'status'}">${esc(teamsEmpty)}</div>` : list(S.today.teams, teamsEmpty)}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${S.today.personal.length}</span></h2></div><div class="list">${list(S.today.personal, '오늘 할 일을 가볍게 적어보세요.')}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">${S.ready.today ? '완료한 항목은 원래 위치에 남아요.' : '먼저 확인된 개인 할 일 기준이에요. Teams 일정은 확인 중이에요.'}</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : '<div class="empty">일주일 안에 다가오는 마감이 없어요.</div>'}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
   }
   function renderCalendar() {
     if (!S.ready.calendar) {

@@ -14,6 +14,8 @@ function deferred() {
   const promise = new Promise((done, fail) => {resolve = done; reject = fail;});
   return {promise, resolve, reject};
 }
+const personalTask = (values={}) => ({id:'personal-ready',source:'personal',title:'Personal first result',start_date:'2026-11-07',end_date:'2026-11-07',time:null,notes:'',kind:'personal',display_mode:'daily',selected_dates:[],completed:false,hidden:false,version:1,...values});
+const personalService = () => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true,personal_agenda:true});
 const writes = h => h.requests.filter(r => ['POST','PUT','PATCH','DELETE'].includes(r.options.method));
 const calendarUrl = (h, month) => {const grid = h.context.window.BetaCalendar.monthGrid(month); return `/api/calendar?start=${grid.start}&end=${grid.end}`;};
 const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelectorAll(selector) {
@@ -953,7 +955,119 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     h.activity();await settle();await h.advance(3000);
     assert.match(h.elements.app.innerHTML,/Verified resumed account result/);assert.match(h.elements.modal.innerHTML,/Draft during identity failure/);
   }
-  console.log('Usability UI: 91 synthetic scenarios passed (progressive independent responses, bounded ingestion polling, final-pass races, focus preservation and prior regressions).');
+
+  // Personal schedules appear while the independent Teams permission read is still pending.
+  {
+    const full=deferred(), task=personalTask();
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({date:'2026-11-07',personal:[task]}),'/api/today':()=>full.promise}});await settle();
+    assert.match(h.elements.app.innerHTML,/Personal first result/);assert.match(h.elements.app.innerHTML,/Teams 일정 <span class="count">확인 중/);
+    assert.match(h.elements.app.innerHTML,/role="status">Teams 일정을 확인하는 대로/);assert.match(h.elements.app.innerHTML,/개인 할 일 기준/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/오늘의 Teams 일정이 없어요|data-load-state|다시 로그인/);
+    assert.equal(h.requests.filter(r=>r.url.startsWith('/api/calendar?')).length,0);
+    await h.click({action:'new'});assert.equal(h.elements.modal.open,true);h.elements.modal.innerHTML+='<textarea>Draft before Teams arrives</textarea>';
+    full.resolve(response({...h.today,personal:[task]}));await settle();
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);assert.match(h.elements.app.innerHTML,/Personal first result/);
+    assert.match(h.elements.modal.innerHTML,/Draft before Teams arrives/);assert.equal(h.requests.filter(r=>r.url.startsWith('/api/calendar?')).length,2);
+  }
+  // A combined response completes the view without waiting for or later accepting stale personal data.
+  {
+    const personal=deferred(), task=personalTask({title:'Full snapshot personal'});
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>personal.promise,
+      '/api/today':()=>response({date:'2026-11-07',teams:[],personal:[task]})}});await settle();
+    assert.match(h.elements.app.innerHTML,/Full snapshot personal/);assert.equal(h.elements['refresh-button'].disabled,false);
+    personal.resolve(response({date:'2026-11-07',personal:[personalTask({title:'Stale delayed personal'})]}));await settle();
+    assert.match(h.elements.app.innerHTML,/Full snapshot personal/);assert.doesNotMatch(h.elements.app.innerHTML,/Stale delayed personal/);
+  }
+  // True empty personal data is distinguished from an unreceived personal response.
+  {
+    const personal=deferred(),full=deferred();
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>personal.promise,'/api/today':()=>full.promise}});await settle();
+    assert.match(h.elements.app.innerHTML,/개인 할 일을 불러오는 중/);assert.doesNotMatch(h.elements.app.innerHTML,/개인 할 일 <span class="count">0/);
+    personal.resolve(response({date:'2026-11-07',personal:[]}));await settle();
+    assert.match(h.elements.app.innerHTML,/개인 할 일 <span class="count">0/);assert.match(h.elements.app.innerHTML,/오늘 할 일을 가볍게/);
+    assert.match(h.elements.app.innerHTML,/Teams 일정 <span class="count">확인 중/);
+  }
+  // Permission-pending Teams is a progress state; personal completion and creation stay usable.
+  {
+    let task=personalTask(),items=[task];
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({date:'2026-11-07',personal:items}),
+      '/api/today':()=>response({code:'permission_check_pending'},503)}});await settle();
+    assert.match(h.elements.app.innerHTML,/Personal first result/);assert.match(h.elements.app.innerHTML,/role="status">Teams 접근 권한/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/role="alert"|서버 응답이 늦|data-load-state="error"/);
+    h.overrides['/api/tasks/personal-ready/state']=options=>{task={...task,...JSON.parse(options.body),version:2};items=[task];return response(task);};
+    await h.change({dataset:{complete:task.id,source:'personal'},checked:true});
+    assert.match(h.elements.app.innerHTML,/data-complete="personal-ready" data-source="personal" checked/);
+    const created=personalTask({id:'new-personal',title:'Added while Teams checks'});
+    h.overrides['/api/tasks']=()=>{items=[task,created];return response(created,201);};
+    const form={id:'quick-form',elements:{title:{value:created.title}}};h.elements['quick-form']=form;await h.submit(form);
+    assert.match(h.elements.app.innerHTML,/Added while Teams checks/);assert.equal(writes(h).length,2);
+  }
+  // A permission wait before either source arrives is announced as status, without a server-failure claim.
+  {
+    const personal=deferred(),h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>personal.promise,
+      '/api/today':()=>response({code:'permission_check_pending'},503)}});await settle();
+    assert.match(h.elements.app.innerHTML,/data-load-state="checking"/);assert.match(h.elements.app.innerHTML,/role="status"/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/role="alert"|서버 응답이 늦/);
+    personal.resolve(response({date:'2026-11-07',personal:[personalTask()]}));await settle();assert.match(h.elements.app.innerHTML,/Personal first result/);
+  }
+  // A stalled Teams response cannot remove the already verified personal list.
+  {
+    const full=deferred(),h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({date:'2026-11-07',personal:[personalTask()]}),'/api/today':()=>full.promise}});await settle();
+    await h.advance(90001);assert.match(h.elements.app.innerHTML,/Personal first result/);assert.doesNotMatch(h.elements.app.innerHTML,/data-load-state="error"/);
+    assert.match(h.elements.app.innerHTML,/role="alert">불러오지 못했어요/);assert.equal(h.elements['refresh-button'].disabled,false);
+  }
+  // Failure of the optional personal read is superseded by a complete successful snapshot.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({},503),
+      '/api/today':()=>response({date:'2026-11-07',teams:[],personal:[personalTask()]})}});await settle();
+    assert.match(h.elements.app.innerHTML,/Personal first result/);assert.doesNotMatch(h.elements['refresh-status'].textContent,/못했어요/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/role="alert"/);
+  }
+  // When neither source succeeds, the whole load still ends in an actionable error.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({},503),'/api/today':()=>response({},503)}});await settle();
+    assert.match(h.elements.app.innerHTML,/data-load-state="error"/);assert.match(h.elements.app.innerHTML,/role="alert"/);
+  }
+  // A new personal date never borrows Teams rows from the previous displayed day.
+  {
+    let day='2026-11-07';const task=personalTask();
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({date:day,personal:[{...task,start_date:day,end_date:day}]})}});await settle();
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);day='2026-11-08';const full=deferred();h.overrides['/api/today']=()=>full.promise;
+    const refresh=h.click({action:'refresh'});await settle();assert.match(h.elements.app.innerHTML,/11월 8일/);assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    full.resolve(response(h.today));await refresh;assert.match(h.elements.app.innerHTML,/11월 8일/);assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.match(h.elements.app.innerHTML,/날짜가 바뀌었어요/);
+  }
+  // Confirmed hide during the personal-first screen fences the old combined response.
+  {
+    const full=deferred(),task=personalTask();let items=[task];
+    const h=harness({ignoreAbort:new Set(['/api/today']),overrides:{'/api/service':personalService,
+      '/api/personal/today':()=>response({date:'2026-11-07',personal:items}),'/api/today':()=>full.promise}});await settle();
+    await h.click({detail:task.id,source:'personal'});h.overrides['/api/tasks/personal-ready/state']=()=>{items=[];return response({...task,hidden:true,version:2});};
+    h.overrides['/api/today']=()=>response({code:'permission_check_pending'},503);await h.click({action:'hide-detail'});
+    assert.doesNotMatch(h.elements.app.innerHTML,/Personal first result/);full.resolve(response({...h.today,personal:[task]}));await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/Personal first result/);assert.equal(writes(h).length,1);
+  }
+  // Logout prevents both abort-ignoring parallel sources from publishing private content.
+  {
+    const personal=deferred(),full=deferred(),h=harness({ignoreAbort:new Set(['/api/today','/api/personal/today']),overrides:{'/api/service':personalService,
+      '/api/personal/today':()=>personal.promise,'/api/today':()=>full.promise}});await settle();
+    await h.click({action:'logout'});const before=h.requests.length;personal.resolve(response({date:'2026-11-07',personal:[personalTask()]}));full.resolve(response(h.today));await settle();
+    assert.match(h.elements.app.innerHTML,/school-signin/);assert.doesNotMatch(h.elements.app.innerHTML,/Personal first result|Fixture assignment/);assert.equal(h.requests.length,before);
+  }
+  // A personal-only 401 clears the session even while a protected Teams response is pending.
+  {
+    const full=deferred(),h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({},401),'/api/today':()=>full.promise}});await settle();
+    assert.match(h.elements.app.innerHTML,/school-signin/);assert.doesNotMatch(h.elements.app.innerHTML,/Personal first result/);
+  }
+  // Identity verification failure also suspends the new automatic personal read.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({date:'2026-11-07',personal:[personalTask()]}),
+      '/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}});await settle();
+    h.overrides['/api/me']=()=>response({},503);await h.visibility(true);await h.visibility(false);await settle();
+    const before=h.requests.filter(r=>r.url==='/api/personal/today').length;await h.advance(30000);
+    assert.equal(h.requests.filter(r=>r.url==='/api/personal/today').length,before);assert.match(h.elements['refresh-status'].textContent,/자동 갱신을 잠시 멈췄어요/);
+  }
+  console.log('Usability UI: 104 synthetic scenarios passed (progressive independent responses, bounded ingestion polling, final-pass races, focus preservation and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);
@@ -1018,6 +1132,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
   return {elements, requests, history, controls, overrides, item, today, context,
     click(data) {return listeners.click({preventDefault() {}, target: {closest() {return {dataset: data, disabled: false};}}});},
     submit(form) {return listeners.submit({preventDefault() {}, target: form});},
+    change(target) {return listeners.change({target});},
     escape() {listeners.cancel?.({target:elements.modal}); elements.modal.close();},
     visibility(hidden) {context.document.hidden = hidden; return listeners.visibilitychange();},
     activity(type = 'pointerdown') {return listeners[type]({});},

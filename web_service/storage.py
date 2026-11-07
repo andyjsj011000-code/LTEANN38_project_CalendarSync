@@ -29,6 +29,14 @@ def digest(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def personal_agenda_result(items, day):
+    visible = [item for item in items if not item['hidden'] and (
+        item['end_date'] == day or item['display_mode'] == 'daily' or
+        (item['display_mode'] == 'selected' and day in item['selected_dates']))]
+    return {'date': day, 'personal': sorted(
+        visible, key=lambda item: (item.get('time') or '99:99', item['id']))}
+
+
 class Database:
     """Local development adapter. No connection to the legacy Oracle database."""
 
@@ -145,6 +153,17 @@ class Database:
             if not row:
                 raise Missing()
             return self._task_value(row)
+
+    def personal_agenda(self, user_id, tenant_id, day):
+        # This path intentionally reads only personal rows. A pending Teams
+        # proof must not hide the signed-in user's own tasks.
+        with self.connect() as c:
+            rows = c.execute('''SELECT t.* FROM web_personal_tasks t
+                JOIN web_users u ON u.id=t.user_id
+                WHERE t.user_id=? AND u.tenant_id=? AND u.active=1
+                AND t.start_date<=? AND t.end_date>=? AND t.hidden=0''',
+                (user_id, tenant_id, day, day)).fetchall()
+        return personal_agenda_result([self._task_value(row) for row in rows], day)
 
     def update_task(self, user_id, item_id, payload, version):
         self.task(user_id, item_id)

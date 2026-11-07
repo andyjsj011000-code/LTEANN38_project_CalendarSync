@@ -223,4 +223,9 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
         selected = day or datetime.fromtimestamp(db.clock(), KST).date()
         return db.agenda(session["user_id"], session["tenant_id"], selected.isoformat())
 
+    @app.get("/api/personal/today")
+    def personal_today(day: date | None = None, session=Depends(current_session)):
+        selected = day or datetime.fromtimestamp(db.clock(), KST).date()
+        return db.personal_agenda(session["user_id"], session["tenant_id"], selected.isoformat())
+
     return app

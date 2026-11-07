@@ -148,3 +148,29 @@ def test_reminder_cleanup_failure_rolls_back_task_deletion(postgres_tasks, monke
     with connect() as db:
         assert db.execute('SELECT 1 FROM web_reminder_rules WHERE user_id=%s AND item_id=%s',
                           ('alice', item['id'])).fetchone() == (1,)
+
+
+def test_personal_agenda_obeys_owner_tenant_visibility_dates_and_order(postgres_tasks):
+    repo, connect = postgres_tasks
+    base = {'notes': '', 'start_date': '2026-11-05', 'end_date': '2026-11-07',
+            'selected_dates': []}
+    daily = repo.add_task('alice', {**base, 'title': 'Daily', 'time': '10:00', 'display_mode': 'daily'})
+    selected = repo.add_task('alice', {**base, 'title': 'Selected', 'time': '09:00',
+                                     'display_mode': 'selected', 'selected_dates': ['2026-11-05']})
+    final = repo.add_task('alice', {**base, 'title': 'Final', 'time': '08:00', 'display_mode': 'final'})
+    hidden = repo.add_task('alice', {**base, 'title': 'Hidden', 'time': None, 'display_mode': 'daily'})
+    repo.task_state('alice', daily['id'], {'completed': True}, daily['version'])
+    repo.task_state('alice', hidden['id'], {'hidden': True}, hidden['version'])
+    repo.add_task('bob', {**base, 'title': 'Another user', 'time': None, 'display_mode': 'daily'})
+
+    first = repo.personal_agenda('alice', 't', '2026-11-05')
+    assert [item['id'] for item in first['personal']] == [selected['id'], daily['id']]
+    assert first['personal'][1]['completed'] is True
+    assert [item['id'] for item in repo.personal_agenda('alice', 't', '2026-11-06')['personal']] == [daily['id']]
+    assert [item['id'] for item in repo.personal_agenda('alice', 't', '2026-11-07')['personal']] == [
+        final['id'], selected['id'], daily['id']]
+    assert repo.personal_agenda('alice', 'wrong-tenant', '2026-11-05')['personal'] == []
+    assert repo.personal_agenda('missing-user', 't', '2026-11-05')['personal'] == []
+    with connect() as db:
+        db.execute("UPDATE web_users SET active=0 WHERE id='alice'")
+    assert repo.personal_agenda('alice', 't', '2026-11-05')['personal'] == []
