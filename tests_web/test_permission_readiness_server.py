@@ -5,6 +5,7 @@ from conftest import CLIENT
 from test_server import server
 from test_postgres_server_integration import postgres_server
 from test_ingestion_status import CatalogSource, seed_catalog, session_device
+from web_service.school_graph import GraphFailure
 
 
 @pytest.fixture(params=['server', 'postgres_server'])
@@ -141,3 +142,61 @@ def test_teams_reminder_routes_return_pending_without_reading_or_saving_rules(ac
     assert response.json()['code'] == 'permission_check_pending'
     assert response.headers['retry-after'] == '2'
     assert calls == []
+
+
+@pytest.mark.parametrize('failure', ['verification_failed', 'source_unavailable'])
+def test_queued_collection_failure_keeps_freshly_verified_cache_usable(access_server, monkeypatch, failure):
+    s = access_server
+    client, session, device = connected(s)
+    marked = []
+
+    def collect(*args):
+        raise GraphFailure(failure)
+
+    monkeypatch.setattr(s.integration.source, 'collect', collect)
+    monkeypatch.setattr(s.db, 'mark_ingested', marked.append)
+    response = client.post('/api/teams/sync')
+
+    assert response.status_code == 200 and response.json()['ingestion'] == {'state': 'queued'}
+    assert s.db.sync_status(session['user_id'])['state'] == 'connected'
+    assert marked == [] and s.db.device(device['id_hash'])['ingest_at'] == 0
+    assert [event['title'] for event in client.get('/api/today').json()['teams']] == ['Cached deadline']
+    assert client.patch('/api/events/direct:cached/state', json={'hidden': True}).status_code == 200
+
+
+def test_collection_failure_recovery_excludes_channels_revoked_during_collection(access_server, monkeypatch):
+    s = access_server
+    client, session, device = connected(s)
+
+    def collect(*args):
+        s.graph.allowed = False
+        raise GraphFailure('verification_failed')
+
+    monkeypatch.setattr(s.integration.source, 'collect', collect)
+    assert client.post('/api/teams/sync').status_code == 200
+
+    assert s.db.sync_status(session['user_id'])['state'] == 'connected'
+    assert s.db.channels(session['user_id'], session['tenant_id']) == []
+    assert client.get('/api/today').json()['teams'] == []
+    assert client.patch('/api/events/direct:cached/state', json={'hidden': True}).status_code == 404
+    assert s.db.device(device['id_hash'])['ingest_at'] == 0
+
+
+def test_collection_recovery_remains_fail_closed_when_fresh_permission_verification_fails(access_server, monkeypatch):
+    s = access_server
+    client, session, device = connected(s)
+
+    def channels(*args):
+        raise GraphFailure('verification_failed')
+
+    def collect(*args):
+        monkeypatch.setattr(s.graph, 'channels', channels)
+        raise GraphFailure('source_unavailable')
+
+    monkeypatch.setattr(s.integration.source, 'collect', collect)
+    assert client.post('/api/teams/sync').status_code == 200
+
+    assert s.db.sync_status(session['user_id'])['state'] == 'verification_failed'
+    assert s.db.channels(session['user_id'], session['tenant_id']) == []
+    assert client.get('/api/today').json()['teams'] == []
+    assert s.db.device(device['id_hash'])['ingest_at'] == 0

@@ -103,19 +103,46 @@ def test_revoked_device_cannot_publish_final_background_snapshot(server, monkeyp
     assert server.db.channels(session['user_id'], session['tenant_id']) == []
 
 
-def test_background_verification_failure_remains_fail_closed(server, monkeypatch):
-    _, session, device = enable_shared(server)
+@pytest.mark.parametrize('failure', ['verification_failed', 'source_unavailable'])
+def test_interrupted_collection_reverifies_and_retains_authorized_cache_without_completing(server, monkeypatch, failure):
+    client, session, device = enable_shared(server)
+    marked = []
 
     def collect(*args):
         assert server.db.sync_status(session['user_id'])['state'] == 'connected'
-        raise GraphFailure('verification_failed')
+        raise GraphFailure(failure)
 
     monkeypatch.setattr(server.integration.source, 'collect', collect)
+    monkeypatch.setattr(server.db, 'mark_ingested', marked.append)
+
+    report = server.integration.run_sync(device, ingest=True)
+
+    assert report == {'channels_total': 1, 'channels_scanned': 0,
+                      'messages_seen': 0, 'messages_analyzed': 0, 'messages_cached': 0,
+                      'messages_failed': 0, 'partial': True, 'state': 'partial'}
+    assert marked == [] and server.graph.calls == 2
+    assert server.db.sync_status(session['user_id'])['state'] == 'connected'
+    assert [event['title'] for event in client.get('/api/today').json()['teams']] == ['Cached deadline']
+    assert server.db.device(device['id_hash'])['ingest_at'] == 0
+
+
+@pytest.mark.parametrize('failure', ['reauth_required', 'account_not_allowed', 'unexpected'])
+def test_auth_and_unexpected_collection_failures_do_not_use_cache_recovery(server, monkeypatch, failure):
+    _, session, device = enable_shared(server)
+    marked = []
+
+    def collect(*args):
+        if failure == 'unexpected':
+            raise ValueError('Unexpected source contract failure')
+        raise GraphFailure(failure)
+
+    monkeypatch.setattr(server.integration.source, 'collect', collect)
+    monkeypatch.setattr(server.db, 'mark_ingested', marked.append)
 
     assert server.integration.run_sync(device, ingest=True) is None
-    assert server.db.sync_status(session['user_id'])['state'] == 'verification_failed'
+    assert server.graph.calls == 1 and marked == []
+    assert server.db.sync_status(session['user_id'])['state'] == ('source_unavailable' if failure == 'unexpected' else failure)
     assert server.db.channels(session['user_id'], session['tenant_id']) == []
-    assert server.db.device(device['id_hash'])['ingest_at'] == 0
 
 
 @pytest.mark.parametrize('busy', [False, True])

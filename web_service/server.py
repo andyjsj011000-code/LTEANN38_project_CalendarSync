@@ -143,8 +143,20 @@ class ServerIntegration(SchoolIntegration):
                         self.db.commit_snapshot(device,channels,cached,self.settings.access_seconds,lease)
                         lease=None
                         progress('cached_commit','completed')
-                    events=self.source.collect(token,channels,device['tenant_id'],self.db,user)
-                    report=getattr(events,'report',None)
+                    try:
+                        events=self.source.collect(token,channels,device['tenant_id'],self.db,user)
+                        report=getattr(events,'report',None)
+                    except GraphFailure as error:
+                        if not self.shared_ingestion_enabled or error.state not in {'verification_failed','source_unavailable'}:
+                            raise
+                        # A failed post fetch does not establish that every
+                        # cached channel is inaccessible. Reverify permissions
+                        # below before publishing any of the shared catalog.
+                        # No per-message progress was returned by this pass.
+                        report={'channels_total':len(channels),'channels_scanned':0,
+                                'messages_seen':0,'messages_analyzed':0,'messages_cached':0,
+                                'messages_failed':0,'partial':True}
+                        progress('collection','interrupted')
                     if report is not None:
                         # Only content-free counts cross the API boundary. An
                         # incomplete pass must remain eligible for the worker.

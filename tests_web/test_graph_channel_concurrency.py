@@ -96,7 +96,7 @@ def test_fatal_probe_stops_queued_channels_and_returns_no_partial_catalog(status
     probes=[]
     def probe(request):
         probes.append(request.url.path)
-        return httpx.Response(status)
+        return httpx.Response(status,headers={'Retry-After':'30'} if status==429 else {})
     graph,_=graph_for({TEAM_A:[{'id':f'channel-{i}'} for i in range(62)]},probe)
     with pytest.raises(GraphFailure) as error:
         graph.channels('token',USER,TENANT)

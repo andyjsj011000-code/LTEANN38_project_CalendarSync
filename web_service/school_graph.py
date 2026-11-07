@@ -1,14 +1,36 @@
 """Delegated Graph reads only; never uses application-wide Graph credentials."""
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 from queue import Empty, Queue
 from threading import Event, Lock
 from time import monotonic
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 from uuid import UUID
 import httpx
 
 SCOPES = ["User.Read", "Team.ReadBasic.All", "Channel.ReadBasic.All", "ChannelMessage.Read.All"]
 BASE = "https://graph.microsoft.com/v1.0"
+
+def _graph_stage(parsed):
+    parts=parsed.path.strip('/').split('/')
+    if parts==['v1.0','me']: return 'member'
+    if parts==['v1.0','me','joinedTeams']: return 'joined_teams'
+    if len(parts)==4 and parts[:2]==['v1.0','teams'] and parts[3]=='allChannels': return 'team_channels'
+    if len(parts)>=6 and parts[:2]==['v1.0','teams'] and parts[3]=='channels' and parts[5]=='messages':
+        if len(parts)==6:
+            return 'permission_probe' if parse_qs(parsed.query).get('$top')==['1'] else 'source_messages'
+        if len(parts)==7: return 'source_message'
+        if len(parts)==8 and parts[7]=='replies': return 'source_replies'
+    return 'other'
+
+def _graph_log(stage,outcome,status=0,attempt=1):
+    try:
+        # Fixed labels and numeric fields only: never URLs, identities or bodies.
+        logging.getLogger('uvicorn.error').info(
+            'CalendarSync Graph stage=%s outcome=%s http_status=%d attempt=%d',
+            stage,outcome,status,attempt)
+    except Exception:
+        pass
 
 class GraphFailure(Exception):
     def __init__(self, state="verification_failed"):
@@ -22,60 +44,105 @@ class DelegatedGraph:
         self._next_probe=0
         self._channel_probe_times={}
 
-    def _read(self, client, token, url, *, forbidden_missing=True, deadline=None):
+    def _retry_wait(self, seconds, stopped=None):
+        return (stopped or Event()).wait(seconds)
+
+    def _retry_throttled(self, response, attempt, deadline, stage, stopped=None):
+        _graph_log(stage,'throttled',429,attempt)
+        if attempt>=3:
+            _graph_log(stage,'retry_exhausted',429,attempt)
+            return False
+        raw=response.headers.get('retry-after','').strip()
+        # An advertised delay beyond our budget must never be shortened.
+        if raw.isascii() and raw.isdigit():
+            delay=int(raw) if len(raw)<=4 else 10000
+            delay=max(1,delay)
+        else:
+            delay=2**(attempt-1)
+        if monotonic()+delay>=deadline:
+            _graph_log(stage,'retry_deadline',429,attempt)
+            return False
+        return not self._retry_wait(delay,stopped)
+
+    def _read(self, client, token, url, *, forbidden_missing=True, deadline=None,
+              stopped=None, retry_gate=None):
         parsed = urlsplit(url)
+        stage=_graph_stage(parsed)
         if parsed.scheme != "https" or parsed.netloc != "graph.microsoft.com" or not parsed.path.startswith("/v1.0/") or parsed.fragment:
+            _graph_log(stage,'invalid_target')
             raise GraphFailure()
-        if deadline is not None and monotonic()>deadline:
-            raise GraphFailure()
-        try:
-            with client.stream("GET", url, headers={"Authorization":"Bearer "+token}) as response:
-                if response.status_code == 403:
-                    if forbidden_missing: return None
-                    raise GraphFailure()
-                if response.status_code == 404:
-                    return None
-                if response.status_code == 401:
-                    raise GraphFailure("reauth_required")
-                if response.status_code != 200:
-                    raise GraphFailure()
-                chunks=[]; size=0
-                for chunk in response.iter_bytes():
-                    if deadline is not None and monotonic()>deadline:
+        retry_deadline=min(deadline,monotonic()+10) if deadline is not None else monotonic()+10
+        for attempt in range(1,4):
+            if stopped is not None and stopped.is_set(): return None
+            active_deadline=deadline if attempt==1 else retry_deadline
+            if active_deadline is not None and monotonic()>active_deadline:
+                _graph_log(stage,'deadline',0,attempt)
+                raise GraphFailure()
+            if attempt>1 and retry_gate is not None and not retry_gate(retry_deadline): return None
+            try:
+                with client.stream("GET", url, headers={"Authorization":"Bearer "+token}) as response:
+                    status=response.status_code
+                    if status==429:
+                        pass
+                    elif status!=200:
+                        _graph_log(stage,'http_failure',status,attempt)
+                        if status==403 and forbidden_missing: return None
+                        if status==404: return None
+                        if status==401: raise GraphFailure('reauth_required')
                         raise GraphFailure()
-                    size += len(chunk)
-                    if size > 2_000_000:
-                        raise GraphFailure()
-                    chunks.append(chunk)
-                import json
-                data=json.loads(b"".join(chunks))
-                if not isinstance(data,dict):
-                    raise GraphFailure()
-                return data
-        except (httpx.HTTPError, ValueError) as error:
-            raise GraphFailure() from None
+                    else:
+                        chunks=[]; size=0
+                        for chunk in response.iter_bytes():
+                            if active_deadline is not None and monotonic()>active_deadline:
+                                _graph_log(stage,'deadline',200,attempt)
+                                raise GraphFailure()
+                            size += len(chunk)
+                            if size > 2_000_000:
+                                _graph_log(stage,'response_limit',200,attempt)
+                                raise GraphFailure()
+                            chunks.append(chunk)
+                        import json
+                        data=json.loads(b"".join(chunks))
+                        if not isinstance(data,dict):
+                            _graph_log(stage,'invalid_response',200,attempt)
+                            raise GraphFailure()
+                        if attempt>1: _graph_log(stage,'recovered',200,attempt)
+                        return data
+            except httpx.HTTPError:
+                _graph_log(stage,'transport_error',0,attempt)
+                raise GraphFailure() from None
+            except ValueError:
+                _graph_log(stage,'invalid_response',200,attempt)
+                raise GraphFailure() from None
+            if not self._retry_throttled(response,attempt,retry_deadline,stage,stopped):
+                if stopped is not None and stopped.is_set(): return None
+                raise GraphFailure()
 
     def _pages(self, client, token, path, deadline):
         url=BASE+path; expected_path=urlsplit(url).path; items=[]; visited=set()
         for _ in range(20):
             if monotonic()>deadline or url in visited or urlsplit(url).path != expected_path:
+                _graph_log(_graph_stage(urlsplit(BASE+path)),'pagination_guard')
                 raise GraphFailure()
             visited.add(url)
-            data=self._read(client,token,url)
+            data=self._read(client,token,url,deadline=deadline)
             if data is None:
                 return []
             values=data.get("value")
             if not isinstance(values,list) or len(items)+len(values)>500:
+                _graph_log(_graph_stage(urlsplit(BASE+path)),'invalid_page',200)
                 raise GraphFailure()
             items.extend(values)
             url=data.get("@odata.nextLink")
             if not url:
                 return items
+        _graph_log(_graph_stage(urlsplit(BASE+path)),'page_limit')
         raise GraphFailure()
 
-    def _member(self, client, token, object_id):
-        me=self._read(client,token,BASE+"/me?$select=id,userType")
+    def _member(self, client, token, object_id, *, deadline=None):
+        me=self._read(client,token,BASE+"/me?$select=id,userType",deadline=deadline)
         if not me or me.get("id", "").lower()!=object_id.lower() or me.get("userType")!="Member":
+            _graph_log('member','membership_failed',200)
             raise GraphFailure("account_not_allowed")
 
     def assert_member(self, token, object_id):
@@ -128,7 +195,9 @@ class DelegatedGraph:
                                 return permitted
                             path=f"/teams/{channel['team_id']}/channels/{quote(channel['id'],safe='')}/messages?$top=1"
                             # A listed channel name alone is not a permission proof.
-                            allowed=self._read(client,token,BASE+path,deadline=deadline) is not None
+                            allowed=self._read(client,token,BASE+path,deadline=deadline,stopped=stopped,
+                                retry_gate=lambda retry_deadline:self._wait_for_probe(channel['id'],retry_deadline,stopped)) is not None
+                            if stopped.is_set(): return permitted
                             if monotonic()>deadline:
                                 raise GraphFailure()
                             if allowed:
@@ -156,7 +225,7 @@ class DelegatedGraph:
     def channels(self, token, object_id, tenant_id):
         deadline=monotonic()+80
         with self.client_factory() as client:
-            self._member(client,token,object_id)
+            self._member(client,token,object_id,deadline=deadline)
             teams=self._pages(client,token,"/me/joinedTeams?$select=id,displayName",deadline)
             candidates={}
             routes=set()

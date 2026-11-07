@@ -8,7 +8,7 @@ from urllib.parse import quote,urlsplit,urlencode,unquote
 import httpx
 from pydantic import BaseModel,ConfigDict,Field,model_validator
 from .oracle_source import plain,PlainText
-from .school_graph import DelegatedGraph,GraphFailure,BASE
+from .school_graph import DelegatedGraph,GraphFailure,BASE,_graph_log
 from .storage import digest
 
 class ExtractedEvent(BaseModel):
@@ -113,20 +113,33 @@ class TeamsGraph(DelegatedGraph):
         parsed=urlsplit(url)
         decoded=unquote(parsed.path); expected=unquote(urlsplit(prefix).path)
         tail=decoded[len(expected):].split('/') if decoded.startswith(expected) else []
-        if parsed.netloc!='graph.microsoft.com' or parsed.scheme!='https' or parsed.query or parsed.fragment or len(tail)!=2 or tail[1]!='$value' or tail[0] in {'','.','..'} or '\\' in decoded: return None
+        if parsed.netloc!='graph.microsoft.com' or parsed.scheme!='https' or parsed.query or parsed.fragment or len(tail)!=2 or tail[1]!='$value' or tail[0] in {'','.','..'} or '\\' in decoded:
+            _graph_log('hosted_image','invalid_target')
+            return None
         with self.client_factory() as client:
             try:
                 with client.stream('GET',url,headers={'Authorization':'Bearer '+token}) as response:
                     kind=response.headers.get('content-type','').split(';')[0]
-                    if response.status_code==401: raise GraphFailure('reauth_required')
-                    if response.status_code!=200 or kind not in {'image/png','image/jpeg','image/webp'}: raise GraphFailure()
+                    if response.status_code!=200:
+                        _graph_log('hosted_image','http_failure',response.status_code)
+                        if response.status_code==401: raise GraphFailure('reauth_required')
+                        raise GraphFailure()
+                    if kind not in {'image/png','image/jpeg','image/webp'}:
+                        _graph_log('hosted_image','invalid_media',200)
+                        raise GraphFailure()
                     data=b''
                     for chunk in response.iter_bytes():
                         data+=chunk
-                        if len(data)>3_000_000: raise GraphFailure()
-                    if not data: raise GraphFailure()
+                        if len(data)>3_000_000:
+                            _graph_log('hosted_image','response_limit',200)
+                            raise GraphFailure()
+                    if not data:
+                        _graph_log('hosted_image','empty_response',200)
+                        raise GraphFailure()
                     return 'data:'+kind+';base64,'+base64.b64encode(data).decode()
-            except httpx.HTTPError: raise GraphFailure() from None
+            except httpx.HTTPError:
+                _graph_log('hosted_image','transport_error')
+                raise GraphFailure() from None
 
 class AIExtractor:
     def __init__(self,key='',model='gpt-4o-mini',client_factory=None):
