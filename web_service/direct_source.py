@@ -41,6 +41,56 @@ def complete_plain(value):
         raise GraphFailure('source_unavailable')
     return text
 
+
+def _hosted_image_target(channel,message_id,url):
+    prefix=(BASE+f"/teams/{quote(channel['team_id'],safe='')}/channels/{quote(channel['id'],safe='')}/messages/"
+            +quote(message_id,safe='')+'/hostedContents/')
+    parsed=urlsplit(url)
+    decoded=unquote(parsed.path); expected=unquote(urlsplit(prefix).path)
+    tail=decoded[len(expected):].split('/') if decoded.startswith(expected) else []
+    return (parsed.netloc=='graph.microsoft.com' and parsed.scheme=='https' and not parsed.query
+            and not parsed.fragment and len(tail)==2 and tail[1]=='$value'
+            and tail[0] not in {'','.','..'} and '\\' not in decoded)
+
+
+def _message_context(message,channel,message_id,images,reply_limit):
+    # These local checks must also run for a cached source revision. A prior
+    # truncated analysis is not proof that the current input is complete.
+    if message.get('replies@odata.nextLink') is not None:
+        raise GraphFailure('source_unavailable')
+    html=(message.get('body') or {}).get('content','')
+    replies=message.get('replies') or []
+    if len(replies)>reply_limit:
+        raise GraphFailure('source_unavailable')
+    body=complete_plain(html)
+    changed_processing=len(body)>10000
+    text='작성일: '+message.get('createdDateTime','')+'\n제목: '+str(message.get('subject') or '')+'\n본문: '+body
+    for reply in replies:
+        reply_html=(reply.get('body') or {}).get('content','')
+        if images and '<img' in reply_html.lower():
+            raise GraphFailure('source_unavailable')
+        reply_text=complete_plain(reply_html)
+        changed_processing=changed_processing or len(reply_text)>10000
+        text+='\n답글: '+reply_text
+    if len(text)>16000:
+        raise GraphFailure('source_unavailable')
+    links=[]
+    if images and '<img' in html.lower():
+        from html.parser import HTMLParser
+        class ImageLinks(HTMLParser):
+            def handle_starttag(self,tag,attrs):
+                if tag=='img': links.append(dict(attrs).get('src',''))
+        parser=ImageLinks(); parser.feed(html)
+        if len(links)>3:
+            raise GraphFailure('source_unavailable')
+        for url in links:
+            if not _hosted_image_target(channel,message_id,url):
+                _graph_log('hosted_image','invalid_target')
+                raise GraphFailure('source_unavailable')
+        changed_processing=changed_processing or (bool(links) and '<img' not in html)
+    return text,links,changed_processing
+
+
 class TeamsGraph(DelegatedGraph):
     def message_path(self,channel,message=None):
         root=f"/teams/{quote(channel['team_id'],safe='')}/channels/{quote(channel['id'],safe='')}/messages"
@@ -66,10 +116,15 @@ class TeamsGraph(DelegatedGraph):
             if message is None or message.get('deletedDateTime'): return message
             if complete_replies:
                 message['replies']=self._complete_replies(client,token,path,message_id,deadline)
+                message.pop('replies@odata.nextLink',None)
                 return message
             replies=self._read(client,token,path+'/replies?$top=30',forbidden_missing=False)
             if replies is None or not isinstance(replies.get('value'),list): raise GraphFailure()
-            message['replies']=replies['value'][:30]
+            message['replies']=replies['value']
+            if '@odata.nextLink' in replies:
+                message['replies@odata.nextLink']=replies['@odata.nextLink']
+            else:
+                message.pop('replies@odata.nextLink',None)
             return message
     def _complete_replies(self,client,token,message_path,message_id,deadline):
         """Read a bounded complete thread; partial reads must never look complete."""
@@ -109,11 +164,7 @@ class TeamsGraph(DelegatedGraph):
             url=next_link
         raise GraphFailure('source_unavailable')
     def hosted_image(self,token,channel,message_id,url):
-        prefix=BASE+self.message_path(channel,message_id)+'/hostedContents/'
-        parsed=urlsplit(url)
-        decoded=unquote(parsed.path); expected=unquote(urlsplit(prefix).path)
-        tail=decoded[len(expected):].split('/') if decoded.startswith(expected) else []
-        if parsed.netloc!='graph.microsoft.com' or parsed.scheme!='https' or parsed.query or parsed.fragment or len(tail)!=2 or tail[1]!='$value' or tail[0] in {'','.','..'} or '\\' in decoded:
+        if not _hosted_image_target(channel,message_id,url):
             _graph_log('hosted_image','invalid_target')
             return None
         with self.client_factory() as client:
@@ -278,6 +329,19 @@ class DirectSource:
                     key=digest(channel['id']+'|'+mid)
                     version=digest(json.dumps({k:message.get(k) for k in ('body','subject','replies','deletedDateTime','lastModifiedDateTime')},sort_keys=True,ensure_ascii=False))
                     old=known.get(mid)
+                    if not message.get('deletedDateTime'):
+                        try:
+                            text,image_links,changed_processing=_message_context(
+                                message,channel,mid,self.images,500 if targeted is not None else 30)
+                        except (ValueError,GraphFailure) as error:
+                            if not broad or (isinstance(error,GraphFailure) and error.state!='source_unavailable'):
+                                raise
+                            channel_failed=True; report['messages_failed']+=1; report['partial']=True
+                            continue
+                        if changed_processing:
+                            # Only posts whose valid input changed under these
+                            # fixes need one new analysis, not the whole catalog.
+                            version=digest(version+'|complete-input-v1')
                     if old and old['version']==version:
                         touched=db.touch_analysis(key,**({'ingestion_lease':lease} if shared else {}))
                         if shared and touched is False:
@@ -296,34 +360,19 @@ class DirectSource:
                     try:
                         created=message.get('createdDateTime','')
                         if created and not old and targeted is None:
-                            created_at=datetime.fromisoformat(created.replace('Z','+00:00'))
-                            if created_at<datetime.fromtimestamp(db.clock(),timezone.utc)-timedelta(days=30): continue
-                        html=(message.get('body') or {}).get('content','')
-                        replies=message.get('replies') or []
-                        as_text=complete_plain if targeted is not None else plain
-                        text='작성일: '+created+'\n제목: '+str(message.get('subject') or '')+'\n본문: '+as_text(html)
-                        for reply in (replies if targeted is not None else replies[:30]):
-                            reply_html=(reply.get('body') or {}).get('content','')
-                            if targeted is not None and self.images and '<img' in reply_html.lower():
-                                # Reply hosted images need their own Graph resource path;
-                                # do not acknowledge a thread while ignoring them.
-                                raise GraphFailure('source_unavailable')
-                            text+='\n답글: '+as_text(reply_html)
-                        if targeted is not None and (len(replies)>500 or len(text)>16000):
-                            # AIExtractor has a 16000-character input bound. A complete
-                            # targeted thread must not silently lose its tail there.
-                            raise GraphFailure('source_unavailable')
+                            # Replies can revive an old root. Keep the existing
+                            # lookback window while considering the whole thread.
+                            activity=[stamp for item in [message]+(message.get('replies') or [])
+                                      for field in ('createdDateTime','lastModifiedDateTime','lastEditedDateTime')
+                                      if (stamp:=item.get(field))]
+                            latest=max(datetime.fromisoformat(stamp.replace('Z','+00:00')) for stamp in activity)
+                            if latest<datetime.fromtimestamp(db.clock(),timezone.utc)-timedelta(days=30): continue
                         images=[]
-                        if self.images and '<img' in html:
-                            from html.parser import HTMLParser
-                            class ImageLinks(HTMLParser):
-                                def __init__(self): super().__init__(); self.links=[]
-                                def handle_starttag(self,tag,attrs):
-                                    if tag=='img': self.links.append(dict(attrs).get('src',''))
-                            parser=ImageLinks(); parser.feed(html)
-                            for url in parser.links[:3]:
-                                image=self.graph.hosted_image(token,channel,mid,url)
-                                if image: images.append(image)
+                        for url in image_links:
+                            image=self.graph.hosted_image(token,channel,mid,url)
+                            if image is None:
+                                raise GraphFailure('source_unavailable')
+                            images.append(image)
                         previous=old['events'] if old else []
                         # Retired event keys are hints for identity reuse only. They
                         # must not be reintroduced as visible/cancelled events.

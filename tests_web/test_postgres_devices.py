@@ -9,6 +9,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from web_service.postgres_devices import PostgresDevices
+from web_service.postgres_sync import PostgresSync
 from web_service.storage import Missing, digest
 
 
@@ -108,6 +109,46 @@ def test_current_refresh_failure_requires_reauthentication(devices):
     assert repo.lock_refresh(key) is None
     with pytest.raises(Missing):
         repo.session_device({'id_hash': digest('session-a'), 'user_id': 'alice'})
+
+
+@pytest.mark.parametrize('operation', ['revoke_device', 'fail_connection'])
+def test_losing_one_device_invalidates_removed_access_freshness_for_other_devices(devices, operation):
+    repo, path, now = devices
+    first = add(repo)
+    with sqlite3.connect(path) as db:
+        db.execute('INSERT INTO web_sessions VALUES(?,?,?,?)',
+                   (digest('session-a2'), 'alice', 'csrf-a2', 9999))
+        db.execute("INSERT INTO web_school_sync(user_id,checked_at,state) VALUES('alice',?,'connected')", (now[0],))
+    raw, _ = repo.add_connection('session-a2', 'alice', 'second-token', 3600)
+    sync = PostgresSync(repo.connect, repo.seal, repo.unseal, repo.clock)
+    sync.shared_ingestion_enabled = True
+    getattr(repo, operation)(first)
+    assert repo.device(digest(raw)) is not None
+    assert repo.school_session('session-a2', 1800) is not None
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT count(*) FROM web_channel_access WHERE user_id='alice'").fetchone()[0] == 0
+        assert db.execute("SELECT checked_at FROM web_school_sync WHERE user_id='alice'").fetchone()[0] == 0
+    # No clock advance: the second device can renew rather than serve an empty
+    # calendar until the removed permission proof's old freshness period ends.
+    assert sync.begin_sync('alice', 60, preserve_access=True)
+
+
+@pytest.mark.parametrize('operation', ['revoke_device', 'fail_connection'])
+def test_device_invalidation_preserves_another_snapshot_owners_lease(devices, operation):
+    repo, path, now = devices
+    first = add(repo)
+    sync = PostgresSync(repo.connect, repo.seal, repo.unseal, repo.clock)
+    sync.shared_ingestion_enabled = True
+    lease = sync.begin_sync('alice', 0, preserve_access=True)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE web_school_sync SET checked_at=? WHERE user_id='alice'", (now[0],))
+    before = sync.sync_status('alice')
+    getattr(repo, operation)(first)
+    after = sync.sync_status('alice')
+    assert after == {**before, 'checked_at': 0}
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT lease_token FROM web_school_sync WHERE user_id='alice'").fetchone()[0] == lease
+    assert sync.begin_sync('alice', 60, preserve_access=True) is False
 
 
 def test_second_connection_for_same_session_rolls_back_new_credentials(devices):

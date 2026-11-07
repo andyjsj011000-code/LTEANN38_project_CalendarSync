@@ -72,19 +72,24 @@ def sender_from_env(): return PushSender(os.environ.get('WEB_VAPID_PRIVATE_KEY',
 
 class Notifications:
     def __init__(self,db,sender): self.db,self.sender=db,sender
-    def due(self,user,tenant):
+    def due(self,user,tenant,*,only_key=None):
         now=datetime.fromtimestamp(self.db.clock(),KST); today=now.date().isoformat()
         prefs=self.db.preferences(user)
         pending={c['event_id'] for c in self.db.changes(user,tenant)}
         candidates=[]
         # Keep the morning Teams and personal notifications separate.
-        agenda=self.db.agenda(user,tenant,today)
         morning=datetime.fromisoformat(today+'T'+prefs['morning_time']).replace(tzinfo=KST)
-        if prefs['morning_enabled'] and 0<=(now-morning).total_seconds()<600:
+        if (only_key is None or only_key.startswith('morning:')) and prefs['morning_enabled'] and 0<=(now-morning).total_seconds()<600:
+            agenda=self.db.agenda(user,tenant,today)
             for group in ('teams','personal'):
                 visible=[e for e in agenda[group] if not e['completed'] and not e['cancelled'] and e['id'] not in pending]
-                if visible: candidates.append(('morning:'+today+':'+group,{'title':'CalendarSync','body':'학교 일정을 확인할 시간이에요.' if group=='teams' else '개인 할 일을 확인할 시간이에요.','url':'/','tag':'morning-'+today+'-'+group}))
+                key='morning:'+today+':'+group
+                if visible and (only_key is None or only_key==key): candidates.append((key,{'title':'CalendarSync','body':'학교 일정을 확인할 시간이에요.' if group=='teams' else '개인 할 일을 확인할 시간이에요.','url':'/','tag':'morning-'+today+'-'+group}))
+        if only_key is not None and only_key.startswith('morning:'):
+            return candidates
         for item in self.db.calendar(user,tenant,'0001-01-01','9999-12-31'):
+            if only_key is not None and not only_key.startswith('item:'+item['source']+':'+item['id']+':'):
+                continue
             if item['completed'] or item['cancelled'] or item['id'] in pending: continue
             deadline=datetime.fromisoformat(item['end_date']+'T'+(item.get('time') or '23:59')).replace(tzinfo=KST)
             rule=self.db.rules(user,item['id'],item['source'])
@@ -98,7 +103,7 @@ class Notifications:
             for due in times:
                 if 0<=(now-due).total_seconds()<600:
                     key='item:'+item['source']+':'+item['id']+':'+due.isoformat()
-                    candidates.append((key,{'title':'CalendarSync','body':'확인할 학교 일정이 있어요.' if item['source']=='teams' else '확인할 개인 할 일이 있어요.','url':'/','tag':digest(key)[:24]}))
+                    if only_key is None or only_key==key: candidates.append((key,{'title':'CalendarSync','body':'확인할 학교 일정이 있어요.' if item['source']=='teams' else '확인할 개인 할 일이 있어요.','url':'/','tag':digest(key)[:24]}))
         return candidates
 
     def dispatch(self,device):
@@ -114,6 +119,20 @@ class Notifications:
                 if not lease: continue
                 # A successful storage claim may race a logout. Recheck before
                 # contacting the external push endpoint; completion also fences.
+                current=self.db.device(device['id_hash'])
+                if not current or current.get('state')=='reauth_required': return sent
+                # Candidates can wait behind claims or earlier sends. Respect
+                # task state and reminder changes made since the initial list.
+                try:
+                    eligible=bool(self.due(device['user_id'],device['tenant_id'],only_key=key))
+                except Exception:
+                    if fenced: self.db.finish_delivery_lease(delivery,lease,False)
+                    else: self.db.finish_delivery(delivery,False)
+                    raise
+                if not eligible:
+                    if fenced: self.db.finish_delivery_lease(delivery,lease,False)
+                    else: self.db.finish_delivery(delivery,False)
+                    continue
                 current=self.db.device(device['id_hash'])
                 if not current or current.get('state')=='reauth_required': return sent
                 try: outcome=self.sender.send(subscription['subscription'],payload)

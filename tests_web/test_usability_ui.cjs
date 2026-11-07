@@ -546,7 +546,162 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     assert.match(h.elements.app.innerHTML,/2026년 12월/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
     assert.equal(writes(h).filter(request => request.options.method==='PATCH').length,1);
   }
-  console.log('Usability UI: 49 synthetic scenarios passed (confirmed hide/restore, persistent pending/error feedback, stale-read cancellation, state-preserving refresh, fail-closed auth and prior regressions).');
+  // A slow hidden-list response cannot replace a newly opened personal-task draft.
+  {
+    const pending=deferred(), h=harness(); await settle();
+    h.overrides['/api/hidden?start=2026-01-01&end=2026-12-31']=() => pending.promise;
+    const hidden=h.click({action:'hidden'}); await settle(); await h.click({action:'new'});
+    h.elements.modal.innerHTML+='<textarea>Keep new task draft</textarea>';
+    pending.resolve(response({items:[]})); await hidden;
+    assert.match(h.elements.modal.innerHTML,/Keep new task draft/); assert.doesNotMatch(h.elements.modal.innerHTML,/hidden-list/);
+  }
+  // An old reminder response cannot replace a different task's draft or change its eventual write target.
+  {
+    const task={id:'task-b',source:'personal',title:'Task B',start_date:'2026-11-07',end_date:'2026-11-07',display_mode:'daily',selected_dates:[],version:1,hidden:false,completed:false};
+    const pending=deferred(), h=harness(); await settle(); h.today.personal=[task]; await h.click({action:'refresh'});
+    h.overrides['/api/reminders/teams/fixture']=() => pending.promise;
+    await h.click({detail:'fixture',source:'teams'}); const reminder=h.click({action:'reminders'}); await settle();
+    await h.click({action:'close'}); await h.click({detail:'task-b',source:'personal'}); await h.click({action:'edit-detail'});
+    h.elements.modal.innerHTML+='<textarea>Keep task B draft</textarea>';
+    pending.resolve(response({offsets:[],custom_times:[]})); await reminder;
+    assert.match(h.elements.modal.innerHTML,/Keep task B draft/); assert.doesNotMatch(h.elements.modal.innerHTML,/id="reminder-form"/);
+    h.context.FormData=class {constructor(form){return new Map(Object.entries(form.values));}};
+    h.overrides['/api/tasks/task-b']=() => response({...task,title:'Edited B',version:2});
+    h.overrides['/api/today']=() => response({},503);
+    await h.submit({id:'task-form',values:{title:'Edited B',notes:'',start_date:task.start_date,end_date:task.end_date,time:'',display_mode:'daily'}});
+    assert.equal(writes(h).at(-1).url,'/api/tasks/task-b'); assert.equal(JSON.parse(writes(h).at(-1).options.body).version,1);
+    assert.match(h.elements.app.innerHTML,/Edited B/);
+  }
+  // A slow notification panel cannot replace a newer feedback draft.
+  {
+    const pending=deferred(), h=harness(); await settle(); h.overrides['/api/push']=() => pending.promise;
+    const notification=h.click({action:'notifications'}); await settle(); await h.click({action:'feedback'});
+    h.elements.modal.innerHTML+='<textarea>Keep feedback draft</textarea>';
+    pending.resolve(response({configured:false,registered:false,background_enabled:true})); await notification;
+    assert.match(h.elements.modal.innerHTML,/Keep feedback draft/); assert.doesNotMatch(h.elements.modal.innerHTML,/id="notification-form"/);
+  }
+  // With two asynchronous panel requests, only the last requested panel opens.
+  {
+    const first=deferred(), last=deferred(), h=harness(); await settle();
+    h.overrides['/api/hidden?start=2026-01-01&end=2026-12-31']=() => first.promise; h.overrides['/api/push']=() => last.promise;
+    const hidden=h.click({action:'hidden'}), notification=h.click({action:'notifications'}); await settle();
+    first.resolve(response({items:[]})); await hidden; assert.notEqual(h.elements.modal.open,true);
+    last.resolve(response({configured:false,registered:false,background_enabled:true})); await notification;
+    assert.match(h.elements.modal.innerHTML,/id="notification-form"/);
+  }
+  // Both an explicit close and Escape cancel a pending reminder dialog.
+  for (const close of ['button','escape']) {
+    const pending=deferred(), h=harness(); await settle(); h.overrides['/api/reminders/teams/fixture']=() => pending.promise;
+    await h.click({detail:'fixture',source:'teams'}); const reminder=h.click({action:'reminders'}); await settle();
+    if(close==='button') await h.click({action:'close'}); else h.escape();
+    pending.resolve(response({offsets:[],custom_times:[]})); await reminder;
+    assert.equal(h.elements.modal.open,false); assert.doesNotMatch(h.elements.modal.innerHTML,/id="reminder-form"/);
+  }
+  // Errors for the current dialog are visible and announced inside that dialog.
+  {
+    const h=harness(); await settle();
+    h.overrides['/api/reminders/teams/fixture']=() => response({detail:'권한 확인이 진행 중이에요.',code:'permission_check_pending'},503);
+    await h.click({detail:'fixture',source:'teams'}); await h.click({action:'reminders'});
+    assert.equal(h.elements.modal.open,true); assert.equal(h.elements['mutation-status'].hidden,false);
+    assert.equal(h.elements['mutation-status'].attributes.role,'alert'); assert.match(h.elements['mutation-status'].textContent,/권한 확인이 진행 중/);
+    assert.equal(writes(h).length,0);
+  }
+  // An obsolete dialog's error cannot overwrite the current draft or its inline status.
+  {
+    const pending=deferred(), h=harness(); await settle(); h.overrides['/api/reminders/teams/fixture']=() => pending.promise;
+    await h.click({detail:'fixture',source:'teams'}); const reminder=h.click({action:'reminders'}); await settle();
+    await h.click({action:'feedback'}); h.elements.modal.innerHTML+='<textarea>New feedback draft</textarea>';
+    const status=h.elements['mutation-status'].textContent;
+    pending.resolve(response({detail:'Old panel failed'},503)); await reminder;
+    assert.match(h.elements.modal.innerHTML,/New feedback draft/); assert.equal(h.elements['mutation-status'].textContent,status);
+    assert.doesNotMatch(h.elements.toast.textContent,/Old panel failed/);
+  }
+  // Confirmed deletion removes only the chosen task before slow reads finish and frees navigation.
+  {
+    const task={id:'delete-task',source:'personal',title:'Delete this task',start_date:'2026-11-07',end_date:'2026-11-09',display_mode:'daily',selected_dates:[],version:1,hidden:false,completed:false};
+    const h=harness(); await settle(); h.today.personal=[task]; await h.click({action:'refresh'});
+    const write=deferred(), read=deferred(); h.overrides['/api/tasks/delete-task?version=1']=() => write.promise; h.overrides['/api/today']=() => read.promise;
+    await h.click({detail:'delete-task',source:'personal'}); await h.click({action:'delete-detail'}); const deletion=h.click({action:'confirm-delete'}); await settle();
+    assert.match(h.elements['mutation-status'].textContent,/삭제하는 중/); assert.match(h.elements.app.innerHTML,/Delete this task/);
+    write.resolve(response(null,204)); await settle(); assert.doesNotMatch(h.elements.app.innerHTML,/Delete this task/); assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.match(h.elements.toast.textContent,/삭제했어요/); await h.click({action:'calendar'}); assert.match(h.elements.app.innerHTML,/calendar-grid/);
+    read.resolve(response({...h.today,personal:[]})); await deletion; assert.equal(writes(h).length,1);
+  }
+  // A confirmed deletion stays removed if the post-delete read fails.
+  {
+    const task={id:'delete-task',source:'personal',title:'Deleted task stays gone',start_date:'2026-11-07',end_date:'2026-11-07',display_mode:'daily',selected_dates:[],version:1};
+    const h=harness(); await settle(); h.today.personal=[task]; await h.click({action:'refresh'});
+    h.overrides['/api/tasks/delete-task?version=1']=() => response(null,204); h.overrides['/api/today']=() => response({},503);
+    await h.click({detail:task.id,source:'personal'}); await h.click({action:'delete-detail'}); await h.click({action:'confirm-delete'});
+    assert.doesNotMatch(h.elements.app.innerHTML,/Deleted task stays gone/); assert.match(h.elements.toast.textContent,/저장됐지만/);
+  }
+  // A rejected delete retains the task and presents the conflict inside its confirmation dialog.
+  {
+    const task={id:'delete-task',source:'personal',title:'Keep conflicting task',start_date:'2026-11-07',end_date:'2026-11-07',display_mode:'daily',selected_dates:[],version:1};
+    const h=harness(); await settle(); h.today.personal=[task]; await h.click({action:'refresh'});
+    h.overrides['/api/tasks/delete-task?version=1']=() => response({},409);
+    await h.click({detail:task.id,source:'personal'}); await h.click({action:'delete-detail'}); await h.click({action:'confirm-delete'});
+    assert.match(h.elements.app.innerHTML,/Keep conflicting task/); assert.equal(h.elements.modal.open,true);
+    assert.equal(h.elements['mutation-status'].attributes.role,'alert'); assert.equal(writes(h).length,1);
+  }
+  // Teams overrides expose and submit only the fields that the server actually applies.
+  {
+    const h=harness(); await settle(); await h.click({detail:'fixture',source:'teams'}); await h.click({action:'override-detail'});
+    assert.doesNotMatch(h.elements.modal.innerHTML,/name="display_mode"|id="pick-date"/); assert.match(h.elements.modal.innerHTML,/name="title"/);
+    h.context.FormData=class {constructor(form){return new Map(Object.entries(form.values));}};
+    h.overrides['/api/events/fixture/override']=() => response({saved:true});
+    await h.submit({id:'task-form',values:{title:'Changed title',notes:'Notes',start_date:'2026-11-07',end_date:'2026-11-08',time:'',display_mode:'final'}});
+    const body=JSON.parse(writes(h).at(-1).options.body); assert.equal(body.title,'Changed title'); assert.equal(body.time,null);
+    assert.ok(!('display_mode' in body)); assert.ok(!('selected_dates' in body));
+    await h.click({action:'new'}); assert.match(h.elements.modal.innerHTML,/name="display_mode"/); assert.match(h.elements.modal.innerHTML,/id="pick-date"/);
+  }
+  // A newly created personal task is visible immediately after its confirmed write even if reads fail.
+  {
+    const h=harness(); await settle();
+    h.overrides['/api/tasks']=() => response({id:'created-task',source:'personal',title:'Created without repeat',start_date:'2026-11-07',end_date:'2026-11-07',display_mode:'daily',selected_dates:[],version:1,completed:false,hidden:false},201);
+    h.overrides['/api/today']=() => response({},503);
+    await h.submit({id:'quick-form',elements:{title:{value:'Created without repeat'}}});
+    assert.match(h.elements.app.innerHTML,/Created without repeat/); assert.equal(writes(h).length,1); assert.match(h.elements.toast.textContent,/저장됐지만/);
+  }
+  // A confirmed personal edit replaces its title/version locally and honors its updated date range.
+  {
+    const task={id:'edit-task',source:'personal',title:'Old today task',start_date:'2026-11-07',end_date:'2026-11-07',display_mode:'selected',selected_dates:['2026-11-07'],version:1,completed:false,hidden:false};
+    const updated={...task,title:'Updated December task',start_date:'2026-12-01',end_date:'2026-12-03',display_mode:'daily',selected_dates:[],version:2};
+    const h=harness(); await settle(); h.today.personal=[task]; await h.click({action:'refresh'});
+    await h.click({detail:task.id,source:'personal'}); await h.click({action:'edit-detail'});
+    assert.match(h.elements.modal.innerHTML,/name="display_mode"/);
+    h.context.FormData=class {constructor(form){return new Map(Object.entries(form.values));}};
+    h.overrides['/api/tasks/edit-task']=() => response(updated); h.overrides['/api/today']=() => response({},503);
+    await h.submit({id:'task-form',values:{title:updated.title,notes:'',start_date:updated.start_date,end_date:updated.end_date,time:'',display_mode:'daily'}});
+    assert.doesNotMatch(h.elements.app.innerHTML,/Old today task|Updated December task/);
+    h.overrides['/api/calendar']=() => response({items:[updated]}); await h.click({action:'calendar'}); await h.click({action:'next-month'});
+    assert.match(h.elements.app.innerHTML,/Updated December task/); assert.equal(writes(h).length,1);
+  }
+  // A fake denied push permission is announced inside its originating notification dialog.
+  {
+    const h=harness(); await settle(); let permissions=0;
+    h.context.navigator={serviceWorker:{}}; h.context.window.PushManager=function(){};
+    h.context.Notification={requestPermission(){permissions++; return Promise.resolve('denied');}};
+    h.context.window.Notification=h.context.Notification;
+    h.overrides['/api/push']=() => response({configured:true,registered:false,background_enabled:true});
+    await h.click({action:'notifications'}); await h.click({action:'push-enable'});
+    assert.equal(permissions,1); assert.equal(writes(h).length,0); assert.equal(h.elements.modal.open,true);
+    assert.equal(h.elements['mutation-status'].attributes.role,'alert'); assert.match(h.elements['mutation-status'].textContent,/알림 권한이 허용되지/);
+  }
+  // A late fake permission denial from a closed dialog cannot contaminate a new task draft.
+  {
+    const permission=deferred(), h=harness(); await settle();
+    h.context.navigator={serviceWorker:{}}; h.context.window.PushManager=function(){};
+    h.context.Notification={requestPermission(){return permission.promise;}}; h.context.window.Notification=h.context.Notification;
+    h.overrides['/api/push']=() => response({configured:true,registered:false,background_enabled:true});
+    await h.click({action:'notifications'}); const enabling=h.click({action:'push-enable'}); await settle();
+    await h.click({action:'close'}); await h.click({action:'new'}); h.elements.modal.innerHTML+='<textarea>New task after permission request</textarea>';
+    const status=h.elements['mutation-status'].textContent, toast=h.elements.toast.textContent;
+    permission.resolve('denied'); await enabling;
+    assert.match(h.elements.modal.innerHTML,/New task after permission request/); assert.equal(h.elements['mutation-status'].textContent,status);
+    assert.equal(h.elements.toast.textContent,toast); assert.equal(writes(h).length,0);
+  }
+  console.log('Usability UI: 65 synthetic scenarios passed (dialog request ordering/cancellation, inline errors, confirmed personal CRUD, supported override fields and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);
@@ -611,6 +766,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
   return {elements, requests, history, controls, overrides, item, today, context,
     click(data) {return listeners.click({preventDefault() {}, target: {closest() {return {dataset: data, disabled: false};}}});},
     submit(form) {return listeners.submit({preventDefault() {}, target: form});},
+    escape() {listeners.cancel?.({target:elements.modal}); elements.modal.close();},
     visibility(hidden) {context.document.hidden = hidden; return listeners.visibilitychange();},
     activity(type = 'pointerdown') {return listeners[type]({});},
     // Simulates a suspended/throttled browser where clock time passes before timers run.

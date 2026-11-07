@@ -76,6 +76,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
   vm.runInContext(source('beta.js'), context);
   return {elements, requests, history, overrides, item, today, context,
     click(data) {return listeners.click({preventDefault() {}, target: {closest() {return {dataset: data, disabled: false};}}});},
+    submit(form) {return listeners.submit({preventDefault() {}, target: form});},
     visibility(hidden) {context.document.hidden = hidden; return listeners.visibilitychange();},
     activity(type = 'pointerdown') {return listeners[type]({});},
     // Simulates a suspended/throttled browser where clock time passes before timers run.
@@ -377,5 +378,86 @@ const signedOut = h => {
     pending.resolve(response({id: 'fixture-user', name: 'Fixture student', csrf_token: 'fixture-csrf'})); await settle();
     assert.ok(h.elements.app.innerHTML.includes('Fixture assignment'));
   }
-  console.log('Initial-load UI: 30 synthetic scenarios passed (bounded initial loads, state-preserving tab returns, deduped session checks, drafts, idle deadlines, session replacement, transient errors and logout races).');
+  // Typing for longer than server idle expiry renews only the viewing session,
+  // preserving drafts without reloading calendar data or prolonging devices.
+  {
+    const h=harness(); await settle(); let lastSeen=h.context.Date.now(), expired=false;
+    const requests=h.requests.length, app=h.elements.app.innerHTML;
+    h.elements.modal.open=true; h.elements.modal.innerHTML='<textarea>Long active draft</textarea>';
+    h.elements['quick-form']={elements:{title:{value:'Unsent quick draft'}}};
+    h.overrides['/api/me']=() => {
+      if (h.context.Date.now()-lastSeen>=1800000) {expired=true; return response({},401);}
+      lastSeen=h.context.Date.now();
+      return response({id:'fixture-user',name:'Fixture student',csrf_token:'fixture-csrf'});
+    };
+    for (let minute=0;minute<31;minute++) {
+      await h.advance(60000); h.activity('keydown'); await settle();
+      assert.equal(h.elements.app.innerHTML,app);
+      assert.equal(h.elements.modal.innerHTML,'<textarea>Long active draft</textarea>');
+      assert.equal(h.elements['quick-form'].elements.title.value,'Unsent quick draft');
+    }
+    assert.equal(expired,false);
+    assert.equal(h.requests.length,requests+31);
+    assert.ok(h.requests.slice(requests).every(request => request.url==='/api/me' && !request.options.method));
+    h.overrides['/api/tasks']=() => response({id:'saved-task'},h.context.Date.now()-lastSeen<1800000?201:401);
+    await h.submit({id:'quick-form',elements:{title:{value:'Long active draft'}}});
+    assert.doesNotMatch(h.elements.app.innerHTML,/school-signin/);
+    assert.match(h.elements.toast.textContent,/추가했어요/);
+    assert.equal(h.requests.filter(request => request.options.method==='POST').length,1);
+  }
+  // Repeated input is throttled and shares an in-flight identity check.
+  {
+    const h=harness(); await settle(); const before=h.requests.length, pending=deferred();
+    h.overrides['/api/me']=() => pending.promise;
+    await h.advance(59999);
+    for (let count=0;count<20;count++) h.activity('keydown');
+    await settle(); assert.equal(h.requests.length,before);
+    await h.advance(1);
+    for (let count=0;count<20;count++) h.activity(count%2?'touchstart':'pointerdown');
+    await settle(); assert.equal(h.requests.length,before+1);
+    pending.resolve(response({id:'fixture-user',name:'Fixture student',csrf_token:'fixture-csrf'})); await settle();
+    await h.advance(59999); h.activity(); await settle(); assert.equal(h.requests.length,before+1);
+  }
+  // Hidden activity and unattended time must not renew the server or local idle deadline.
+  {
+    const h=harness(); await settle(); const before=h.requests.length;
+    h.visibility(true); await h.advance(60000);
+    for (const kind of ['pointerdown','keydown','touchstart']) h.activity(kind);
+    await settle(); assert.equal(h.requests.length,before);
+    await h.advance(1740001); signedOut(h);
+    assert.equal(h.requests.length,before);
+  }
+  // The activity heartbeat enforces replacement/revocation exactly like tab resume.
+  for (const [identity,status] of [
+    [{id:'another-user',csrf_token:'fixture-csrf'},200],
+    [{id:'fixture-user',csrf_token:'replacement-session'},200],
+    [{},401], [{},403]
+  ]) {
+    const h=harness(); await settle(); h.elements.modal.open=true; h.elements.modal.innerHTML='Private draft';
+    h.overrides['/api/me']=() => response(identity,status);
+    const before=h.requests.length; await h.advance(60000); h.activity('keydown'); await settle(); signedOut(h);
+    assert.equal(h.elements.modal.open,false); assert.equal(h.elements.modal.innerHTML,'');
+    assert.equal(h.requests.length,before+1);
+  }
+  // A transient heartbeat failure preserves input and retries only on later real activity.
+  {
+    const h=harness(); await settle(); const before=h.requests.length;
+    h.elements.modal.open=true; h.elements.modal.innerHTML='Keep this draft';
+    h.overrides['/api/me']=() => response({},503);
+    await h.advance(60000); h.activity(); await settle();
+    assert.equal(h.elements.modal.innerHTML,'Keep this draft'); assert.equal(h.elements.modal.open,true);
+    await h.advance(120000); assert.equal(h.requests.length,before+1);
+    delete h.overrides['/api/me']; h.activity(); await settle();
+    assert.equal(h.requests.length,before+2); assert.equal(h.elements.modal.innerHTML,'Keep this draft');
+  }
+  // A delayed activity heartbeat cannot repaint private data after logout.
+  {
+    const pending=deferred(), h=harness({ignoreAbort:new Set(['/api/me'])}); await settle();
+    h.overrides['/api/me']=() => pending.promise;
+    await h.advance(60000); h.activity(); await settle(); await h.click({action:'logout'}); signedOut(h);
+    const before=h.requests.length;
+    pending.resolve(response({id:'fixture-user',name:'Late identity',csrf_token:'fixture-csrf'})); await settle();
+    signedOut(h); assert.equal(h.requests.length,before);
+  }
+  console.log('Initial-load UI: 39 synthetic scenarios passed (bounded loads, activity-only session checks, preserved long drafts, idle limits, session replacement and logout races).');
 })().catch(error => {console.error(error); process.exitCode = 1;});

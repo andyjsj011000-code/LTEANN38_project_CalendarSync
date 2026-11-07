@@ -38,6 +38,7 @@ def test_complete_thread_reads_reply_after_first_page_and_normal_mode_is_preserv
     normal = api.message('token', CHANNEL, 'root')
     assert len(normal['replies']) == 30 and len(calls) == 2
     assert '$top=30' in calls[-1]
+    assert normal['replies@odata.nextLink']==BASE+'/teams/team/channels/channel/messages/root/replies?page=second'
 
 
 @pytest.mark.parametrize('next_link', [

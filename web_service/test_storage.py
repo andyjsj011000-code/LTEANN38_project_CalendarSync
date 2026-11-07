@@ -93,6 +93,7 @@ class TestDatabase(SchoolDatabase):
             if not row or (lease is not None and row[1]!=lease): return
             c.execute("UPDATE web_connections SET credential_blob=?,token_expires=0,refresh_lease=NULL,refresh_until=0,state='reauth_required' WHERE id_hash=?",(self.seal({}),device_hash))
             c.execute('DELETE FROM web_channel_access WHERE user_id=?',(row[0],))
+            c.execute('UPDATE web_school_sync SET checked_at=0 WHERE user_id=?',(row[0],))
             c.execute('DELETE FROM web_sessions WHERE id_hash IN (SELECT session_hash FROM web_session_links WHERE device_hash=?)',(device_hash,))
 
     def revoke_device(self,device_hash,user_id=None):
@@ -103,6 +104,16 @@ class TestDatabase(SchoolDatabase):
             c.execute('DELETE FROM web_sessions WHERE id_hash IN (SELECT session_hash FROM web_session_links WHERE device_hash=?)',(device_hash,))
             c.execute('UPDATE web_connections SET active=0,credential_blob=?,version=version+1 WHERE id_hash=?',(self.seal({}),device_hash))
             c.execute('DELETE FROM web_channel_access WHERE user_id=?',(row[0],))
+            c.execute('UPDATE web_school_sync SET checked_at=0 WHERE user_id=?',(row[0],))
+
+    def delete_task(self,user_id,item_id,version):
+        self.task(user_id,item_id)
+        with self.connect() as c:
+            changed=c.execute('DELETE FROM web_personal_tasks WHERE user_id=? AND id=? AND version=?',
+                              (user_id,item_id,version)).rowcount
+            if changed!=1: raise Conflict()
+            c.execute("DELETE FROM web_reminder_rules WHERE user_id=? AND item_id=? AND source='personal'",
+                      (user_id,item_id))
 
     def revoke_all(self,user_id):
         with self.connect() as c: ids=[r[0] for r in c.execute('SELECT id_hash FROM web_connections WHERE user_id=?',(user_id,))]

@@ -53,6 +53,30 @@ def test_user_isolation_encryption_and_version_checks(tasks):
         repo.task('alice', created['id'])
 
 
+def test_delete_removes_only_owned_personal_rules_after_version_check(tasks):
+    repo, path = tasks
+    payload = {'title': 'task', 'start_date': '2026-11-05', 'end_date': '2026-11-05'}
+    item = repo.add_task('alice', payload)
+    rules = {('alice', item['id'], 'personal'), ('alice', item['id'], 'teams'),
+             ('bob', item['id'], 'personal'), ('alice', 'other-task', 'personal')}
+    with sqlite3.connect(path) as db:
+        db.executemany('INSERT INTO web_reminder_rules VALUES(?,?,?,?)',
+                       [(*key, repo.seal({'offsets': [-30], 'custom_times': []})) for key in rules])
+    changed = repo.task_state('alice', item['id'], {'completed': True}, item['version'])
+    with pytest.raises(Missing):
+        repo.delete_task('bob', item['id'], changed['version'])
+    with pytest.raises(Conflict):
+        repo.delete_task('alice', item['id'], item['version'])
+    with sqlite3.connect(path) as db:
+        assert set(db.execute('SELECT user_id,item_id,source FROM web_reminder_rules')) == rules
+    repo.delete_task('alice', item['id'], changed['version'])
+    with sqlite3.connect(path) as db:
+        assert set(db.execute('SELECT user_id,item_id,source FROM web_reminder_rules')) == (
+            rules - {('alice', item['id'], 'personal')})
+    with pytest.raises(Missing):
+        repo.task('alice', item['id'])
+
+
 @pytest.mark.parametrize('operation', ['add', 'read', 'update', 'state', 'delete'])
 @pytest.mark.parametrize('user_state', ['inactive', 'missing'])
 def test_inactive_or_missing_user_cannot_read_or_change_tasks(tasks, operation, user_state):

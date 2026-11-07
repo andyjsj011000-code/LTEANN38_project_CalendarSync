@@ -2,10 +2,10 @@
 (() => {
   const $ = s => document.querySelector(s);
   const SCHOOL = document.documentElement?.dataset.mode === 'school';
-  let idleTimer, idleDeadline = 0, authEpoch = 0, resumeCheck = null;
+  let idleTimer, idleDeadline = 0, authEpoch = 0, resumeCheck = null, lastSessionCheckAt = 0;
   let activeLoad = null, monthRequest = null, monthEpoch = 0;
   let mutationSettled = Promise.resolve(), mutationRevision = 0;
-  let dialogEpoch = 0;
+  let dialogEpoch = 0, dialogRequestId = 0;
   let checkingTimer = null, checkingAttempts = 0, checkingDeadline = 0, checkingRefresh = false;
   const readRequests = new Set();
   let reminderRules = null, reminderCustomInitial = '';
@@ -63,15 +63,19 @@
       if (controller) {readRequests.delete(controller); controller.signal.removeEventListener('abort', abortRead); signal?.removeEventListener('abort', onAbort);}
     }
   }
-  function failure(error) {
+  function failure(error, ownerDialog = null) {
     if ([401, 403].includes(error.status)) {clearPrivate(); loginScreen(); toast(error.status === 403 ? '접근 권한을 확인할 수 없어요. 다시 로그인해 주세요.' : '다시 로그인해 주세요.', true);}
-    else if (presentPermissionPending(error)) return;
-    else if (error.loadPresented) return;
-    else toast(error.message || '연결하지 못했어요. 실행 창이 열려 있는지 확인해 주세요.', true);
+    else {
+      const inline = ownerDialog !== null && modal.open && ownerDialog === dialogEpoch;
+      if (inline) mutationStatus(error.message || '요청을 마치지 못했어요. 다시 확인해 주세요.', ownerDialog, true);
+      if (presentPermissionPending(error) || error.loadPresented) return;
+      if (!inline && (ownerDialog === null || !modal.open)) toast(error.message || '연결하지 못했어요. 실행 창이 열려 있는지 확인해 주세요.', true);
+    }
   }
   function clearPrivate() {
+    dialogEpoch++; dialogRequestId++;
     clearTimeout(checkingTimer); checkingTimer = null; checkingAttempts = 0; checkingDeadline = 0; checkingRefresh = false;
-    clearTimeout(idleTimer); idleDeadline = 0; resumeCheck = null; authEpoch++;
+    clearTimeout(idleTimer); idleDeadline = 0; resumeCheck = null; lastSessionCheckAt = 0; authEpoch++;
     activeLoad?.abort(); activeLoad = null;
     monthRequest?.abort(); monthRequest = null; monthEpoch++;
     S.pendingMonth = ''; S.syncing = false; S.syncUncertain = false; S.syncMessage = ''; S.quickDraft = ''; reviewDialogItems.clear();
@@ -269,11 +273,23 @@
     }
   }
   function openDialog(title, content, footer = '') {
-    dialogEpoch++;
+    dialogEpoch++; dialogRequestId++;
     if (modal.open) modal.close();
     modal.innerHTML = `<div class="dialog-head"><h2 id="dialog-title">${esc(title)}</h2><button class="dialog-close" aria-label="닫기" data-action="close">×</button></div><div class="dialog-body">${content}<p id="mutation-status" class="muted fine" role="status" aria-live="polite" hidden></p></div>${footer ? `<div class="dialog-foot">${footer}</div>` : ''}`;
     modal.showModal();
   }
+  async function readDialog(path) {
+    const request = {id:++dialogRequestId, dialog:dialogEpoch, session:authEpoch, revision:mutationRevision};
+    const current = () => activeView(request.session) && request.id === dialogRequestId && request.dialog === dialogEpoch && request.revision === mutationRevision;
+    try {
+      const result = await api(path);
+      return current() ? result : null;
+    } catch (error) {
+      if (activeView(request.session) && ([401,403].includes(error.status) || current())) failure(error, request.dialog);
+      return null;
+    }
+  }
+  document.addEventListener('cancel', event => {if (event.target === modal) {dialogEpoch++; dialogRequestId++;}}, true);
   function find(id, source) {return [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming].find(e => e.id === id && e.source === source);}
   let detailItem = null;
   function detail(e) {
@@ -284,7 +300,8 @@
     detailItem = e;
     const day = S.view === 'calendar' ? S.selected : S.day;
     const val = e || {title: '', notes: '', start_date: day, end_date: day, time: '', display_mode: 'daily', selected_dates: []};
-    openDialog(e?.source === 'teams' ? '내 일정만 수정' : e ? '개인 할 일 수정' : '개인 할 일 추가', `<form id="task-form"><label class="field"><span class="field-label">무엇을 할까요?</span><input name="title" required maxlength="500" placeholder="예: 1주치 숙제하기, 개발 완료하기" value="${esc(val.title)}"></label><div class="form-two"><label class="field"><span class="field-label">시작 날짜</span><input name="start_date" type="date" required value="${val.start_date}"></label><label class="field"><span class="field-label">마지막 날짜</span><input name="end_date" type="date" required value="${val.end_date}"></label></div><label class="field"><span class="field-label">마감 시간 (선택)</span><input name="time" type="time" value="${esc(val.time || '')}"></label><label class="field"><span class="field-label">오늘 할 일에 표시할 날짜</span><select name="display_mode"><option value="daily" ${val.display_mode === 'daily' ? 'selected' : ''}>기간 중 매일</option><option value="selected" ${val.display_mode === 'selected' ? 'selected' : ''}>선택한 날짜 + 마지막 날</option><option value="final" ${val.display_mode === 'final' ? 'selected' : ''}>마지막 날만</option></select></label><div id="selected-date-field" ${val.display_mode === 'selected' ? '' : 'hidden'}><div class="date-picker-row"><input type="date" id="pick-date" aria-label="표시할 날짜"><button type="button" class="secondary small" data-action="pick-date">날짜 추가</button></div><div class="date-chips" id="date-chips"></div><p class="fine muted">마지막 날에는 항상 표시됩니다.</p></div><label class="field"><span class="field-label">메모 (선택)</span><textarea name="notes" rows="4" maxlength="10000">${esc(val.notes)}</textarea></label><p class="fine muted">캘린더에는 기간 전체가 이어져 표시돼요. 지난 미완료 항목은 다음 날로 옮겨지지 않아요.</p><p class="error-message" id="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">저장</button></div></form>`);
+    const personalFields = e?.source === 'teams' ? '' : `<label class="field"><span class="field-label">오늘 할 일에 표시할 날짜</span><select name="display_mode"><option value="daily" ${val.display_mode === 'daily' ? 'selected' : ''}>기간 중 매일</option><option value="selected" ${val.display_mode === 'selected' ? 'selected' : ''}>선택한 날짜 + 마지막 날</option><option value="final" ${val.display_mode === 'final' ? 'selected' : ''}>마지막 날만</option></select></label><div id="selected-date-field" ${val.display_mode === 'selected' ? '' : 'hidden'}><div class="date-picker-row"><input type="date" id="pick-date" aria-label="표시할 날짜"><button type="button" class="secondary small" data-action="pick-date">날짜 추가</button></div><div class="date-chips" id="date-chips"></div><p class="fine muted">마지막 날에는 항상 표시됩니다.</p></div>`;
+    openDialog(e?.source === 'teams' ? '내 일정만 수정' : e ? '개인 할 일 수정' : '개인 할 일 추가', `<form id="task-form"><label class="field"><span class="field-label">무엇을 할까요?</span><input name="title" required maxlength="500" placeholder="예: 1주치 숙제하기, 개발 완료하기" value="${esc(val.title)}"></label><div class="form-two"><label class="field"><span class="field-label">시작 날짜</span><input name="start_date" type="date" required value="${val.start_date}"></label><label class="field"><span class="field-label">마지막 날짜</span><input name="end_date" type="date" required value="${val.end_date}"></label></div><label class="field"><span class="field-label">마감 시간 (선택)</span><input name="time" type="time" value="${esc(val.time || '')}"></label>${personalFields}<label class="field"><span class="field-label">메모 (선택)</span><textarea name="notes" rows="4" maxlength="10000">${esc(val.notes)}</textarea></label><p class="fine muted">캘린더에는 기간 전체가 이어져 표시돼요. 지난 미완료 항목은 다음 날로 옮겨지지 않아요.</p><p class="error-message" id="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">저장</button></div></form>`);
     selectedDates = new Set(val.selected_dates); syncDates();
   }
   let selectedDates = new Set();
@@ -292,14 +309,15 @@
     const f = $('#task-form'); if (!f) return;
     const a = f.elements.start_date.value, b = f.elements.end_date.value;
     f.elements.end_date.min = a;
+    if (!f.elements.display_mode) return;
     selectedDates = new Set([...selectedDates].filter(d => d >= a && d <= b));
     $('#selected-date-field').hidden = f.elements.display_mode.value !== 'selected';
     $('#pick-date').min = a; $('#pick-date').max = b; $('#pick-date').value = a;
     $('#date-chips').innerHTML = [...new Set([...selectedDates, b])].filter(Boolean).sort().map(d => `<button type="button" class="secondary small" data-remove-date="${d}" ${d === b ? 'disabled' : ''}>${esc(d)} ${d === b ? '· 마지막 날' : '×'}</button>`).join('');
   }
-  function mutationStatus(message, epoch) {
+  function mutationStatus(message, epoch, error = false) {
     const status = $('#mutation-status');
-    if (status && modal.open && epoch === dialogEpoch) {status.textContent = message; status.hidden = !message;}
+    if (status && modal.open && epoch === dialogEpoch) {status.textContent = message; status.hidden = !message; status.setAttribute('role', error ? 'alert' : 'status');}
   }
   function invalidateDataReads() {
     S.epoch++; activeLoad?.abort(); activeLoad = null;
@@ -340,7 +358,7 @@
     } catch (error) {
       if (sessionEpoch !== authEpoch) return;
       if (saved && error.status !== 401) toast('저장됐지만 화면을 다시 불러오지 못했어요. 새로고침해 주세요.', true);
-      else {mutationStatus(error.message || '저장하지 못했어요. 다시 확인해 주세요.', originalDialog); failure(error);}
+      else failure(error, originalDialog);
     } finally {
       release();
     }
@@ -370,6 +388,13 @@
     const pending = values.hidden === true ? '숨기는 중…' : values.hidden === false ? '복원하는 중…' : '완료 상태를 저장하는 중…';
     return mutate(() => setState(original, values), message, false, result => applyConfirmedState(original, values, result), pending);
   }
+  function applyConfirmedDelete(item) {
+    const keep = candidate => candidate.id !== item.id || candidate.source !== item.source;
+    if (S.today) S.today = {...S.today, teams:S.today.teams.filter(keep), personal:S.today.personal.filter(keep)};
+    S.items = S.items.filter(keep); S.upcoming = S.upcoming.filter(keep); hiddenItems = hiddenItems.filter(keep);
+    if (detailItem && !keep(detailItem)) detailItem = null;
+    render();
+  }
   async function setState(e, values) {
     const epoch = authEpoch;
     try {
@@ -387,9 +412,9 @@
   }
   let hiddenItems = [];
   async function hidden() {
-    const epoch = authEpoch, revision = mutationRevision, year = (S.view === 'calendar' ? S.selected || S.month : S.day).slice(0,4);
-    const result = await api(SCHOOL ? `/api/hidden?start=${year}-01-01&end=${year}-12-31` : '/api/beta/hidden');
-    if (!activeView(epoch) || revision !== mutationRevision) return;
+    const year = (S.view === 'calendar' ? S.selected || S.month : S.day).slice(0,4);
+    const result = await readDialog(SCHOOL ? `/api/hidden?start=${year}-01-01&end=${year}-12-31` : '/api/beta/hidden');
+    if (!result) return;
     hiddenItems = result.items;
     openDialog(SCHOOL ? `숨긴 일정 · ${year}년` : '숨긴 일정', `<p class="muted">개별적으로 숨긴 일정이에요. 복원해도 꺼둔 채널·종류 설정은 유지돼요.</p><div class="hidden-list">${hiddenItems.length ? hiddenItems.map((e, i) => `<div class="hidden-item"><div><strong>${esc(e.title)}</strong><p class="fine muted">${esc(period(e))} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</p></div><button class="secondary small" data-restore="${i}">복원</button></div>`).join('') : '<div class="empty">숨긴 일정이 없어요.</div>'}</div>`);
   }
@@ -401,14 +426,14 @@
     const action = button.dataset.action;
     if (S.busy && !['logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
     if (!S.today && !['today', 'calendar', 'refresh', 'retry-boot', 'logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
-    const sessionEpoch = authEpoch;
+    const sessionEpoch = authEpoch, ownerDialog = dialogEpoch;
     try {
       if (button.dataset.changeDecision !== undefined) {const item = reviewDialogItems.get(button.dataset.changeId); if (!item) return; return mutate(() => api('/api/changes/'+encodeURIComponent(item.id),{method:'POST',body:{accept:button.dataset.changeDecision==='accept'}}),'변경사항을 처리했어요.');}
       if (button.dataset.detail) {const e = find(button.dataset.detail, button.dataset.source); if (e) detail(e); return;}
       if (button.dataset.day) {S.selected = button.dataset.day; render(); return;}
       if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); return;}
       if (button.dataset.restore !== undefined) {const e = hiddenItems[Number(button.dataset.restore)]; return mutateState(e, {hidden: false}, '일정을 복원했어요.');}
-      if (action === 'close') {modal.close(); return;}
+      if (action === 'close') {dialogEpoch++; dialogRequestId++; modal.close(); return;}
       if (action === 'today' || action === 'calendar') {S.view = action; if (S.me) render(); return;}
       if (action === 'refresh') {if (!S.refreshing) return await load(); return;}
       if (action === 'retry-boot') return await boot();
@@ -433,11 +458,11 @@
         openDialog('할 일을 삭제할까요?', `<p>${esc(e.title)}</p><p class="muted">삭제한 항목은 복원할 수 없어요.</p>`, '<button class="secondary" data-action="close">닫기</button><button class="danger" data-action="confirm-delete">삭제</button>');
         return;
       }
-      if (action === 'confirm-delete') return mutate(() => api(`/api/tasks/${encodeURIComponent(detailItem.id)}?version=${detailItem.version}`, {method: 'DELETE'}), '삭제했어요.');
+      if (action === 'confirm-delete') {const item = {...detailItem}; return mutate(() => api(`/api/tasks/${encodeURIComponent(item.id)}?version=${item.version}`, {method: 'DELETE'}), '삭제했어요.', false, () => applyConfirmedDelete(item), '삭제하는 중…');}
       if (action === 'pick-date') {const d = $('#pick-date'); if (d.value && d.checkValidity()) {selectedDates.add(d.value); syncDates();} else d.reportValidity(); return;}
       if (['prev-month', 'next-month', 'this-month'].includes(action)) return await changeMonth(action);
       if (action === 'logout' || action === 'disconnect-device') {await api('/auth/logout', {method: 'POST'}); clearPrivate(); loginScreen(); if (action === 'disconnect-device') toast('이 기기의 연동과 알림을 해제했어요.'); if (testServer()) await detachBrowserPush();}
-    } catch (error) {if (sessionEpoch === authEpoch) failure(error);}
+    } catch (error) {if (sessionEpoch === authEpoch) failure(error, ownerDialog);}
   });
   document.addEventListener('change', event => {
     const el = event.target;
@@ -458,7 +483,7 @@
       S.busy = true; const button = form.querySelector('button'); button.disabled = true; $('#login-error').textContent = '';
       try {
         await api('/auth/beta', {method: 'POST', body: {code: form.elements.code.value.trim()}});
-        form.elements.code.value = ''; S.me = await api('/api/me'); S.view = 'today'; S.month = ''; S.selected = '';
+        form.elements.code.value = ''; S.me = await api('/api/me'); lastSessionCheckAt = Date.now(); S.view = 'today'; S.month = ''; S.selected = '';
         await load();
       } catch (error) {if (form.isConnected) $('#login-error').textContent = error.message; else failure(error);}
       finally {S.busy = false; button.disabled = false; updateRefreshStatus();}
@@ -466,15 +491,16 @@
     }
     if (form.id === 'quick-form') {
       const title = form.elements.title.value.trim(); if (!title) return;
-      return mutate(() => api('/api/tasks', {method: 'POST', body: {title, start_date: S.day, end_date: S.day, display_mode: 'daily'}}), '오늘 할 일에 추가했어요.', true);
+      const task = {source:'personal', title, start_date:S.day, end_date:S.day, display_mode:'daily', selected_dates:[], hidden:false, completed:false};
+      return mutate(() => api('/api/tasks', {method: 'POST', body: {title, start_date: S.day, end_date: S.day, display_mode: 'daily'}}), '오늘 할 일에 추가했어요.', true, result => applyConfirmedState({...task,id:result.id}, {}, result));
     }
     if (form.id === 'task-form') {
       const data = Object.fromEntries(new FormData(form));
       data.time = data.time || null; data.selected_dates = data.display_mode === 'selected' ? [...selectedDates].filter(d => d >= data.start_date && d <= data.end_date) : [];
       const e = detailItem;
       if (!data.title.trim() || data.end_date < data.start_date) {$('#form-error').textContent = '제목과 시작·마지막 날짜를 확인해 주세요.'; return;}
-      if (e?.source === 'teams' && testServer()) return mutate(() => api(`/api/events/${encodeURIComponent(e.id)}/override`, {method:'PUT',body:data}), '이 계정의 일정만 수정했어요.');
-      return mutate(() => api(e ? `/api/tasks/${encodeURIComponent(e.id)}` : '/api/tasks', {method: e ? 'PUT' : 'POST', body: {...data, ...(e ? {version: e.version} : {})}}), '할 일을 저장했어요.');
+      if (e?.source === 'teams' && testServer()) {delete data.display_mode; delete data.selected_dates; return mutate(() => api(`/api/events/${encodeURIComponent(e.id)}/override`, {method:'PUT',body:data}), '이 계정의 일정만 수정했어요.');}
+      return mutate(() => api(e ? `/api/tasks/${encodeURIComponent(e.id)}` : '/api/tasks', {method: e ? 'PUT' : 'POST', body: {...data, ...(e ? {version: e.version} : {})}}), '할 일을 저장했어요.', false, result => applyConfirmedState({hidden:false,completed:false,...e,...data,id:e?.id || result.id,source:'personal'}, {}, result));
     }
     if (form.id === 'filters-form') {
       const channels = Object.fromEntries([...form.querySelectorAll('[name=channel]')].map(el => [el.value, el.checked]));
@@ -506,7 +532,7 @@
       const service = await api(SCHOOL ? '/api/service' : '/api/beta/info');
       if (epoch !== authEpoch) return; S.service = service;
       if (S.service.mode === 'preview') {const footer = document.querySelector('footer'); if (footer) footer.textContent = 'CalendarSync · 예시 전용 미리보기 · 실제 Microsoft·Teams 연결 없음';}
-      try {const me = await api('/api/me'); if (epoch !== authEpoch) return; S.me = me;} catch (error) {if (epoch !== authEpoch) return; if (error.status === 401) {loginScreen(); return;} throw error;}
+      try {const me = await api('/api/me'); if (epoch !== authEpoch) return; S.me = me; lastSessionCheckAt = Date.now();} catch (error) {if (epoch !== authEpoch) return; if (error.status === 401) {loginScreen(); return;} throw error;}
       await load();
     } catch (error) {
       if (epoch !== authEpoch) return;
@@ -554,17 +580,17 @@
     openDialog('변경사항 검토', `<p class="muted">원문이 바뀐 일정은 확인 후 반영해요. 변경을 반영하면 현재 내 수정 내용을 대체해요. 검토 중인 일정의 예약 알림은 잠시 멈춰요.</p>${reviewItems.length ? reviewItems.map((change,i) => `<section class="change-item"><h3>${esc(change.before.title)}</h3><p class="fine">기존 · ${esc(period(change.before))} ${esc(change.before.time || '종일')}</p><p>변경 · ${esc(period(change.after))} ${esc(change.after.time || '종일')} ${change.after.cancelled ? '· 취소 또는 원문 삭제' : ''}</p><div class="detail-notes">${esc(change.after.notes || '')}</div><div class="button-row"><button class="secondary small" data-change-id="${esc(change.id)}" data-change-decision="keep">기존 유지</button><button class="primary small" data-change-id="${esc(change.id)}" data-change-decision="accept">변경 반영</button></div></section>`).join('') : '<div class="empty">검토할 변경사항이 없어요.</div>'}`);
   }
   async function notificationsPanel() {
-    const epoch = authEpoch, push = await api('/api/push');
-    if (!activeView(epoch)) return;
+    const push = await readDialog('/api/push');
+    if (!push) return;
     openDialog('이 기기의 알림', `<p>알림 상태: <strong>${push.registered ? '켜짐' : '꺼짐'}</strong></p><p class="muted">화면이 닫혀 있어도 지원되는 브라우저에서 알림을 받아요. 잠금화면에는 일정 제목 대신 확인 안내만 표시해요.</p>${!push.configured ? '<p class="error-message">서버의 Web Push 키가 아직 설정되지 않았어요.</p>' : ''}${!push.background_enabled ? '<p class="error-message">알림을 받으려면 다시 로그인할 때 이 기기 연동 유지를 선택해 주세요.</p>' : ''}<form id="notification-form"><label class="toggle-row">아침 요약 알림<input name="morning_enabled" type="checkbox" ${S.prefs.morning_enabled ? 'checked' : ''}></label><label class="field"><span class="field-label">아침 알림 시각</span><input name="morning_time" type="time" required value="${esc(S.prefs.morning_time || '07:00')}"></label><button class="secondary" type="submit">아침 설정 저장</button></form><p class="fine muted">아이폰·아이패드는 홈 화면에 추가한 웹앱에서 알림을 켜야 할 수 있어요. 브라우저·기기 설정에 따라 수신이 제한될 수 있어요.</p>`, `<button class="secondary" data-action="push-disable">이 기기 알림 끄기</button><button class="secondary" data-action="push-test" ${!push.registered ? 'disabled' : ''}>테스트 알림</button><button class="primary" data-action="push-enable" ${!push.configured || !push.background_enabled ? 'disabled' : ''}>이 기기 알림 켜기</button>`);
   }
   async function enablePush() {
-    const epoch = authEpoch;
-    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return toast('이 브라우저에서는 Web Push를 지원하지 않아요.',true);
+    const epoch = authEpoch, ownerDialog = dialogEpoch;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return failure(new Error('이 브라우저에서는 Web Push를 지원하지 않아요.'), ownerDialog);
     if (!activeView(epoch)) return;
     const permission = Notification.requestPermission().catch(() => 'denied');
-    const info = await api('/api/push'); if (!activeView(epoch)) return; if (!info.configured || !info.background_enabled) return toast('연동과 서버 알림 설정을 먼저 확인해 주세요.',true);
-    if (await permission !== 'granted') return toast('기기의 알림 권한이 허용되지 않았어요.',true);
+    const info = await api('/api/push'); if (!activeView(epoch)) return; if (!info.configured || !info.background_enabled) return failure(new Error('연동과 서버 알림 설정을 먼저 확인해 주세요.'), ownerDialog);
+    if (await permission !== 'granted') return failure(new Error('기기의 알림 권한이 허용되지 않았어요.'), ownerDialog);
     if (!activeView(epoch)) return;
     const registration = await navigator.serviceWorker.register('/service-worker.js'); await navigator.serviceWorker.ready;
     if (!activeView(epoch)) return;
@@ -577,15 +603,15 @@
       subscription = await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:Uint8Array.from(raw,c=>c.charCodeAt(0))});
     }
     if (!activeView(epoch)) {if (subscription) await subscription.unsubscribe(); return;}
-    await api('/api/push',{method:'POST',body:subscription.toJSON()}); if (!activeView(epoch)) return; await load(); if (activeView(epoch)) return notificationsPanel();
+    await api('/api/push',{method:'POST',body:subscription.toJSON()}); if (!activeView(epoch)) return; await load(); if (activeView(epoch) && ownerDialog === dialogEpoch) return notificationsPanel();
   }
   async function detachBrowserPush() {
     try {if ('serviceWorker' in navigator) {const registration = await navigator.serviceWorker.getRegistration('/'); if (registration) {const subscription = await registration.pushManager.getSubscription(); if (subscription) await subscription.unsubscribe(); registration.active?.postMessage({type:'clear-notifications'});}}} catch {}
   }
-  async function disablePush() {const epoch = authEpoch; await api('/api/push',{method:'DELETE'}); await detachBrowserPush(); if (activeView(epoch)) return notificationsPanel();}
+  async function disablePush() {const epoch = authEpoch, ownerDialog = dialogEpoch; await api('/api/push',{method:'DELETE'}); await detachBrowserPush(); if (activeView(epoch) && ownerDialog === dialogEpoch) return notificationsPanel();}
   async function remindersPanel(item) {
-    const epoch = authEpoch, rules = await api(`/api/reminders/${item.source}/${encodeURIComponent(item.id)}`);
-    if (!activeView(epoch)) return; detailItem = item; reminderRules = rules;
+    const original = {...item}, rules = await readDialog(`/api/reminders/${item.source}/${encodeURIComponent(item.id)}`);
+    if (!rules) return; detailItem = original; reminderRules = rules;
     const custom = rules.custom_times?.[0] ? new Date(rules.custom_times[0]) : null;
     reminderCustomInitial = custom && !Number.isNaN(custom.getTime()) ? new Date(custom.getTime()-custom.getTimezoneOffset()*60000).toISOString().slice(0,16) : '';
     openDialog('이 일정의 예약 알림', `<form id="reminder-form"><p>${esc(item.title)}</p><label class="toggle-row">하루 전<input name="day" type="checkbox" ${rules.offsets.includes(-1440) ? 'checked' : ''}></label><label class="toggle-row">1시간 전<input name="hour" type="checkbox" ${rules.offsets.includes(-60) ? 'checked' : ''}></label><label class="field"><span class="field-label">직접 지정 (기기 현지 시각, 선택)</span><input name="custom" type="datetime-local" value="${esc(reminderCustomInitial)}"></label><p class="fine muted">완료·취소·숨김 또는 꺼둔 채널의 일정은 알림에서 제외돼요. 직접 지정한 시각은 새로 저장한 값으로 바뀌어요.</p><div class="dialog-foot"><button class="primary" type="submit">저장</button></div></form>`);
@@ -606,11 +632,13 @@
     const delay = (S.service?.idle_seconds || 1800) * 1000;
     idleDeadline = Date.now() + delay;
     idleTimer = setTimeout(expireIdle, delay);
+    if (S.me && Date.now() - lastSessionCheckAt >= 60000) checkResumedSession();
   }
   async function checkResumedSession() {
     if (!S.me || resumeCheck) return;
     const check = {epoch: authEpoch, id: S.me.id, csrf: S.me.csrf_token};
     resumeCheck = check;
+    lastSessionCheckAt = Date.now();
     try {
       // Revalidate the session without repeating Teams reads or replacing the UI.
       const me = await api('/api/me');

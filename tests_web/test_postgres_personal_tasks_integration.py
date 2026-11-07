@@ -96,3 +96,55 @@ def test_update_and_delete_obey_latest_version(postgres_tasks):
     repo.delete_task('alice', item['id'], changed['version'])
     with pytest.raises(Missing):
         repo.task('alice', item['id'])
+
+
+def test_delete_removes_only_owned_personal_rules_after_version_check(postgres_tasks):
+    repo, connect = postgres_tasks
+    payload = {'title': 'task', 'start_date': '2026-11-05', 'end_date': '2026-11-06'}
+    item = repo.add_task('alice', payload)
+    rules = {('alice', item['id'], 'personal'), ('alice', item['id'], 'teams'),
+             ('bob', item['id'], 'personal'), ('alice', 'other-task', 'personal')}
+    with connect() as db:
+        for key in rules:
+            db.execute('INSERT INTO web_reminder_rules VALUES(%s,%s,%s,%s)',
+                       (*key, repo.seal({'offsets': [-30], 'custom_times': []})))
+    changed = repo.task_state('alice', item['id'], {'completed': True}, item['version'])
+    with pytest.raises(Missing):
+        repo.delete_task('bob', item['id'], changed['version'])
+    with pytest.raises(Conflict):
+        repo.delete_task('alice', item['id'], item['version'])
+    with connect() as db:
+        assert set(db.execute('SELECT user_id,item_id,source FROM web_reminder_rules')) == rules
+    repo.delete_task('alice', item['id'], changed['version'])
+    with connect() as db:
+        assert set(db.execute('SELECT user_id,item_id,source FROM web_reminder_rules')) == (
+            rules - {('alice', item['id'], 'personal')})
+    with pytest.raises(Missing):
+        repo.task('alice', item['id'])
+
+
+def test_reminder_cleanup_failure_rolls_back_task_deletion(postgres_tasks, monkeypatch):
+    repo, connect = postgres_tasks
+    item = repo.add_task('alice', {
+        'title': 'task', 'start_date': '2026-11-05', 'end_date': '2026-11-06'})
+    with connect() as db:
+        db.execute('INSERT INTO web_reminder_rules VALUES(%s,%s,%s,%s)',
+                   ('alice', item['id'], 'personal', repo.seal({'offsets': [-30], 'custom_times': []})))
+
+    @contextmanager
+    def failing_connect():
+        with connect() as db:
+            class Connection:
+                def execute(self, query, values=()):
+                    if query.startswith('DELETE FROM web_reminder_rules'):
+                        raise RuntimeError('Simulated reminder cleanup failure')
+                    return db.execute(query, values)
+            yield Connection()
+
+    monkeypatch.setattr(repo, 'connect', failing_connect)
+    with pytest.raises(RuntimeError, match='Simulated reminder cleanup failure'):
+        repo.delete_task('alice', item['id'], item['version'])
+    assert repo.task('alice', item['id'])['version'] == item['version']
+    with connect() as db:
+        assert db.execute('SELECT 1 FROM web_reminder_rules WHERE user_id=%s AND item_id=%s',
+                          ('alice', item['id'])).fetchone() == (1,)

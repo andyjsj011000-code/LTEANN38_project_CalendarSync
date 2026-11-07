@@ -73,7 +73,8 @@ class PostgresRetention:
         """Retire bounded cache batches after seven full days, using Seoul dates.
 
         Personal tasks are never read or modified. A recent/future date in any
-        user's override, or any pending change, protects the shared event.
+        user's override, a pending change, or an outstanding explicit reminder
+        protects the shared event.
         The process-local cursor rotates through retained markers and protected
         posts; a restart only restarts scanning, never weakens the date checks.
         """
@@ -85,6 +86,7 @@ class PostgresRetention:
         if not getattr(self, 'shared_ingestion_enabled', False):
             return result
         today = datetime.fromtimestamp(self.clock(), timezone(timedelta(hours=9))).date()
+        reminder_cutoff = datetime.fromtimestamp(self.clock(), timezone.utc) - timedelta(seconds=600)
         cutoff = (today - timedelta(days=retention_days)).isoformat()
         cursor = getattr(self, '_retention_cache_cursor', '')
         next_cursor = cursor
@@ -140,6 +142,34 @@ class PostgresRetention:
                         raise ValueError('Retained event channel mismatch')
                     if db.execute("SELECT 1 FROM web_changes WHERE event_id=%s AND status='pending' LIMIT 1",
                                   (identity,)).fetchone():
+                        result['events_preserved'] += 1
+                        continue
+                    # Maintenance runs before dispatch. Keep future reminders
+                    # and the ten-minute delivery window so a reminder due now
+                    # cannot delete itself before being sent.
+                    outstanding_reminder = False
+                    rules = db.execute("SELECT payload_blob FROM web_reminder_rules WHERE source='teams' AND item_id=%s",
+                                       (identity,)).fetchall()
+                    for rule, in rules:
+                        try:
+                            values = self.unseal(rule)
+                            if not isinstance(values, dict) or not isinstance(values.get('custom_times', []), list):
+                                raise ValueError('Invalid custom reminder rules')
+                            for value in values.get('custom_times', []):
+                                if not isinstance(value, str):
+                                    raise ValueError('Invalid custom reminder time')
+                                due = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                                if due.tzinfo is None or due.utcoffset() is None:
+                                    raise ValueError('Custom reminder time must have a timezone')
+                                if due > reminder_cutoff:
+                                    outstanding_reminder = True
+                        except Exception:
+                            # Invalid rule data is not evidence that an explicit
+                            # scheduled action can safely be removed.
+                            outstanding_reminder = True
+                        if outstanding_reminder:
+                            break
+                    if outstanding_reminder:
                         result['events_preserved'] += 1
                         continue
                     payloads = [self.unseal(current[2])]

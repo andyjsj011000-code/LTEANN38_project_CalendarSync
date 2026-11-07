@@ -93,3 +93,6 @@ class PostgresPersonalTasks:
                 (user_id, item_id, version)).fetchone()
             if row is None:
                 self._missing_or_conflict(db, user_id, item_id)
+            db.execute('''DELETE FROM web_reminder_rules
+                WHERE user_id=%s AND item_id=%s AND source='personal' ''',
+                (user_id, item_id))

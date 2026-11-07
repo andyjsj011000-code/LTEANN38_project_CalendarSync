@@ -166,7 +166,7 @@ class PostgresDevices:
             db.execute('''UPDATE web_connections SET credential_blob=%s,token_expires=0,
                 refresh_lease=NULL,refresh_until=0,version=version+1,state='reauth_required' WHERE id_hash=%s''',
                 (self.seal({}), device_hash))
-            db.execute('DELETE FROM web_channel_access WHERE user_id=%s', (device['user_id'],))
+            self._invalidate_device_access(db, device['user_id'])
             db.execute('''DELETE FROM web_sessions WHERE id_hash IN
                 (SELECT session_hash FROM web_session_links WHERE device_hash=%s)''', (device_hash,))
 
@@ -181,7 +181,14 @@ class PostgresDevices:
             db.execute('''UPDATE web_connections SET active=0,credential_blob=%s,token_expires=0,
                 refresh_lease=NULL,refresh_until=0,version=version+1 WHERE id_hash=%s''',
                 (self.seal({}), device_hash))
-            db.execute('DELETE FROM web_channel_access WHERE user_id=%s', (device['user_id'],))
+            self._invalidate_device_access(db, device['user_id'])
+
+    @staticmethod
+    def _invalidate_device_access(db, user_id):
+        db.execute('DELETE FROM web_channel_access WHERE user_id=%s', (user_id,))
+        # Other devices must renew the removed proof immediately. Preserve the
+        # current lease: it may belong to another still-authorized connection.
+        db.execute('UPDATE web_school_sync SET checked_at=0 WHERE user_id=%s', (user_id,))
 
     def revoke_all(self, user_id):
         """Revoke existing connections atomically, serialized with session issue.

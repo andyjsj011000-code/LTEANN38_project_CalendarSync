@@ -1,6 +1,6 @@
 """Opt-in retention tests on an explicitly disposable PostgreSQL database."""
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import pytest
@@ -207,3 +207,43 @@ def test_encryption_failure_rolls_back_cache_markers_and_event_deletion(postgres
     assert cache_payload(p, 'first-post') == {'events': [first], 'retired': []}
     assert cache_payload(p, 'second-post') == {'events': [second], 'retired': []}
     assert prune(p)['events_deleted'] == 2
+
+
+def test_explicit_reminders_protect_future_and_exact_delivery_window(postgres_database):
+    p = postgres_database
+    set_day(p, '2026-11-14')
+    now = datetime.fromtimestamp(p.now[0], timezone.utc)
+    offsets = {'future': 86400, 'due_now': 0, 'inside': -599, 'boundary': -600, 'older': -601}
+    items = [event(name) for name in offsets]
+    seed(p, items)
+    with p.connect() as db:
+        for item in items:
+            value = {'offsets': [], 'custom_times': [(now + timedelta(seconds=offsets[item['key']])).isoformat()]}
+            db.execute('INSERT INTO web_reminder_rules VALUES(%s,%s,%s,%s)',
+                       (p.users['alice'], item['id'], 'teams', p.repo.seal(value)))
+    result = prune(p)
+    assert result['events_deleted'] == 2
+    assert event_ids(p) == ['direct:due_now', 'direct:future', 'direct:inside']
+    assert {row['id'] for row in cache_payload(p)['events']} == set(event_ids(p))
+    with p.connect() as db:
+        assert sorted(row[0] for row in db.execute('SELECT item_id FROM web_reminder_rules').fetchall()) == event_ids(p)
+    # Once the latest explicit reminder's existing delivery window has ended,
+    # normal date retention applies again without extending the notification.
+    p.now[0] += 86400 + 600
+    assert prune(p)['events_deleted'] == 3
+    assert event_ids(p) == []
+
+
+def test_invalid_explicit_rules_are_preserved_conservatively(postgres_database):
+    p = postgres_database
+    set_day(p, '2026-11-14')
+    items = [event('invalid' + str(index)) for index in range(4)] + [event('ordinary')]
+    seed(p, items)
+    invalid = [[], {'custom_times': 'not-a-list'}, {'custom_times': ['not-a-date']},
+               {'custom_times': ['2026-11-15T12:00:00']}]
+    with p.connect() as db:
+        for item, value in zip(items, invalid):
+            db.execute('INSERT INTO web_reminder_rules VALUES(%s,%s,%s,%s)',
+                       (p.users['alice'], item['id'], 'teams', p.repo.seal(value)))
+    assert prune(p)['events_deleted'] == 1
+    assert event_ids(p) == [item['id'] for item in items[:-1]]
