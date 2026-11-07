@@ -5,6 +5,7 @@
   let idleTimer, idleDeadline = 0, authEpoch = 0, resumeCheck = null;
   let activeLoad = null, monthRequest = null, monthEpoch = 0;
   let mutationSettled = Promise.resolve(), mutationRevision = 0;
+  let dialogEpoch = 0;
   let checkingTimer = null, checkingAttempts = 0, checkingDeadline = 0, checkingRefresh = false;
   const readRequests = new Set();
   let reminderRules = null, reminderCustomInitial = '';
@@ -128,7 +129,7 @@
   }
   async function load({background = false, afterSync = false, checkingRetry = false, mutationVersion} = {}) {
     if (!S.me) return;
-    if (S.syncing && !afterSync) {toast('Teams 공지를 가져온 뒤 화면을 갱신해요. 현재 일정은 계속 볼 수 있어요.'); return;}
+    if (S.syncing && !afterSync) {if (!S.busy) toast('Teams 공지를 가져온 뒤 화면을 갱신해요. 현재 일정은 계속 볼 수 있어요.'); return;}
     const initialSession = authEpoch;
     if (!checkingRetry) await ensureCollectionReady();
     if (!activeView(initialSession)) return;
@@ -268,8 +269,9 @@
     }
   }
   function openDialog(title, content, footer = '') {
+    dialogEpoch++;
     if (modal.open) modal.close();
-    modal.innerHTML = `<div class="dialog-head"><h2 id="dialog-title">${esc(title)}</h2><button class="dialog-close" aria-label="닫기" data-action="close">×</button></div><div class="dialog-body">${content}</div>${footer ? `<div class="dialog-foot">${footer}</div>` : ''}`;
+    modal.innerHTML = `<div class="dialog-head"><h2 id="dialog-title">${esc(title)}</h2><button class="dialog-close" aria-label="닫기" data-action="close">×</button></div><div class="dialog-body">${content}<p id="mutation-status" class="muted fine" role="status" aria-live="polite" hidden></p></div>${footer ? `<div class="dialog-foot">${footer}</div>` : ''}`;
     modal.showModal();
   }
   function find(id, source) {return [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming].find(e => e.id === id && e.source === source);}
@@ -295,33 +297,78 @@
     $('#pick-date').min = a; $('#pick-date').max = b; $('#pick-date').value = a;
     $('#date-chips').innerHTML = [...new Set([...selectedDates, b])].filter(Boolean).sort().map(d => `<button type="button" class="secondary small" data-remove-date="${d}" ${d === b ? 'disabled' : ''}>${esc(d)} ${d === b ? '· 마지막 날' : '×'}</button>`).join('');
   }
-  async function mutate(operation, message, clearQuick = false) {
+  function mutationStatus(message, epoch) {
+    const status = $('#mutation-status');
+    if (status && modal.open && epoch === dialogEpoch) {status.textContent = message; status.hidden = !message;}
+  }
+  function invalidateDataReads() {
+    S.epoch++; activeLoad?.abort(); activeLoad = null;
+    monthEpoch++; monthRequest?.abort(); monthRequest = null; if (!S.syncing) S.pendingMonth = '';
+    S.loading = false; S.refreshing = false;
+  }
+  async function mutate(operation, message, clearQuick = false, onSaved, pendingMessage = '저장 중…') {
     if (S.busy) return;
     S.busy = true;
     let finishMutation;
     mutationSettled = new Promise(resolve => {finishMutation = resolve;});
-    const sessionEpoch = authEpoch;
+    const sessionEpoch = authEpoch, originalDialog = dialogEpoch;
+    mutationStatus(pendingMessage, originalDialog);
     document.querySelectorAll('button,input,select,textarea').forEach(el => {if (!el.disabled && !['close', 'logout', 'disconnect-device', 'logout-all'].includes(el.dataset.action)) {el.disabled = true; el.dataset.locked = '1';}});
-    let saved = false;
-    try {
-      await operation(); saved = true;
-      if (!activeView(sessionEpoch)) return;
-      mutationRevision++;
-      if (clearQuick) {S.quickDraft = ''; const input = $('#quick-form')?.elements?.title; if (input) input.value = '';}
-      if (modal.open) modal.close(); modal.replaceChildren();
-      await load(); toast(message);
-    } catch (error) {
-      if (sessionEpoch !== authEpoch) return;
-      if (saved && error.status !== 401) toast('저장됐지만 화면을 다시 불러오지 못했어요. 새로고침해 주세요.', true);
-      else failure(error);
-    } finally {
-      finishMutation();
+    let saved = false, released = false;
+    const release = () => {
+      if (released) return;
+      released = true; finishMutation();
       if (sessionEpoch === authEpoch) {
         S.busy = false;
         document.querySelectorAll('[data-locked]').forEach(el => {el.disabled = false; delete el.dataset.locked;});
         updateRefreshStatus();
       }
+    };
+    try {
+      const result = await operation(); saved = true;
+      if (!activeView(sessionEpoch)) return;
+      mutationRevision++;
+      if (onSaved) {invalidateDataReads(); onSaved(result);}
+      if (clearQuick) {S.quickDraft = ''; const input = $('#quick-form')?.elements?.title; if (input) input.value = '';}
+      if (originalDialog === dialogEpoch) {if (modal.open) modal.close(); modal.replaceChildren();}
+      if (onSaved) {
+        toast(message);
+        const refreshing = load();
+        release();
+        await refreshing;
+      } else {await load(); toast(message);}
+    } catch (error) {
+      if (sessionEpoch !== authEpoch) return;
+      if (saved && error.status !== 401) toast('저장됐지만 화면을 다시 불러오지 못했어요. 새로고침해 주세요.', true);
+      else {mutationStatus(error.message || '저장하지 못했어요. 다시 확인해 주세요.', originalDialog); failure(error);}
+    } finally {
+      release();
     }
+  }
+  function applyConfirmedState(original, values, result) {
+    const item = {...original, ...values, ...result};
+    const matches = candidate => candidate.id === original.id && candidate.source === original.source;
+    const wasVisible = [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming].some(matches);
+    const channel = S.channels.find(candidate => candidate.id === item.channel_id);
+    const allowed = !item.hidden && (item.source === 'personal' || (!(S.prefs?.disabled_kinds || []).includes(item.kind) && (channel ? channel.enabled : !item.channel_id && wasVisible)));
+    const order = (a,b) => (a.time || '99:99').localeCompare(b.time || '99:99') || a.source.localeCompare(b.source) || a.id.localeCompare(b.id);
+    const replace = (items, include) => [...items.filter(candidate => !matches(candidate)), ...(include ? [item] : [])].sort(order);
+    if (S.today) {
+      const appears = allowed && C.appears(item, S.day);
+      S.today = {...S.today, teams:replace(S.today.teams, appears && item.source === 'teams'), personal:replace(S.today.personal, appears && item.source === 'personal')};
+    }
+    const grid = C.monthGrid(S.month);
+    S.items = replace(S.items, allowed && item.start_date <= grid.end && item.end_date >= grid.start);
+    S.upcoming = replace(S.upcoming, allowed && item.start_date <= C.addDays(S.day,7) && item.end_date >= S.day);
+    hiddenItems = replace(hiddenItems, !!item.hidden);
+    if (detailItem && matches(detailItem)) detailItem = item;
+    render();
+  }
+  function mutateState(item, values, message) {
+    if (!item) return;
+    const original = {...item};
+    const pending = values.hidden === true ? '숨기는 중…' : values.hidden === false ? '복원하는 중…' : '완료 상태를 저장하는 중…';
+    return mutate(() => setState(original, values), message, false, result => applyConfirmedState(original, values, result), pending);
   }
   async function setState(e, values) {
     const epoch = authEpoch;
@@ -340,9 +387,9 @@
   }
   let hiddenItems = [];
   async function hidden() {
-    const epoch = authEpoch, year = (S.view === 'calendar' ? S.selected || S.month : S.day).slice(0,4);
+    const epoch = authEpoch, revision = mutationRevision, year = (S.view === 'calendar' ? S.selected || S.month : S.day).slice(0,4);
     const result = await api(SCHOOL ? `/api/hidden?start=${year}-01-01&end=${year}-12-31` : '/api/beta/hidden');
-    if (!activeView(epoch)) return;
+    if (!activeView(epoch) || revision !== mutationRevision) return;
     hiddenItems = result.items;
     openDialog(SCHOOL ? `숨긴 일정 · ${year}년` : '숨긴 일정', `<p class="muted">개별적으로 숨긴 일정이에요. 복원해도 꺼둔 채널·종류 설정은 유지돼요.</p><div class="hidden-list">${hiddenItems.length ? hiddenItems.map((e, i) => `<div class="hidden-item"><div><strong>${esc(e.title)}</strong><p class="fine muted">${esc(period(e))} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</p></div><button class="secondary small" data-restore="${i}">복원</button></div>`).join('') : '<div class="empty">숨긴 일정이 없어요.</div>'}</div>`);
   }
@@ -360,7 +407,7 @@
       if (button.dataset.detail) {const e = find(button.dataset.detail, button.dataset.source); if (e) detail(e); return;}
       if (button.dataset.day) {S.selected = button.dataset.day; render(); return;}
       if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); return;}
-      if (button.dataset.restore !== undefined) {const e = hiddenItems[Number(button.dataset.restore)]; return mutate(() => setState(e, {hidden: false}), '일정을 복원했어요.');}
+      if (button.dataset.restore !== undefined) {const e = hiddenItems[Number(button.dataset.restore)]; return mutateState(e, {hidden: false}, '일정을 복원했어요.');}
       if (action === 'close') {modal.close(); return;}
       if (action === 'today' || action === 'calendar') {S.view = action; if (S.me) render(); return;}
       if (action === 'refresh') {if (!S.refreshing) return await load(); return;}
@@ -380,7 +427,7 @@
       if (action === 'security') return openDialog('연결 및 보안', `<p>${esc(connectionText[S.connection?.state] || connectionText.not_connected)}</p><p>Teams 권한은 최대 60초 동안만 재사용해요. 화면을 오래 사용하지 않으면 다시 로그인이 필요해요. 기기 연동을 유지했다면 화면 세션 만료 후에도 알림은 받을 수 있어요. 직접 로그아웃하면 이 기기의 연동과 알림을 끊어요.</p><p>외부 캘린더 등록과 Teams 채팅 발송은 아직 제공하지 않아요. 브라우저 알림은 알림 설정에서 켜 주세요.</p><p><a href="/privacy">개인정보 안내</a></p>`, '<button class="danger" data-action="logout-all">모든 기기 로그아웃</button><button class="secondary" data-action="close">닫기</button>');
       if (action === 'logout-all') {await api('/auth/logout-all', {method:'POST'}); clearPrivate(); loginScreen(); if (testServer()) await detachBrowserPush(); return;}
       if (action === 'edit-detail') return taskForm(detailItem);
-      if (action === 'hide-detail') return mutate(() => setState(detailItem, {hidden: true}), '숨겼어요. 숨긴 일정에서 복원할 수 있어요.');
+      if (action === 'hide-detail') return mutateState(detailItem, {hidden: true}, '숨겼어요. 숨긴 일정에서 복원할 수 있어요.');
       if (action === 'delete-detail') {
         const e = detailItem;
         openDialog('할 일을 삭제할까요?', `<p>${esc(e.title)}</p><p class="muted">삭제한 항목은 복원할 수 없어요.</p>`, '<button class="secondary" data-action="close">닫기</button><button class="danger" data-action="confirm-delete">삭제</button>');
@@ -396,8 +443,8 @@
     const el = event.target;
     if (!S.today || S.loading) return;
     if (el.dataset.complete) {
-      const e = find(el.dataset.complete, el.dataset.source); const checked = el.checked; el.checked = e.completed;
-      return mutate(() => setState(e, {completed: checked}), checked ? '완료했어요.' : '완료 표시를 해제했어요.');
+      const e = find(el.dataset.complete, el.dataset.source); if (!e) return; const checked = el.checked; el.checked = e.completed;
+      return mutateState(e, {completed: checked}, checked ? '완료했어요.' : '완료 표시를 해제했어요.');
     }
     if (el.closest('#task-form') && ['start_date', 'end_date', 'display_mode'].includes(el.name)) syncDates();
   });

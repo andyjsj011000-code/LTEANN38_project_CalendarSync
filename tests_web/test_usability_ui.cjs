@@ -462,7 +462,91 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     assert.match(h.elements.app.innerHTML,/school-signin/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
     assert.equal(h.elements.modal.open,false); assert.equal(h.elements['account-name'].textContent,'');
   }
-  console.log('Usability UI: 41 synthetic scenarios passed (state-preserving refresh, permission-pending recovery, fail-closed auth, usable sign-out during writes, encoded hide IDs, selected-year restore and prior sync/race regressions).');
+  // Hide stays pending until its write is acknowledged, then disappears before the refresh finishes.
+  {
+    const h=harness(); await settle(); h.item.end_date='2026-11-09';
+    const write=deferred(), read=deferred(); h.overrides['/api/events/fixture/state']=() => write.promise;
+    h.overrides['/api/today']=() => read.promise; h.overrides['/api/calendar']=() => response({items:[]});
+    await h.click({detail:'fixture',source:'teams'}); const operation=h.click({action:'hide-detail'}); await settle(); await h.advance(10000);
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/); assert.equal(h.elements.modal.open,true);
+    assert.equal(h.elements['mutation-status'].hidden,false); assert.match(h.elements['mutation-status'].textContent,/숨기는 중/);
+    assert.doesNotMatch(h.elements.toast.textContent,/숨겼어요/);
+    write.resolve(response({...h.item,hidden:true})); await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/); assert.equal(h.elements.modal.open,false); assert.match(h.elements.toast.textContent,/숨겼어요/);
+    await h.click({action:'calendar'}); assert.match(h.elements.app.innerHTML,/calendar-grid/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    read.resolve(response({...h.today,teams:[]})); await operation;
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/); assert.equal(writes(h).length,1);
+  }
+  // A confirmed hide remains applied if its follow-up read fails.
+  {
+    const h=harness(); await settle();
+    h.overrides['/api/events/fixture/state']=() => response({...h.item,hidden:true});
+    h.overrides['/api/today']=() => response({detail:'Read unavailable'},503);
+    await h.click({detail:'fixture',source:'teams'}); await h.click({action:'hide-detail'});
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/); assert.match(h.elements.toast.textContent,/저장됐지만/);
+    assert.equal(h.elements.modal.open,false); assert.equal(writes(h).length,1);
+  }
+  // A response from before the confirmed hide cannot resurrect it even if transport ignores abort.
+  {
+    const oldRead=deferred(), newRead=deferred(), h=harness({ignoreAbort:new Set(['/api/today'])}); await settle(); let reads=0;
+    h.overrides['/api/today']=() => ++reads===1?oldRead.promise:newRead.promise;
+    h.overrides['/api/calendar']=() => response({items:[]});
+    const refresh=h.click({action:'refresh'}); await settle();
+    h.overrides['/api/events/fixture/state']=() => response({...h.item,hidden:true});
+    await h.click({detail:'fixture',source:'teams'}); const hide=h.click({action:'hide-detail'}); await settle();
+    const afterSaved=h.history.length; oldRead.resolve(response(h.today)); await refresh; await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.ok(h.history.slice(afterSaved).filter(change => change.id==='app').every(change => !change.html.includes('Fixture assignment')));
+    newRead.resolve(response({...h.today,teams:[]})); await hide; assert.equal(writes(h).length,1);
+  }
+  // Restoring an eligible hidden item updates today's list before its follow-up read returns.
+  {
+    const h=harness({overrides:{'/api/today':() => response({date:'2026-11-07',teams:[],personal:[]}),'/api/calendar':() => response({items:[]})}}); await settle();
+    const item={...h.item,channel_id:'fixture-channel',hidden:true}, write=deferred(), read=deferred();
+    h.overrides['/api/hidden?start=2026-01-01&end=2026-12-31']=() => response({items:[item]});
+    h.overrides['/api/events/fixture/state']=() => write.promise; h.overrides['/api/today']=() => read.promise;
+    await h.click({action:'hidden'}); const restore=h.click({restore:'0'}); await settle();
+    assert.match(h.elements['mutation-status'].textContent,/복원하는 중/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    write.resolve(response({...item,hidden:false})); await settle(); assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.match(h.elements.toast.textContent,/복원했어요/); assert.equal(h.elements.modal.open,false);
+    read.resolve(response({...h.today,teams:[{...item,hidden:false}]})); await restore; assert.equal(writes(h).length,1);
+  }
+  // Restoration keeps disabled channels hidden rather than bypassing the user's display preferences.
+  {
+    const h=harness({overrides:{'/api/channels':() => response([{id:'fixture-channel',name:'Fixture',enabled:false}]),'/api/today':() => response({date:'2026-11-07',teams:[],personal:[]}),'/api/calendar':() => response({items:[]})}}); await settle();
+    const item={...h.item,channel_id:'fixture-channel',hidden:true}; h.overrides['/api/hidden?start=2026-01-01&end=2026-12-31']=() => response({items:[item]});
+    h.overrides['/api/events/fixture/state']=() => response({...item,hidden:false}); h.overrides['/api/today']=() => response({},503);
+    await h.click({action:'hidden'}); await h.click({restore:'0'}); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+  }
+  // A permission-pending write leaves the item intact and explains the error inside its open dialog.
+  {
+    const h=harness(); await settle(); h.overrides['/api/events/fixture/state']=() => response({detail:'권한 확인 중이에요. 잠시 후 다시 시도해 주세요.',code:'permission_check_pending'},503);
+    await h.click({detail:'fixture',source:'teams'}); await h.click({action:'hide-detail'}); await h.advance(10000);
+    assert.equal(h.elements.modal.open,true); assert.equal(h.elements['mutation-status'].hidden,false);
+    assert.match(h.elements['mutation-status'].textContent,/권한 확인 중/); assert.match(h.elements.app.innerHTML,/Fixture assignment/); assert.equal(writes(h).length,1);
+  }
+  // A late acknowledged hide cannot restore data after the user signs out.
+  {
+    const pending=deferred(), h=harness({ignoreAbort:new Set(['/api/events/fixture/state'])}); await settle();
+    h.overrides['/api/events/fixture/state']=() => pending.promise;
+    await h.click({detail:'fixture',source:'teams'}); const hide=h.click({action:'hide-detail'}); await settle();
+    await h.click({action:'logout'}); pending.resolve(response({...h.item,hidden:true})); await hide;
+    assert.match(h.elements.app.innerHTML,/school-signin/); assert.equal(h.elements.modal.open,false); assert.doesNotMatch(h.elements.toast.textContent,/숨겼어요/);
+  }
+  // A confirmed hide during collection preserves the user's queued calendar destination.
+  {
+    const pending=deferred(), h=harness(); await settle(); await h.click({action:'calendar'});
+    h.overrides['/api/teams/sync']=() => pending.promise;
+    const sync=h.click({action:'sync-teams'}); await settle(); await h.click({action:'next-month'});
+    h.overrides['/api/events/fixture/state']=() => {h.today.teams=[]; return response({...h.item,hidden:true});};
+    h.overrides['/api/calendar']=() => response({items:[]});
+    await h.click({detail:'fixture',source:'teams'}); await h.click({action:'hide-detail'});
+    assert.match(h.elements.app.innerHTML,/2026-12 일정을/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    pending.resolve(response({state:'connected'})); await sync;
+    assert.match(h.elements.app.innerHTML,/2026년 12월/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.equal(writes(h).filter(request => request.options.method==='PATCH').length,1);
+  }
+  console.log('Usability UI: 49 synthetic scenarios passed (confirmed hide/restore, persistent pending/error feedback, stale-read cancellation, state-preserving refresh, fail-closed auth and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);
@@ -481,7 +565,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
     constructor(...args) {super(...(args.length ? args : [epoch + now]));}
     static now() {return epoch + now;}
   }
-  const elements = Object.fromEntries(['app', 'modal', 'topbar', 'account-name', 'nav-today', 'nav-calendar', 'toast', 'login-error', 'sync-status', 'sync-button', 'refresh-status', 'refresh-button'].map(id => {
+  const elements = Object.fromEntries(['app', 'modal', 'topbar', 'account-name', 'nav-today', 'nav-calendar', 'toast', 'login-error', 'sync-status', 'sync-button', 'refresh-status', 'refresh-button', 'mutation-status'].map(id => {
     let html = '';
     return [id, {textContent: '', hidden: true, dataset: {}, attributes: {},
       get innerHTML() {return html;},
