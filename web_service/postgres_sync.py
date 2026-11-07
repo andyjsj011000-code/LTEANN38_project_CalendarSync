@@ -42,8 +42,10 @@ class PostgresSync:
         return (dict(zip(('checked_at', 'state', 'lease_until'), row)) if row else
                 {'checked_at': 0, 'state': 'not_connected', 'lease_until': 0})
 
-    def begin_sync(self, user_id, ttl):
+    def begin_sync(self, user_id, ttl, *, preserve_access=False):
         self._seconds(ttl, allow_zero=True)
+        if type(preserve_access) is not bool or (preserve_access and not getattr(self, 'shared_ingestion_enabled', False)):
+            raise ValueError('Preserved access requires shared ingestion')
         with self.connect() as db:
             user = db.execute('SELECT active FROM web_users WHERE id=%s FOR UPDATE',
                               (user_id,)).fetchone()
@@ -60,7 +62,11 @@ class PostgresSync:
             token = secrets.token_hex(32)
             db.execute('''UPDATE web_school_sync SET lease_token=%s,lease_until=%s,
                 state='checking' WHERE user_id=%s''', (token, now + 180, user_id))
-            db.execute('DELETE FROM web_channel_access WHERE user_id=%s', (user_id,))
+            # A shared final verification still owns the per-user lease. Keep
+            # only its previously verified ACL with the ORIGINAL expiry while
+            # Graph runs; failure clears it and success replaces it atomically.
+            if not preserve_access:
+                db.execute('DELETE FROM web_channel_access WHERE user_id=%s', (user_id,))
         return token
 
     def fail_sync(self, user_id, state, lease):

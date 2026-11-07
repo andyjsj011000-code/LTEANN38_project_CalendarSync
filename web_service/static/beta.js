@@ -5,6 +5,7 @@
   let idleTimer, idleDeadline = 0, authEpoch = 0, resumeCheck = null;
   let activeLoad = null, monthRequest = null, monthEpoch = 0;
   let mutationSettled = Promise.resolve(), mutationRevision = 0;
+  let checkingTimer = null, checkingAttempts = 0, checkingDeadline = 0, checkingRefresh = false;
   const readRequests = new Set();
   let reminderRules = null, reminderCustomInitial = '';
   const activeView = epoch => epoch === authEpoch && !!S.me;
@@ -67,6 +68,7 @@
     else toast(error.message || '연결하지 못했어요. 실행 창이 열려 있는지 확인해 주세요.', true);
   }
   function clearPrivate() {
+    clearTimeout(checkingTimer); checkingTimer = null; checkingAttempts = 0; checkingDeadline = 0; checkingRefresh = false;
     clearTimeout(idleTimer); idleDeadline = 0; resumeCheck = null; authEpoch++;
     activeLoad?.abort(); activeLoad = null;
     monthRequest?.abort(); monthRequest = null; monthEpoch++;
@@ -94,11 +96,31 @@
     if (settings.connection?.state === 'checking') throw new Error('Teams 공지를 아직 확인 중이에요. 현재 일정은 유지했어요. 잠시 후 새로고침해 주세요.');
     S.syncUncertain = false;
   }
-  async function load({background = false, afterSync = false, mutationVersion} = {}) {
+  function scheduleCheckingRefresh() {
+    clearTimeout(checkingTimer); checkingTimer = null;
+    if (!S.me || !S.service?.shared_channel_ingestion) return;
+    if (S.connection?.state !== 'checking') {
+      if (S.connection?.state) {checkingAttempts = 0; checkingDeadline = 0;}
+      return;
+    }
+    if (!checkingDeadline) checkingDeadline = Date.now() + 300000;
+    if (checkingRefresh || checkingAttempts >= 20 || Date.now() >= checkingDeadline) return;
+    const epoch = authEpoch;
+    checkingTimer = setTimeout(async () => {
+      checkingTimer = null;
+      if (!activeView(epoch) || S.connection?.state !== 'checking' || Date.now() >= checkingDeadline) return;
+      if (activeLoad || monthRequest || S.busy || S.syncing) {scheduleCheckingRefresh(); return;}
+      checkingAttempts++; checkingRefresh = true;
+      try {await load({background:true, checkingRetry:true, mutationVersion:mutationRevision});}
+      catch (error) {if (activeView(epoch)) {checkingAttempts = 20; failure(error);}}
+      finally {if (activeView(epoch)) {checkingRefresh = false; scheduleCheckingRefresh();}}
+    }, 15000);
+  }
+  async function load({background = false, afterSync = false, checkingRetry = false, mutationVersion} = {}) {
     if (!S.me) return;
     if (S.syncing && !afterSync) {toast('Teams 공지를 가져온 뒤 화면을 갱신해요. 현재 일정은 계속 볼 수 있어요.'); return;}
     const initialSession = authEpoch;
-    await ensureCollectionReady();
+    if (!checkingRetry) await ensureCollectionReady();
     if (!activeView(initialSession)) return;
     const epoch = ++S.epoch, sessionEpoch = authEpoch;
     if (!background) {monthRequest?.abort(); monthRequest = null; monthEpoch++; S.pendingMonth = '';}
@@ -126,9 +148,11 @@
       if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
       let changes = [];
       if (testServer()) {const result = await read('/api/changes'); if (epoch !== S.epoch || !activeView(sessionEpoch)) return; changes = result.items;}
-      if (afterSync && (S.busy || mutationVersion !== mutationRevision)) return;
+      if ((afterSync || checkingRetry) && (S.busy || mutationVersion !== mutationRevision)) return;
       Object.assign(S, {today, day: today.date, ...(calendarEpoch === monthEpoch ? {month, items: calendar.items} : {}), selected: S.selected || today.date, upcoming: upcoming.items, channels, prefs: settings.preferences, connection: settings.connection, loading: false});
       reviewItems = changes; render();
+      if (checkingRetry && S.connection?.state === 'connected') S.syncUncertain = false;
+      scheduleCheckingRefresh();
     } catch (error) {
       if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
       controller.abort(); S.loading = false;

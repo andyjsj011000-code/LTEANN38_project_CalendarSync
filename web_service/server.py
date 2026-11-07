@@ -91,7 +91,7 @@ class ServerIntegration(SchoolIntegration):
         try: device=self.db.session_device(session)
         except Missing: return {**result,'connection_state':'reauth_required','background_enabled':False,'push_configured':self.sender.configured,'push_registered':False}
         return {**result,'mode':'test-server','background_enabled':bool(device['background']),'connection_expires':device['expires_at'],'connection_state':device['state'],'push_configured':self.sender.configured,'push_registered':bool(self.db.subscriptions(device['id_hash'])),'ingestion_mode':'direct' if hasattr(self.source,'collect') else 'oracle'}
-    def run_sync(self,device,ingest=False,force=False):
+    def run_sync(self,device,ingest=False,force=False,*,prepare_collection=False,prepared=None):
         started=monotonic(); logger=logging.getLogger('uvicorn.error')
         def progress(stage,outcome):
             # Only fixed stage/outcome labels and elapsed time leave this method.
@@ -105,9 +105,15 @@ class ServerIntegration(SchoolIntegration):
             progress('failure','recorded' if saved is True else
                      'not_recorded' if saved is False else 'completed')
         progress('sync','started'); progress('lease','started')
-        user=device['user_id']; lease=self.db.begin_sync(user,0 if ingest or force else self.settings.access_seconds)
-        progress('lease','acquired' if lease else 'skipped')
-        if not lease:
+        user=device['user_id']
+        reuse=bool(ingest and self.shared_ingestion_enabled and prepared and
+                   prepared['device']['id_hash']==device['id_hash'] and
+                   prepared['device']['user_id']==user and
+                   prepared['device']['tenant_id']==device['tenant_id'] and
+                   prepared['valid_until']>self.db.clock())
+        lease=None if reuse else self.db.begin_sync(user,0 if ingest or force else self.settings.access_seconds)
+        progress('lease','reused' if reuse else 'acquired' if lease else 'skipped')
+        if not reuse and not lease:
             progress('sync','skipped'); return {'state':'busy'} if ingest else None
         def fail_current(state):
             nonlocal lease
@@ -120,15 +126,16 @@ class ServerIntegration(SchoolIntegration):
             progress('token','started')
             token,device=acquire_snapshot(self.tokens,device,self.db)
             progress('token','completed'); progress('channels','started')
-            channels=self.graph.channels(token,device['object_id'],device['tenant_id'])
+            channels=prepared['channels'] if reuse else self.graph.channels(token,device['object_id'],device['tenant_id'])
+            verified_at=int(self.db.clock())
             progress('channels','completed')
             if not self.source.configured:
                 progress('source','not_configured'); progress('failure','started')
-                failure_progress(self.db.fail_sync(user,'source_not_configured',lease)); return
+                failure_progress(fail_current('source_not_configured')); return
             progress('source','started')
             if hasattr(self.source,'collect'):
                 if ingest:
-                    if self.shared_ingestion_enabled:
+                    if self.shared_ingestion_enabled and not reuse:
                         # Publish the authorized cache before potentially slow AI
                         # work, and let normal permission checks run meanwhile.
                         cached=self.db.catalog_events([ch['id'] for ch in channels])
@@ -150,8 +157,10 @@ class ServerIntegration(SchoolIntegration):
                                          state='partial' if report['partial'] else 'completed')
                     if self.shared_ingestion_enabled:
                         # Membership or credentials may have changed during AI
-                        # work. Verify them again and only publish that catalog.
-                        lease=self.db.begin_sync(user,0)
+                        # work. Keep the still-valid prior snapshot readable
+                        # while a lease serializes the replacement proof. Its
+                        # original permission expiry is never extended here.
+                        lease=self.db.begin_sync(user,0,preserve_access=True)
                         if not lease: return {'state':'busy'}
                         token,device=acquire_snapshot(self.tokens,device,self.db)
                         channels=self.graph.channels(token,device['object_id'],device['tenant_id'])
@@ -164,6 +173,12 @@ class ServerIntegration(SchoolIntegration):
             progress('source','completed'); progress('commit','started')
             self.db.commit_snapshot(device,channels,events,self.settings.access_seconds,lease)
             progress('commit','completed')
+            if prepare_collection and self.shared_ingestion_enabled and not ingest:
+                # Internal-only handoff. It contains no token and never enters
+                # the API response; queued work revalidates the live device.
+                identity={key:device[key] for key in ('id_hash','user_id','tenant_id','object_id','version')}
+                return {'device':identity,'channels':[dict(ch) for ch in channels],
+                        'valid_until':verified_at+self.settings.access_seconds}
             if ingest and hasattr(self.source,'collect') and not (ingestion and ingestion['partial']):
                 # Advance the schedule only after the snapshot was committed;
                 # failed commits and partial collection need a prompt retry.
@@ -180,9 +195,9 @@ class ServerIntegration(SchoolIntegration):
             failure_progress(fail_current('source_unavailable')); self.db.audit('sync_failed',user)
         finally:
             progress('sync','finished')
-    def run_deferred_ingestion(self,device):
+    def run_deferred_ingestion(self,device,prepared=None):
         try:
-            self.run_sync(device,ingest=True)
+            self.run_sync(device,ingest=True,prepared=prepared)
         except Exception:
             # A response has already been sent. The durable due-device request
             # will retry database failures without failing a finished response.
@@ -191,14 +206,14 @@ class ServerIntegration(SchoolIntegration):
     def sync(self,session,background_tasks=None):
         if self.shared_ingestion_enabled:
             device=self.db.session_device(session)
-            self.run_sync(device,force=True)
+            prepared=self.run_sync(device,force=True,prepare_collection=True)
             result=self.status(session)
             if result['state']=='checking': result['ingestion']={'state':'busy'}
             elif result['state']=='connected' and self.db.request_ingestion(device['id_hash']):
                 # Durable due-device scheduling survives a lost response or
                 # process restart; the response task simply starts it sooner.
                 if background_tasks is not None:
-                    background_tasks.add_task(self.run_deferred_ingestion,device)
+                    background_tasks.add_task(self.run_deferred_ingestion,device,prepared=prepared)
                 result['ingestion']={'state':'queued'}
             return result
         ingestion=self.run_sync(self.db.session_device(session),ingest=True)
@@ -294,7 +309,7 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     app.router.lifespan_context=lifespan
 
     @app.get('/api/service')
-    def info(): return {'mode':'preview' if preview else 'test-server','school_login':not preview,'synthetic_data_only':preview,'idle_seconds':settings.idle_seconds}
+    def info(): return {'mode':'preview' if preview else 'test-server','school_login':not preview,'synthetic_data_only':preview,'idle_seconds':settings.idle_seconds,'shared_channel_ingestion':integration.shared_ingestion_enabled}
     @app.get('/service-worker.js')
     def service_worker(): return FileResponse(static/'service-worker.js',media_type='text/javascript',headers={'Service-Worker-Allowed':'/','Cache-Control':'no-store'})
     @app.get('/manifest.webmanifest')

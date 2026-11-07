@@ -11,6 +11,9 @@ Microsoft Graph. A cached channel is never evidence of membership. Foreground
 reads publish only that account's verified catalog. Manual import commits the
 authorized cache and durably queues collection; the response starts the work in
 the background and the existing worker retries after a restart.
+While initial access verification is still running, the browser performs a
+bounded background read retry and keeps open drafts rather than getting stuck
+on an empty checking screen.
 
 Successful channel scans, including empty scans, are shared for five minutes.
 A 180-second channel lease prevents simultaneous collectors from duplicating
@@ -18,7 +21,10 @@ the same analysis. Cache writes and completion are fenced by the current lease.
 Failed or incomplete scans remain due. Exact notification work bypasses the
 freshness shortcut, and completing one targeted post does not mark the entire
 channel fresh. Membership and credentials are verified again before publishing
-the background result to an account.
+the background result to an account. The final verification owns the user's
+snapshot lease while retaining only an existing ACL's original expiry; it never
+extends that access before verification succeeds. Concurrent checks cannot
+replace a newer permission decision with an older in-flight Graph response.
 
 With this feature enabled, bounded maintenance retires common Teams events
 after seven full days following their end date, using Asia/Seoul calendar dates.

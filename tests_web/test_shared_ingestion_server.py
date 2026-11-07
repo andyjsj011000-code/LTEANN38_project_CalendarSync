@@ -199,3 +199,98 @@ def test_deferred_database_failure_preserves_worker_retry_without_failing_respon
 
     assert audits == [('worker_failed', session['user_id'])]
     assert server.db.device(device['id_hash'])['ingest_at'] == 0
+
+
+def test_queued_collection_reuses_foreground_proof_and_keeps_cache_readable_during_final_graph(server, monkeypatch):
+    client, session, device = enable_shared(server)
+    tasks = DeferredTasks()
+    result = server.integration.sync(session, tasks)
+    assert result['ingestion'] == {'state': 'queued'}
+    assert server.graph.calls == 1
+    assert 'prepared' not in result and 'private-access-token' not in str(result)
+    original_collect = server.integration.source.collect
+    original_channels = server.graph.channels
+    observations = []
+
+    def observe(stage):
+        state = server.db.sync_status(session['user_id'])
+        observations.append((stage, state['state'], state['lease_until'] > server.now[0], server.graph.calls))
+        assert [event['title'] for event in client.get('/api/today').json()['teams']] == ['Cached deadline']
+
+    def collect(*args):
+        observe('collect')
+        return original_collect(*args)
+
+    def channels(*args):
+        # Even a fully cached collection reaches this immediately. The old
+        # proof must stay readable throughout this potentially slow Graph call.
+        observe('final_graph')
+        lease = server.db.sync_status(session['user_id'])['lease_until']
+        # A newer proof cannot race this Graph call and then be overwritten by
+        # its older result: the replacement proof owns the user's sync lease.
+        assert server.db.begin_sync(session['user_id'], 0) is False
+        assert server.db.sync_status(session['user_id'])['lease_until'] == lease
+        return original_channels(*args)
+
+    monkeypatch.setattr(server.integration.source, 'collect', collect)
+    monkeypatch.setattr(server.graph, 'channels', channels)
+    function, args, kwargs = tasks.items[0]
+    function(*args, **kwargs)
+
+    assert observations == [('collect', 'connected', False, 1), ('final_graph', 'checking', True, 1)]
+    assert server.graph.calls == 2
+    assert server.db.sync_status(session['user_id'])['state'] == 'connected'
+    assert server.db.device(device['id_hash'])['ingest_at'] == server.now[0] + 300
+
+
+def test_expired_prepared_proof_is_verified_again_before_collecting(server, monkeypatch):
+    _, session, device = enable_shared(server)
+    tasks = DeferredTasks()
+    server.integration.sync(session, tasks)
+    server.now[0] += server.settings.access_seconds + 1
+    original_collect = server.integration.source.collect
+    calls_at_collection = []
+
+    def collect(*args):
+        calls_at_collection.append(server.graph.calls)
+        return original_collect(*args)
+
+    monkeypatch.setattr(server.integration.source, 'collect', collect)
+    function, args, kwargs = tasks.items[0]
+    function(*args, **kwargs)
+
+    assert calls_at_collection == [2]
+    assert server.graph.calls == 3
+    assert server.db.device(device['id_hash'])['ingest_at'] == server.now[0] + 300
+
+
+def test_queued_prepared_proof_does_not_bypass_device_revocation(server):
+    _, session, device = enable_shared(server)
+    tasks = DeferredTasks()
+    server.integration.sync(session, tasks)
+    server.db.revoke_device(device['id_hash'])
+    function, args, kwargs = tasks.items[0]
+
+    function(*args, **kwargs)
+
+    assert server.integration.source.calls == 0
+    assert server.db.sync_status(session['user_id'])['state'] == 'reauth_required'
+    assert server.db.channels(session['user_id'], session['tenant_id']) == []
+
+
+def test_final_graph_failure_revokes_preserved_access(server, monkeypatch):
+    _, session, device = enable_shared(server)
+    tasks = DeferredTasks()
+    server.integration.sync(session, tasks)
+
+    def channels(*args):
+        assert server.db.channels(session['user_id'], session['tenant_id'])
+        raise GraphFailure('verification_failed')
+
+    monkeypatch.setattr(server.graph, 'channels', channels)
+    function, args, kwargs = tasks.items[0]
+    function(*args, **kwargs)
+
+    assert server.db.sync_status(session['user_id'])['state'] == 'verification_failed'
+    assert server.db.channels(session['user_id'], session['tenant_id']) == []
+    assert server.db.device(device['id_hash'])['ingest_at'] == 0

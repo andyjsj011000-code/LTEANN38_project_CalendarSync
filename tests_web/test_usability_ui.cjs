@@ -224,7 +224,7 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
   }
   // Queued shared ingestion displays the committed catalog without claiming new posts are ready.
   {
-    const h = harness(); await settle();
+    const h = harness({overrides:{'/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true})}}); await settle();
     h.elements.modal.open=true; h.elements.modal.innerHTML='<textarea>Queued collection draft</textarea>';
     h.elements['quick-form']={elements:{title:{value:'Keep this quick draft'}}};
     h.overrides['/api/teams/sync']=() => response({state:'connected',ingestion:{state:'queued'}});
@@ -243,7 +243,99 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     assert.equal(h.requests.length,requestCount); assert.equal(writes(h).length,1);
     assert.match(h.elements['sync-status'].textContent,/백그라운드에서 확인 중/);
   }
-  console.log('Usability UI: 21 synthetic scenarios passed (nonblocking sync, queued ingestion, preserved drafts, bounded writes, queued months, busy leases, review IDs, minimal preference writes and save recovery).');
+  // A shared server's initial checking lease is retried without losing a draft.
+  {
+    let connected=false;
+    const h=harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':() => response({preferences:{disabled_kinds:[]},connection:{state:connected?'connected':'checking'}})
+    }}); await settle();
+    h.elements.modal.open=true; h.elements.modal.innerHTML='<textarea>Retry draft</textarea>';
+    h.elements['quick-form']={elements:{title:{value:'Keep retry draft'}}};
+    const before=h.requests.filter(r => r.url==='/api/today').length;
+    await h.advance(15000); assert.equal(h.requests.filter(r => r.url==='/api/today').length,before+1);
+    connected=true;
+    h.overrides['/api/today']=() => response({...h.today,teams:[{...h.item,title:'Recovered authorized event'}]});
+    await h.advance(15000);
+    assert.match(h.elements.app.innerHTML,/Recovered authorized event/);
+    assert.equal(h.elements.modal.open,true); assert.equal(h.elements.modal.innerHTML,'<textarea>Retry draft</textarea>');
+    assert.match(h.elements.app.innerHTML,/value="Keep retry draft"/);
+    const completed=h.requests.length; await h.advance(60000); assert.equal(h.requests.length,completed);
+    assert.equal(writes(h).length,0);
+  }
+  // Logout cancels an outstanding checking retry before any further account read.
+  {
+    const h=harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':() => response({preferences:{disabled_kinds:[]},connection:{state:'checking'}})
+    }}); await settle(); await h.click({action:'logout'});
+    const before=h.requests.length; await h.advance(60000);
+    assert.equal(h.requests.length,before); assert.match(h.elements.app.innerHTML,/school-signin/);
+  }
+  // Session expiry during a retry immediately clears private state and cancels future retries.
+  {
+    const h=harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':() => response({preferences:{disabled_kinds:[]},connection:{state:'checking'}})
+    }}); await settle(); h.overrides['/api/today']=() => response({},401);
+    await h.advance(15000); assert.match(h.elements.app.innerHTML,/school-signin/);
+    const before=h.requests.length; await h.advance(60000); assert.equal(h.requests.length,before);
+  }
+  // Retry traffic has a finite five-minute budget even when every read still says checking.
+  {
+    const h=harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':() => response({preferences:{disabled_kinds:[]},connection:{state:'checking'}})
+    }}); await settle(); await h.advance(315000);
+    const reads=h.requests.filter(r => r.url==='/api/today').length;
+    assert.ok(reads>1 && reads<=21);
+    const before=h.requests.length; await h.advance(60000); assert.equal(h.requests.length,before);
+    assert.equal(writes(h).length,0); assert.match(h.elements.app.innerHTML,/Teams 접근 권한을 확인하고/);
+  }
+  // A failed checking read retains existing data and stops automatic attempts.
+  {
+    const h=harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':() => response({preferences:{disabled_kinds:[]},connection:{state:'checking'}})
+    }}); await settle(); h.overrides['/api/today']=() => response({detail:'Temporary failure'},503);
+    await h.advance(15000); assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    const before=h.requests.length; await h.advance(60000); assert.equal(h.requests.length,before);
+    assert.equal(writes(h).length,0);
+  }
+  // The checking timer does not overlap a read already started by the user.
+  {
+    let connected=false;
+    const h=harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':() => response({preferences:{disabled_kinds:[]},connection:{state:connected?'connected':'checking'}})
+    }}); await settle();
+    const pending=deferred(); h.overrides['/api/today']=() => pending.promise;
+    const refresh=h.click({action:'refresh'}); await settle(); const before=h.requests.length;
+    await h.advance(15000); assert.equal(h.requests.length,before);
+    connected=true; pending.resolve(response(h.today)); await refresh;
+    const completed=h.requests.length; await h.advance(60000); assert.equal(h.requests.length,completed);
+  }
+  // A later independent checking episode gets a fresh budget after a successful recovery.
+  {
+    let connected=false;
+    const h=harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':() => response({preferences:{disabled_kinds:[]},connection:{state:connected?'connected':'checking'}})
+    }}); await settle();
+    connected=true; await h.advance(15000);
+    const firstRecovery=h.requests.length; await h.advance(300001);
+    assert.equal(h.requests.length,firstRecovery);
+    connected=false; await h.click({action:'refresh'});
+    const before=h.requests.filter(r => r.url==='/api/today').length;
+    connected=true;
+    h.overrides['/api/today']=() => response({...h.today,teams:[{...h.item,title:'Second episode recovered'}]});
+    await h.advance(15000);
+    assert.equal(h.requests.filter(r => r.url==='/api/today').length,before+1);
+    assert.match(h.elements.app.innerHTML,/Second episode recovered/);
+    const secondRecovery=h.requests.length; await h.advance(60000);
+    assert.equal(h.requests.length,secondRecovery); assert.equal(writes(h).length,0);
+  }
+  console.log('Usability UI: 28 synthetic scenarios passed (bounded checking recovery, nonblocking sync, queued ingestion, preserved drafts, bounded writes, queued months, busy leases, review IDs, minimal preference writes and save recovery).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);

@@ -280,7 +280,9 @@ class TestDatabase(SchoolDatabase):
                     result.extend(self.unseal(row[0]))
         return result
 
-    def begin_sync(self,user_id,ttl):
+    def begin_sync(self,user_id,ttl,*,preserve_access=False):
+        if type(preserve_access) is not bool or (preserve_access and not getattr(self,'shared_ingestion_enabled',False)):
+            raise ValueError('Shared ingestion is required to preserve access')
         now=int(self.clock())
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE'); c.execute('INSERT OR IGNORE INTO web_school_sync(user_id) VALUES(?)',(user_id,))
@@ -288,7 +290,8 @@ class TestDatabase(SchoolDatabase):
             if row[1]>now or row[0]+ttl>now: return False
             lease=now+300
             c.execute("UPDATE web_school_sync SET lease_until=?,state='checking' WHERE user_id=?",(lease,user_id))
-            c.execute('DELETE FROM web_channel_access WHERE user_id=?',(user_id,))
+            if not preserve_access:
+                c.execute('DELETE FROM web_channel_access WHERE user_id=?',(user_id,))
         return lease
 
     def mark_ingested(self,device_hash):

@@ -76,6 +76,30 @@ def test_failed_scan_remains_due_and_channel_identity_is_fixed(shared):
         s.db.claim_channel_ingestion({**ch, 'tenant_id': 'other-school'})
 
 
+def test_final_verification_lease_preserves_only_original_unexpired_access(shared):
+    s = shared
+    client = s.client()
+    assert client.get('/api/today').status_code == 200
+    session = s.db.session(client.cookies.get('__Host-calendarsync_session'))
+    user, tenant = session['user_id'], session['tenant_id']
+    with s.db.connect() as db:
+        before = db.execute('''SELECT channel_id,confirmed_at,valid_until FROM web_channel_access
+            WHERE user_id=%s ORDER BY channel_id''', (user,)).fetchall()
+    assert before
+    lease = s.db.begin_sync(user, 0, preserve_access=True)
+    assert lease and s.db.begin_sync(user, 0) is False
+    with s.db.connect() as db:
+        assert db.execute('''SELECT channel_id,confirmed_at,valid_until FROM web_channel_access
+            WHERE user_id=%s ORDER BY channel_id''', (user,)).fetchall() == before
+    assert s.db.channels(user, tenant)
+    # Holding a final verification lease does not extend an earlier permission.
+    s.now[0] = min(row[2] for row in before)
+    assert s.db.channels(user, tenant) == []
+    assert s.db.fail_sync(user, 'verification_failed', lease)
+    with s.db.connect() as db:
+        assert db.execute('SELECT 1 FROM web_channel_access WHERE user_id=%s', (user,)).fetchone() is None
+
+
 @pytest.mark.parametrize('operation', ['cache_write', 'touch'])
 def test_lease_expiry_during_cache_row_lock_wait_prevents_late_mutation(shared, monkeypatch, operation):
     s, ch = shared, channel()
