@@ -80,6 +80,8 @@ class DelegatedGraph:
             result={}
             for team in teams:
                 team_id=str(UUID(team["id"]))
+                team_name=team.get("displayName")
+                team_name=team_name.strip() if isinstance(team_name,str) else ""
                 channels=self._pages(client,token,f"/teams/{team_id}/allChannels?$select=id,displayName,membershipType,tenantId",deadline)
                 for channel in channels:
                     if monotonic()>deadline or len(result)>=300:
@@ -96,5 +98,13 @@ class DelegatedGraph:
                     # A channel's name appearing in a team list is NOT a permission proof.
                     if self._read(client,token,BASE+path) is None:
                         continue
-                    result[channel_id]={"id":channel_id,"team_id":team_id,"name":str(channel.get("displayName") or "Teams")[:200]}
+                    channel_name=channel.get("displayName")
+                    channel_name=channel_name.strip() if isinstance(channel_name,str) else ""
+                    channel_name=channel_name or "Teams"
+                    name=f"{team_name} · {channel_name}" if team_name else channel_name
+                    if len(name)>200:
+                        # Keep both parts when long team names would otherwise
+                        # truncate the channel that users need to distinguish.
+                        name=f"{team_name[:97]} · {channel_name[:100]}" if team_name else channel_name[:200]
+                    result[channel_id]={"id":channel_id,"team_id":team_id,"name":name}
             return list(result.values())

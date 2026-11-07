@@ -105,8 +105,9 @@ class ServerIntegration(SchoolIntegration):
         user=device['user_id']; lease=self.db.begin_sync(user,0 if ingest else self.settings.access_seconds)
         progress('lease','acquired' if lease else 'skipped')
         if not lease:
-            progress('sync','skipped'); return
+            progress('sync','skipped'); return {'state':'busy'} if ingest else None
         try:
+            ingestion=None
             progress('token','started')
             token,device=acquire_snapshot(self.tokens,device,self.db)
             progress('token','completed'); progress('channels','started')
@@ -119,9 +120,18 @@ class ServerIntegration(SchoolIntegration):
             if hasattr(self.source,'collect'):
                 if ingest:
                     events=self.source.collect(token,channels,device['tenant_id'],self.db,user)
-                    progress('ingest_mark','started')
-                    self.db.mark_ingested(device['id_hash'])
-                    progress('ingest_mark','completed')
+                    report=getattr(events,'report',None)
+                    if report is not None:
+                        # Only content-free counts cross the API boundary. An
+                        # incomplete pass must remain eligible for the worker.
+                        counts=('channels_total','channels_scanned','messages_seen',
+                                'messages_analyzed','messages_cached','messages_failed')
+                        if (not isinstance(report,dict) or type(report.get('partial')) is not bool or
+                                any(type(report.get(key)) is not int or report[key]<0 for key in counts)):
+                            raise ValueError('Invalid ingestion report')
+                        ingestion={key:report[key] for key in counts}
+                        ingestion.update(partial=report['partial'],
+                                         state='partial' if report['partial'] else 'completed')
                 else: events=self.db.catalog_events([ch['id'] for ch in channels])
             elif isinstance(self.source,OracleSource):
                 known=self.db.known_oracle_events(user,device['tenant_id'],channels)
@@ -130,6 +140,13 @@ class ServerIntegration(SchoolIntegration):
             progress('source','completed'); progress('commit','started')
             self.db.commit_snapshot(device,channels,events,self.settings.access_seconds,lease)
             progress('commit','completed')
+            if ingest and hasattr(self.source,'collect') and not (ingestion and ingestion['partial']):
+                # Advance the schedule only after the snapshot was committed;
+                # failed commits and partial collection need a prompt retry.
+                progress('ingest_mark','started')
+                self.db.mark_ingested(device['id_hash'])
+                progress('ingest_mark','completed')
+            if ingest: return ingestion
         except GraphFailure as error:
             progress('sync','graph_failure'); progress('failure','started')
             failure_progress(self.db.fail_sync(user,error.state,lease))
@@ -140,8 +157,10 @@ class ServerIntegration(SchoolIntegration):
         finally:
             progress('sync','finished')
     def sync(self,session):
-        self.run_sync(self.db.session_device(session),ingest=True)
-        return self.status(session)
+        ingestion=self.run_sync(self.db.session_device(session),ingest=True)
+        result=self.status(session)
+        if ingestion is not None: result['ingestion']=ingestion
+        return result
     def check_request(self,session,request):
         checked=self.db.school_session(request.cookies.get(self.session_cookie),self.settings.idle_seconds)
         if not checked: raise HTTPException(401,'Viewing session expired; device notifications remain linked')
