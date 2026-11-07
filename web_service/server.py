@@ -89,8 +89,9 @@ class ServerIntegration(SchoolIntegration):
     def status(self,session):
         result=super().status(session)
         try: device=self.db.session_device(session)
-        except Missing: return {**result,'connection_state':'reauth_required','background_enabled':False,'push_configured':self.sender.configured,'push_registered':False}
-        return {**result,'mode':'test-server','background_enabled':bool(device['background']),'connection_expires':device['expires_at'],'connection_state':device['state'],'push_configured':self.sender.configured,'push_registered':bool(self.db.subscriptions(device['id_hash'])),'ingestion_mode':'direct' if hasattr(self.source,'collect') else 'oracle'}
+        except Missing: return {**result,'connection_state':'reauth_required','background_enabled':False,'push_configured':self.sender.configured,'push_registered':False,'ingestion_pending':False}
+        pending=self.db.ingestion_pending(device) if self.shared_ingestion_enabled else False
+        return {**result,'mode':'test-server','background_enabled':bool(device['background']),'connection_expires':device['expires_at'],'connection_state':device['state'],'push_configured':self.sender.configured,'push_registered':bool(self.db.subscriptions(device['id_hash'])),'ingestion_mode':'direct' if hasattr(self.source,'collect') else 'oracle','ingestion_pending':pending}
     def run_sync(self,device,ingest=False,force=False,*,prepare_collection=False,prepared=None):
         started=monotonic(); logger=logging.getLogger('uvicorn.error')
         def progress(stage,outcome):
@@ -248,6 +249,13 @@ class ServerIntegration(SchoolIntegration):
         if path in {'/api/channels','/api/today','/api/calendar','/api/hidden','/api/changes'} or path.startswith(('/api/events/','/api/channels/','/api/changes/')):
             self.run_sync(self.db.session_device(session),ingest=False)
             self.require_permission_ready(session)
+            if (self.shared_ingestion_enabled and request.method=='GET' and
+                    (path in {'/api/today','/api/calendar','/api/hidden','/api/changes'} or
+                     path.startswith(('/api/events/','/api/changes/')))):
+                # Polling can expose each completed post while collection is
+                # running. The stored ACL and its original expiry remain the
+                # only permission proof; a view never extends that proof.
+                self.db.materialize_cached_events(self.db.session_device(session))
     def tick(self):
         owner=secrets.token_hex(16)
         if not self.db.worker_lock(owner): return

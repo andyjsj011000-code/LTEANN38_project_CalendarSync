@@ -4,7 +4,7 @@ import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from .school_storage import SchoolDatabase
-from .storage import Missing, Conflict, digest
+from .storage import Missing, Conflict, PermissionPending, digest
 
 EXTRA_SCHEMA="""
 CREATE TABLE IF NOT EXISTS web_connections (
@@ -144,6 +144,84 @@ class TestDatabase(SchoolDatabase):
         with self.connect() as c:
             c.execute('INSERT INTO web_source_cache VALUES(?,?,?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET version=excluded.version,payload_blob=excluded.payload_blob,updated_at=excluded.updated_at',(key,channel,message,version,self.seal(events),int(self.clock())))
 
+    def _publish_cached_events(self,c,user,allowed,events,now):
+        for e in events:
+            if e['channel_id'] not in allowed: raise ValueError('Source channel mismatch')
+            event_id=e['id'] if e['id'].startswith('direct:') else 'oracle:'+e['id']
+            fields={k:e.get(k) for k in ('title','notes','time','source_url','start_date','end_date','kind','source_version')}; fields['cancelled']=bool(e.get('cancelled',False))
+            version=source_hash(fields)
+            old=c.execute('SELECT channel_id FROM web_events WHERE id=?',(event_id,)).fetchone()
+            if old and old[0]!=e['channel_id']: raise ValueError('Event channel changed')
+            if not old:
+                c.execute('INSERT INTO web_events(id,channel_id,start_date,end_date,kind,payload_blob,cancelled) VALUES(?,?,?,?,?,?,?)',(event_id,e['channel_id'],e['start_date'],e['end_date'],e['kind'],self.seal(fields),int(fields['cancelled'])))
+            seen=c.execute('SELECT seen_hash FROM web_user_source_versions WHERE user_id=? AND event_id=?',(user,event_id)).fetchone()
+            if not seen:
+                c.execute('INSERT INTO web_user_source_versions VALUES(?,?,?)',(user,event_id,version))
+                # First discovery shows the current source, even if another user saw an older version.
+                c.execute('INSERT INTO web_event_states(user_id,event_id,override_blob) VALUES(?,?,?) ON CONFLICT(user_id,event_id) DO UPDATE SET override_blob=excluded.override_blob',(user,event_id,self.seal(fields)))
+            elif seen[0]!=version:
+                change_id=digest(user+'|'+event_id+'|'+version)
+                c.execute("UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND source_hash<>? AND status='pending'",(user,event_id,version))
+                # Reopen a revision only when it differs from the last source the user decided on.
+                c.execute("INSERT INTO web_changes(id,user_id,event_id,source_hash,payload_blob,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_blob=excluded.payload_blob,created_at=CASE WHEN web_changes.status='pending' THEN web_changes.created_at ELSE excluded.created_at END,status='pending'",(change_id,user,event_id,version,self.seal(fields),now))
+            else:
+                c.execute("UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND status='pending'",(user,event_id))
+
+    def _progress_device(self,c,device,now):
+        if type(device.get('version')) is not int: raise Missing()
+        current=c.execute('''SELECT d.expires_at,d.ingest_at FROM web_connections d
+            JOIN web_users u ON u.id=d.user_id WHERE d.id_hash=? AND d.user_id=?
+            AND u.tenant_id=? AND d.version=? AND d.active=1 AND u.active=1
+            AND d.expires_at>? AND d.state<>'reauth_required' ''',
+            (device['id_hash'],device['user_id'],device['tenant_id'],device['version'],now)).fetchone()
+        if current is None: raise Missing()
+        return current
+
+    def materialize_cached_events(self,device):
+        if not getattr(self,'shared_ingestion_enabled',False): return 0
+        user=device['user_id']; tenant=device['tenant_id']
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            now=int(self.clock())
+            current=self._progress_device(c,device,now)
+            status=c.execute('SELECT state FROM web_school_sync WHERE user_id=?',(user,)).fetchone()
+            if status is None or status[0] not in {'connected','checking'}: return 0
+            proofs=c.execute('''SELECT a.channel_id,a.valid_until FROM web_channel_access a
+                JOIN web_channels ch ON ch.id=a.channel_id WHERE a.user_id=? AND ch.tenant_id=?
+                ORDER BY a.channel_id''',(user,tenant)).fetchall()
+            allowed={row[0] for row in proofs if row[1]>now}
+            if not allowed:
+                if proofs: raise PermissionPending()
+                return 0
+            expiry=min(row[1] for row in proofs if row[0] in allowed)
+            events=[]
+            # Read inside the same write transaction; publication never renews permission.
+            for row in c.execute('''SELECT s.channel_id,s.payload_blob FROM web_source_cache s
+                JOIN web_channel_access a ON a.channel_id=s.channel_id
+                JOIN web_channels ch ON ch.id=a.channel_id
+                WHERE a.user_id=? AND ch.tenant_id=? AND a.valid_until>?
+                ORDER BY s.cache_key''',(user,tenant,now)):
+                payload=self.unseal(row[1])
+                if not isinstance(payload,list) or any(not isinstance(e,dict) or e.get('channel_id')!=row[0] for e in payload):
+                    raise ValueError('Source cache channel mismatch')
+                events.extend(payload)
+            self._publish_cached_events(c,user,allowed,events,now)
+            finished=int(self.clock())
+            if current[0]<=finished: raise Missing()
+            if expiry<=finished: raise PermissionPending()
+        return len(events)
+
+    def ingestion_pending(self,device):
+        if not getattr(self,'shared_ingestion_enabled',False): return False
+        with self.connect() as c:
+            now=int(self.clock())
+            try: current=self._progress_device(c,device,now)
+            except Missing: return False
+            status=c.execute('SELECT state FROM web_school_sync WHERE user_id=?',(device['user_id'],)).fetchone()
+            if status and status[0] not in {'connected','checking','not_connected'}: return False
+            # This local adapter has no shared channel ingestion lease table.
+            return current[1]<=now
+
     def commit_snapshot(self,device,channels,events,ttl,lease):
         now=int(self.clock()); user=device['user_id']; tenant=device['tenant_id']; allowed={ch['id'] for ch in channels}
         with self.connect() as c:
@@ -157,29 +235,7 @@ class TestDatabase(SchoolDatabase):
                 if prior and prior[0]!=tenant: raise ValueError('Tenant mismatch')
                 c.execute('INSERT INTO web_channels VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET label_blob=excluded.label_blob',(ch['id'],tenant,self.seal({'name':ch['name']})))
                 c.execute('INSERT INTO web_channel_access VALUES(?,?,?,?)',(user,ch['id'],now,now+ttl))
-            for e in events:
-                if e['channel_id'] not in allowed: raise ValueError('Source channel mismatch')
-                event_id=e['id'] if e['id'].startswith('direct:') else 'oracle:'+e['id']
-                fields={k:e.get(k) for k in ('title','notes','time','source_url','start_date','end_date','kind','source_version')}; fields['cancelled']=bool(e.get('cancelled',False))
-                version=source_hash(fields)
-                old=c.execute('SELECT channel_id FROM web_events WHERE id=?',(event_id,)).fetchone()
-                if old and old[0]!=e['channel_id']: raise ValueError('Event channel changed')
-                if not old:
-                    c.execute('INSERT INTO web_events(id,channel_id,start_date,end_date,kind,payload_blob,cancelled) VALUES(?,?,?,?,?,?,?)',(event_id,e['channel_id'],e['start_date'],e['end_date'],e['kind'],self.seal(fields),int(fields['cancelled'])))
-                seen=c.execute('SELECT seen_hash FROM web_user_source_versions WHERE user_id=? AND event_id=?',(user,event_id)).fetchone()
-                if not seen:
-                    c.execute('INSERT INTO web_user_source_versions VALUES(?,?,?)',(user,event_id,version))
-                    # First discovery shows the current source, even if another user saw an older version.
-                    c.execute('INSERT INTO web_event_states(user_id,event_id,override_blob) VALUES(?,?,?) ON CONFLICT(user_id,event_id) DO UPDATE SET override_blob=excluded.override_blob',(user,event_id,self.seal(fields)))
-                elif seen[0]!=version:
-                    change_id=digest(user+'|'+event_id+'|'+version)
-                    c.execute("UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND source_hash<>? AND status='pending'",(user,event_id,version))
-                    # A previously superseded or decided revision may become current again.
-                    # Reopen it only when it differs from the last source the user decided on.
-                    c.execute("INSERT INTO web_changes(id,user_id,event_id,source_hash,payload_blob,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_blob=excluded.payload_blob,created_at=CASE WHEN web_changes.status='pending' THEN web_changes.created_at ELSE excluded.created_at END,status='pending'",(change_id,user,event_id,version,self.seal(fields),now))
-                else:
-                    # The source reverted to the version already handled by this user.
-                    c.execute("UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND status='pending'",(user,event_id))
+            self._publish_cached_events(c,user,allowed,events,now)
             c.execute("UPDATE web_school_sync SET checked_at=?,state='connected',lease_until=0 WHERE user_id=?",(now,user))
 
     def _shared(self,user_id,tenant_id):

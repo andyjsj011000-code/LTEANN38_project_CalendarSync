@@ -2,10 +2,11 @@
 (() => {
   const $ = s => document.querySelector(s);
   const SCHOOL = document.documentElement?.dataset.mode === 'school';
-  let idleTimer, idleDeadline = 0, authEpoch = 0, resumeCheck = null, lastSessionCheckAt = 0;
+  let idleTimer, idleDeadline = 0, authEpoch = 0, resumeCheck = null, lastSessionCheckAt = 0, autoReadsPaused = false;
   let activeLoad = null, monthRequest = null, monthEpoch = 0;
   let mutationSettled = Promise.resolve(), mutationRevision = 0;
-  let dialogEpoch = 0, dialogRequestId = 0;
+  let dialogEpoch = 0, dialogRequestId = 0, lastRenderKey = null, dialogContainsTeams = false;
+  let ingestionTimer = null, ingestionAttempts = 0, ingestionDeadline = 0, ingestionRefresh = false, ingestionFinalNeeded = false;
   let checkingTimer = null, checkingAttempts = 0, checkingDeadline = 0, checkingRefresh = false;
   const readRequests = new Set();
   let reminderRules = null, reminderCustomInitial = '';
@@ -16,6 +17,8 @@
   const root = $('#app'), modal = $('#modal'), topbar = $('#topbar');
   const C = window.BetaCalendar;
   const S = {me: null, view: 'today', day: '', month: '', selected: '', today: null, items: [], upcoming: [], channels: [], prefs: null, busy: false, loading: false, loadError: false, epoch: 0};
+  const partNames = ['today','calendar','upcoming','channels','settings','changes'];
+  S.ready = Object.fromEntries(partNames.map(name => [name,false])); S.partErrors = {};
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const kindName = {personal: '개인', assignment: '과제', application: '신청', event: '행사·일정'};
   const pretty = d => new Intl.DateTimeFormat('ko-KR', {month: 'long', day: 'numeric', weekday: 'short', timeZone: 'UTC'}).format(new Date(d + 'T00:00:00Z'));
@@ -73,9 +76,11 @@
     }
   }
   function clearPrivate() {
+    clearTimeout(ingestionTimer); ingestionTimer = null; ingestionAttempts = 0; ingestionDeadline = 0; ingestionRefresh = false; ingestionFinalNeeded = false; lastRenderKey = null;
+    S.ready = Object.fromEntries(partNames.map(name => [name,false])); S.partErrors = {};
     dialogEpoch++; dialogRequestId++;
     clearTimeout(checkingTimer); checkingTimer = null; checkingAttempts = 0; checkingDeadline = 0; checkingRefresh = false;
-    clearTimeout(idleTimer); idleDeadline = 0; resumeCheck = null; lastSessionCheckAt = 0; authEpoch++;
+    clearTimeout(idleTimer); idleDeadline = 0; resumeCheck = null; lastSessionCheckAt = 0; autoReadsPaused = false; authEpoch++;
     activeLoad?.abort(); activeLoad = null;
     monthRequest?.abort(); monthRequest = null; monthEpoch++;
     S.pendingMonth = ''; S.syncing = false; S.syncUncertain = false; S.syncMessage = ''; S.quickDraft = ''; reviewDialogItems.clear();
@@ -87,10 +92,12 @@
     if (modal.open) modal.close(); modal.replaceChildren(); topbar.hidden = true; $('#account-name').textContent = '';
   }
   function loginScreen() {
+    lastRenderKey = null;
     if (SCHOOL) {root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC</p><h1>학교 일정과 할 일,<br>한눈에.</h1><p>${S.service?.mode === 'preview' ? '학교 계정 없이 예시 화면을 확인하세요.' : '학교 Microsoft 계정으로 로그인하세요.'}</p><a class="primary school-signin" href="/auth/login?background=1">${S.service?.mode === 'preview' ? '예시 데이터로 시작하기 →' : 'Microsoft 로그인 · 이 기기 연동 유지 →'}</a><p class="fine muted">공유 기기에서는 <a href="/auth/login">이번 사용만 로그인</a>을 선택하세요.</p><p class="login-note">Microsoft 로그인 화면에서 인증해요. 이 서비스는 계정 비밀번호를 받지 않아요. 기기 연동을 유지하면 최대 30일 동안 서버가 공지를 갱신하며, 직접 로그아웃하면 이 기기의 연동과 알림을 끊어요. 본인이 접근할 수 있는 Teams 일정만 표시하며, 웹 알림은 로그인 후 이 기기에서 따로 켤 수 있어요. 외부 캘린더 등록은 아직 제공하지 않아요.</p><p><a href="/privacy">개인정보 안내</a></p>${testServer() ? '<button class="secondary" type="button" data-action="disconnect-device">이 기기 연결 해제</button>' : ''}<p class="error-message" id="login-error" role="alert">${location.search?.includes('login=failed') ? '로그인을 완료하지 못했어요. 학교 계정과 앱 권한을 확인하고 다시 시도해 주세요.' : ''}</p></div></section>`; return;}
     root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC · BETA</p><h1>오늘 해야 할 일,<br>한눈에.</h1><p class="muted">학교 로그인 없이 초대 코드로 먼저 써보세요.</p><form id="login-form"><label class="field"><span class="field-label">테스트 계정 초대 코드</span><input name="code" type="password" required minlength="16" maxlength="128" autocomplete="off" spellcheck="false" placeholder="실행 창에 표시된 코드를 입력하세요"></label><p class="error-message" id="login-error" role="alert"></p><button class="primary" type="submit">베타 시작하기 →</button></form><p class="login-note">Teams 공지는 예시 데이터입니다. 개인 할 일은 계정별로 서버에 저장됩니다. 같은 코드로 로그인하면 같은 계정이 열려요.</p></div></section>`;
   }
   function renderLoadState(error = S.loadError) {
+    lastRenderKey = null;
     if (!S.me) return;
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
     $('#nav-today').classList.toggle('active', S.view === 'today'); $('#nav-calendar').classList.toggle('active', S.view === 'calendar');
@@ -107,13 +114,13 @@
     if (error.status !== 503 || error.code !== 'permission_check_pending' || !S.me) return false;
     S.permissionPending = true; S.connection = {...S.connection, state:'checking'};
     S.refreshError = 'Teams 접근 권한을 확인하고 있어요. 잠시 후 다시 확인해 주세요.';
-    if (!S.today || !S.prefs) {S.loadError = true; renderLoadState(true);}
+    if (!S.today) {S.loadError = true; renderLoadState(true);}
     else updateRefreshStatus();
     scheduleCheckingRefresh(); return true;
   }
   function scheduleCheckingRefresh() {
     clearTimeout(checkingTimer); checkingTimer = null;
-    if (!S.me || !S.service?.shared_channel_ingestion) return;
+    if (!S.me || !S.service?.shared_channel_ingestion || document.hidden || autoReadsPaused) return;
     if (S.connection?.state !== 'checking') {
       if (S.connection?.state) {checkingAttempts = 0; checkingDeadline = 0;}
       return;
@@ -123,76 +130,139 @@
     const epoch = authEpoch;
     checkingTimer = setTimeout(async () => {
       checkingTimer = null;
-      if (!activeView(epoch) || S.connection?.state !== 'checking' || Date.now() >= checkingDeadline) return;
-      if (activeLoad || monthRequest || S.busy || S.syncing) {scheduleCheckingRefresh(); return;}
+      if (!activeView(epoch) || document.hidden || expireIdle() || S.connection?.state !== 'checking' || Date.now() >= checkingDeadline) return;
+      if (autoReadsPaused || resumeCheck || activeLoad || monthRequest || S.busy || S.syncing) {scheduleCheckingRefresh(); return;}
       checkingAttempts++; checkingRefresh = true;
       try {await load({background:true, checkingRetry:true, mutationVersion:mutationRevision});}
       catch (error) {if (activeView(epoch)) {checkingAttempts = 20; failure(error);}}
       finally {if (activeView(epoch)) {checkingRefresh = false; scheduleCheckingRefresh();}}
     }, 15000);
   }
-  async function load({background = false, afterSync = false, checkingRetry = false, mutationVersion} = {}) {
+  function scheduleIngestionRefresh() {
+    clearTimeout(ingestionTimer); ingestionTimer = null;
+    const pending = S.connection?.ingestion_pending === true;
+    if (!S.me || document.hidden || autoReadsPaused || S.connection?.state === 'checking') return;
+    if (!pending && !ingestionFinalNeeded) {
+      if (!ingestionRefresh) {ingestionAttempts = 0; ingestionDeadline = 0;}
+      return;
+    }
+    if (!ingestionDeadline) ingestionDeadline = Date.now() + 180000;
+    if (ingestionRefresh || ingestionAttempts >= 60 || Date.now() >= ingestionDeadline) {updateRefreshStatus(); return;}
+    const epoch = authEpoch;
+    ingestionTimer = setTimeout(async () => {
+      ingestionTimer = null;
+      if (!activeView(epoch) || document.hidden || expireIdle()) return;
+      if (Date.now() >= ingestionDeadline) {updateRefreshStatus(); return;}
+      if (S.connection?.state === 'checking') {scheduleCheckingRefresh(); return;}
+      if (autoReadsPaused || resumeCheck || activeLoad || monthRequest || S.busy || S.syncing || checkingRefresh) {scheduleIngestionRefresh(); return;}
+      ingestionAttempts++; ingestionRefresh = true;
+      const finalPass = ingestionFinalNeeded && S.connection?.ingestion_pending !== true;
+      try {
+        const applied = await load({background:true, ingestionRetry:true, mutationVersion:mutationRevision});
+        if (finalPass && applied && S.connection?.ingestion_pending !== true) ingestionFinalNeeded = false;
+        if (activeView(epoch) && ingestionFinalNeeded && S.connection?.ingestion_pending !== true && S.connection?.state !== 'checking' && !document.hidden && !S.busy && !S.syncing && !activeLoad && ingestionAttempts < 60 && Date.now() < ingestionDeadline) {
+          ingestionAttempts++;
+          const finalized = await load({background:true, ingestionRetry:true, mutationVersion:mutationRevision});
+          if (finalized && S.connection?.ingestion_pending !== true) ingestionFinalNeeded = false;
+        }
+      } catch (error) {if (activeView(epoch)) {ingestionAttempts = 60; failure(error);}}
+      finally {if (activeView(epoch)) {ingestionRefresh = false; scheduleIngestionRefresh();}}
+    }, 3000);
+  }
+  async function load({background = false, afterSync = false, checkingRetry = false, ingestionRetry = false, mutationVersion} = {}) {
     if (!S.me) return;
     if (S.syncing && !afterSync) {if (!S.busy) toast('Teams 공지를 가져온 뒤 화면을 갱신해요. 현재 일정은 계속 볼 수 있어요.'); return;}
     const initialSession = authEpoch;
     if (!checkingRetry) await ensureCollectionReady();
-    if (!activeView(initialSession)) return;
-    background = background || !!(S.today && S.prefs);
-    const epoch = ++S.epoch, sessionEpoch = authEpoch;
+    if (!activeView(initialSession) || ((checkingRetry || ingestionRetry) && (autoReadsPaused || resumeCheck))) return;
+    background = background || !!S.today;
+    const epoch = ++S.epoch, sessionEpoch = authEpoch, revision = mutationRevision;
     if (!background) {monthRequest?.abort(); monthRequest = null; monthEpoch++; S.pendingMonth = '';}
     const calendarEpoch = monthEpoch;
     activeLoad?.abort();
     const controller = new AbortController(); activeLoad = controller;
-    const timer = setTimeout(() => controller.abort(), 100000);
-    S.loading = !background; S.loadError = false;
-    S.refreshing = background; S.refreshError = ''; updateRefreshStatus();
+    const timer = setTimeout(() => controller.abort(), 100000), errors = [], applied = new Set();
+    let teamsRejected = false;
+    const permittedItems = items => teamsRejected ? items.filter(item => item.source === 'personal') : items;
+    const current = () => epoch === S.epoch && activeView(sessionEpoch) && revision === mutationRevision;
+    const publishable = () => current() && !((checkingRetry || ingestionRetry) && (autoReadsPaused || resumeCheck || document.hidden)) && !((afterSync || checkingRetry || ingestionRetry) && (S.busy || mutationVersion !== mutationRevision));
+    S.loading = !S.today; S.loadError = false; S.refreshing = background; S.refreshError = ''; S.partErrors = {}; updateRefreshStatus();
     if (!background) {
-      rememberQuickDraft();
-      S.today = null; S.items = []; S.upcoming = []; S.channels = []; S.prefs = null; reviewItems = [];
-      if (modal.open) modal.close(); modal.replaceChildren();
-      renderLoadState();
+      rememberQuickDraft(); S.today = null; S.items = []; S.upcoming = []; S.channels = []; S.prefs = null; reviewItems = [];
+      S.ready = Object.fromEntries(partNames.map(name => [name,false]));
+      if (modal.open) modal.close(); modal.replaceChildren(); renderLoadState();
     }
-    const read = path => api(path, {signal: controller.signal});
-    try {
-      const today = await read('/api/today');
-      if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
-      const month = S.month || today.date.slice(0, 7), grid = C.monthGrid(month);
-      const [calendar, upcoming, channels, settings] = await Promise.all([
-        read(`/api/calendar?start=${grid.start}&end=${grid.end}`),
-        read(`/api/calendar?start=${today.date}&end=${C.addDays(today.date, 7)}`),
-        read('/api/channels'), read('/api/settings')
-      ]);
-      if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
-      let changes = [];
-      if (testServer()) {const result = await read('/api/changes'); if (epoch !== S.epoch || !activeView(sessionEpoch)) return; changes = result.items;}
-      if ((afterSync || checkingRetry) && (S.busy || mutationVersion !== mutationRevision)) return;
-      Object.assign(S, {today, day: today.date, ...(calendarEpoch === monthEpoch ? {month, items: calendar.items} : {}), selected: S.selected || today.date, upcoming: upcoming.items, channels, prefs: settings.preferences, connection: settings.connection, loading: false});
-      reviewItems = changes; S.permissionPending = false; render();
-      if (checkingRetry && S.connection?.state === 'connected') S.syncUncertain = false;
-      scheduleCheckingRefresh();
-    } catch (error) {
-      if (epoch !== S.epoch || !activeView(sessionEpoch)) return;
-      controller.abort(); S.loading = false;
-      if ([401, 403].includes(error.status)) {failure(error); return;}
-      if (presentPermissionPending(error)) return;
-      S.permissionPending = false;
-      if (background && S.today && S.prefs) {
-        S.refreshError = '최신 일정을 불러오지 못했어요. 마지막으로 확인한 일정을 표시하고 있어요. 새로고침으로 다시 확인해 주세요.';
-        throw new Error(S.refreshError);
+    const part = async (name, path, apply) => {
+      try {
+        const value = await api(path, {signal:controller.signal});
+        if (!publishable() || controller.signal.aborted) return;
+        if (apply(value) === false) return;
+        S.ready[name] = true; applied.add(name); delete S.partErrors[name];
+        if (S.today) render();
+        return value;
+      } catch (error) {
+        if (!current() || (ingestionRetry && document.hidden)) return;
+        if ([401,403].includes(error.status)) {failure(error); return;}
+        S.partErrors[name] = error.code === 'permission_check_pending' ? 'Teams 접근 권한을 확인하고 있어요.' : '불러오지 못했어요. 새로고침으로 다시 확인해 주세요.';
+        if (presentPermissionPending(error)) {if (S.today) render(); return;}
+        errors.push(error);
+        if (S.today) render();
       }
-      S.loadError = true; renderLoadState(true);
-      const displayed = new Error('일정을 불러오지 못했어요. 다시 불러오기를 눌러 주세요.'); displayed.status = error.status; displayed.loadPresented = true; throw displayed;
+    };
+    try {
+      const today = await part('today', '/api/today', value => {
+        Object.assign(S, {today:value, day:value.date, month:S.month || value.date.slice(0,7), selected:S.selected || value.date, loading:false, refreshing:true, permissionPending:false});
+      });
+      if (!today || !publishable()) {
+        if (current() && !S.today && errors.length) {S.loadError = true; renderLoadState(true);}
+      } else {
+        const month = S.month, grid = C.monthGrid(month);
+        const jobs = [
+          part('calendar', `/api/calendar?start=${grid.start}&end=${grid.end}`, value => {if (calendarEpoch !== monthEpoch) return false; S.items = permittedItems(value.items);}),
+          part('upcoming', `/api/calendar?start=${today.date}&end=${C.addDays(today.date,7)}`, value => {S.upcoming = permittedItems(value.items);}),
+          part('channels', '/api/channels', value => {S.channels = teamsRejected ? [] : value;}),
+          part('settings', '/api/settings', value => {
+            const wasPending = S.connection?.ingestion_pending === true;
+            S.prefs = value.preferences;
+            S.connection = S.permissionPending ? {...value.connection,state:'checking'} : value.connection;
+            // Data may predate the final worker commit even when this is our first pending=false response.
+            if ((wasPending || (!ingestionRetry && S.service?.shared_channel_ingestion)) && value.connection?.ingestion_pending === false) ingestionFinalNeeded = true;
+            if (connectionRejectsTeams()) {
+              teamsRejected = true; S.today = {...S.today, teams:[]};
+              S.items = permittedItems(S.items); S.upcoming = permittedItems(S.upcoming); S.channels = []; reviewItems = [];
+              dialogRequestId++;
+              hiddenItems = hiddenItems.filter(item => item.source === 'personal'); reviewDialogItems.clear();
+              if (dialogContainsTeams && modal.open) {dialogEpoch++; modal.close(); modal.replaceChildren();}
+              if (detailItem?.source === 'teams') detailItem = null;
+            }
+            if (checkingRetry && S.connection?.state === 'connected') S.syncUncertain = false;
+          })
+        ];
+        if (testServer()) jobs.push(part('changes', '/api/changes', value => {reviewItems = teamsRejected ? [] : value.items;}));
+        else S.ready.changes = true;
+        await Promise.allSettled(jobs);
+      }
+      if (current() && errors.length) {
+        S.refreshError = S.today ? '일부 최신 정보를 불러오지 못했어요. 마지막으로 확인한 일정은 유지했어요. 새로고침으로 다시 확인해 주세요.' : '일정을 불러오지 못했어요. 다시 불러오기를 눌러 주세요.';
+        const error = new Error(S.refreshError); error.loadPresented = !S.today; throw error;
+      }
+      return publishable() && !S.permissionPending && ['today','calendar','upcoming','settings'].every(name => applied.has(name));
     } finally {
       clearTimeout(timer);
-      if (activeLoad === controller) {activeLoad = null; S.loading = false; S.refreshing = false; updateRefreshStatus();}
+      if (activeLoad === controller) {
+        activeLoad = null; S.loading = false; S.refreshing = false; updateRefreshStatus();
+        if (current()) {scheduleCheckingRefresh(); scheduleIngestionRefresh();}
+      }
     }
   }
   function row(e) {
     return `<div class="task-row ${e.source === 'personal' ? 'personal' : ''} ${e.completed ? 'done' : ''} ${e.cancelled ? 'cancelled' : ''}"><input aria-label="${esc(e.title)} 완료" type="checkbox" data-complete="${esc(e.id)}" data-source="${e.source}" ${e.completed ? 'checked' : ''} ${e.cancelled ? 'disabled' : ''}><button class="task-main" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="task-title">${esc(e.title)} ${e.cancelled ? '<span class="badge">취소</span>' : ''}</span><span class="task-meta">${esc(e.channel || '개인 할 일')} · ${esc(e.start_date !== e.end_date ? period(e) : kindName[e.kind] || e.kind)}</span></button><span class="task-time">${esc(e.time || '종일')}</span></div>`;
   }
   function list(items, empty = '표시할 할 일이 없어요.') {return items.length ? items.map(row).join('') : `<div class="empty">${empty}</div>`;}
+  function connectionRejectsTeams() {return ['not_connected','source_not_configured','source_unavailable','verification_failed','reauth_required','account_not_allowed'].includes(S.connection?.state);}
   function connectionNotice() {
     if (S.service?.mode === 'preview') return '<div class="beta-banner" role="status"><strong>예시 화면</strong><span>실제 학교 계정이나 공지와 연결되지 않은 미리보기예요.</span></div>';
+    if (!S.ready.settings) return '';
     const state = S.connection?.state || 'not_connected';
     if (['connected', 'checking', 'refresh_busy'].includes(state)) return '';
     const signIn = ['not_connected', 'reauth_required', 'account_not_allowed'].includes(state);
@@ -200,8 +270,8 @@
     return `<div class="beta-banner" role="status"><strong>Teams 연결 확인</strong><span>${esc(connectionText[state] || connectionText.not_connected)}</span>${signIn ? '<a href="/auth/login">다시 로그인</a>' : retry ? '<button data-action="refresh">다시 확인</button>' : ''}<button data-action="security">연결 및 보안</button></div>`;
   }
   function intro(title, subtitle) {
-    if (SCHOOL) return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions">${refreshAction()}<button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div>${connectionNotice()}${testServer() ? `<div class="test-toolbar"><span class="badge">${S.service.mode === 'preview' ? '예시 전용 미리보기 · 실제 학교 계정 연결 없음' : '테스트 서버'}</span><button class="secondary small" data-action="sync-teams" ${S.syncing ? 'disabled aria-busy="true"' : ''}>${S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'}</button><span id="sync-status" role="status" aria-live="polite">${esc(S.syncMessage || '')}</span><button class="secondary small" data-action="changes">변경사항 <b>${reviewItems.length}</b></button><button class="secondary small" data-action="notifications">알림 설정</button><button class="secondary small" data-action="feedback">오류·의견 보내기</button></div>` : ''}`;
-    return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions">${refreshAction()}<button class="secondary" data-action="filters">표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div><div class="beta-banner"><strong>학교 로그인 전 베타</strong><span>Teams 일정은 예시예요. 직접 추가한 할 일은 저장돼요. 알림 발송과 실제 Teams 연결은 준비 중이에요.</span></div>`;
+    if (SCHOOL) return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions">${refreshAction()}<button class="secondary" data-action="filters" ${!S.prefs || !S.ready.channels ? 'disabled' : ''}>표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div>${connectionNotice()}${testServer() ? `<div class="test-toolbar"><span class="badge">${S.service.mode === 'preview' ? '예시 전용 미리보기 · 실제 학교 계정 연결 없음' : '테스트 서버'}</span><button class="secondary small" data-action="sync-teams" ${S.syncing ? 'disabled aria-busy="true"' : ''}>${S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'}</button><span id="sync-status" role="status" aria-live="polite">${esc(S.syncMessage || '')}</span><button class="secondary small" data-action="changes" ${S.ready.changes ? '' : 'disabled'}>변경사항 <b>${S.ready.changes ? reviewItems.length : '…'}</b></button><button class="secondary small" data-action="notifications" ${S.prefs ? '' : 'disabled'}>알림 설정</button><button class="secondary small" data-action="feedback">오류·의견 보내기</button></div>` : ''}`;
+    return `<div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div><div class="actions">${refreshAction()}<button class="secondary" data-action="filters" ${!S.prefs || !S.ready.channels ? 'disabled' : ''}>표시 설정</button><button class="primary" data-action="new">＋ 할 일 추가</button></div></div><div class="beta-banner"><strong>학교 로그인 전 베타</strong><span>Teams 일정은 예시예요. 직접 추가한 할 일은 저장돼요. 알림 발송과 실제 Teams 연결은 준비 중이에요.</span></div>`;
   }
   function rememberQuickDraft() {
     const input = $('#quick-form')?.elements?.title;
@@ -209,7 +279,7 @@
   }
   function refreshMessage() {
     const pending = SCHOOL && S.service?.mode !== 'preview' && ['checking', 'refresh_busy'].includes(S.connection?.state);
-    return S.refreshError || (pending ? connectionText[S.connection.state] : S.refreshing ? '최신 일정을 확인하고 있어요.' : '');
+    return S.refreshError || (autoReadsPaused && !resumeCheck ? '로그인 상태를 확인하지 못해 자동 갱신을 잠시 멈췄어요. 다시 화면을 열거나 활동하면 재확인해요.' : pending ? connectionText[S.connection.state] : S.connection?.ingestion_pending ? (ingestionAttempts >= 60 || (ingestionDeadline && Date.now() >= ingestionDeadline) ? '확인된 일정은 표시했어요. 나머지는 새로고침으로 확인해 주세요.' : '새 Teams 공지를 확인하는 대로 일정이 추가돼요.') : S.refreshing ? '최신 일정을 확인하고 있어요.' : '');
   }
   function refreshAction() {
     return `<button class="secondary" data-action="refresh" ${S.refreshing ? 'disabled aria-busy="true"' : ''}>${S.refreshing ? '갱신 중…' : '새로고침'}</button><span id="refresh-status" role="status" aria-live="polite">${esc(refreshMessage())}</span>`;
@@ -221,24 +291,37 @@
   }
   function updateSyncStatus() {
     const button = document.querySelector('[data-action="sync-teams"]'), status = $('#sync-status');
-    if (button) {button.disabled = !!S.syncing; button.textContent = S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'; button.setAttribute('aria-busy', String(!!S.syncing));}
+    if (button) {button.disabled = !!(S.syncing || S.busy); button.textContent = S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'; button.setAttribute('aria-busy', String(!!S.syncing));}
     if (status) status.textContent = S.syncMessage || '';
   }
   function render() {
     rememberQuickDraft();
+    const key = JSON.stringify([S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage]);
+    if (key === lastRenderKey) {updateRefreshStatus(); updateSyncStatus(); return;}
+    const input = $('#quick-form')?.elements?.title;
+    const focused = input && document.activeElement === input ? {start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection} : null;
+    renderContent(); lastRenderKey = key;
+    if (S.busy) lockWriteControls();
+    if (focused && S.me && S.view === 'today') {const next = $('#quick-form')?.elements?.title; next?.focus?.({preventScroll:true}); if (focused.start !== null && focused.start !== undefined) next?.setSelectionRange?.(focused.start,focused.end,focused.direction);}
+  }
+  function renderContent() {
     if (!S.me) return;
-    if (!S.today || !S.prefs) return renderLoadState();
+    if (!S.today) return renderLoadState();
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
     $('#nav-today').classList.toggle('active', S.view === 'today'); $('#nav-calendar').classList.toggle('active', S.view === 'calendar');
     if (S.view === 'calendar') return renderCalendar();
     const all = [...S.today.teams, ...S.today.personal].filter(e => !e.cancelled), done = all.filter(e => e.completed).length;
     const upcoming = S.upcoming.filter(e => e.end_date > S.day && !e.completed && !e.cancelled).sort((a, b) => a.end_date.localeCompare(b.end_date) || (a.time || '').localeCompare(b.time || '')).slice(0, 5);
-    const teamsPending = SCHOOL && S.service?.mode !== 'preview' && S.connection?.state !== 'connected';
-    const teamsCount = teamsPending && !S.today.teams.length ? (S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : S.today.teams.length;
-    const teamsEmpty = teamsPending ? (connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
-    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${list(S.today.teams, teamsEmpty)}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${S.today.personal.length}</span></h2></div><div class="list">${list(S.today.personal, '오늘 할 일을 가볍게 적어보세요.')}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">완료한 항목은 원래 위치에 남아요.</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : '<div class="empty">일주일 안에 다가오는 마감이 없어요.</div>'}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
+    const teamsPending = SCHOOL && S.service?.mode !== 'preview' && (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state !== 'connected');
+    const teamsCount = teamsPending && !S.today.teams.length ? (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : S.today.teams.length;
+    const teamsEmpty = teamsPending ? (S.connection?.ingestion_pending || !S.ready.settings ? 'Teams 일정을 확인하는 대로 표시해요.' : connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
+    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${list(S.today.teams, teamsEmpty)}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${S.today.personal.length}</span></h2></div><div class="list">${list(S.today.personal, '오늘 할 일을 가볍게 적어보세요.')}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">완료한 항목은 원래 위치에 남아요.</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : '<div class="empty">일주일 안에 다가오는 마감이 없어요.</div>'}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
   }
   function renderCalendar() {
+    if (!S.ready.calendar) {
+      root.innerHTML = intro('캘린더', '확인된 일정부터 표시해요.') + `<section class="card"><div class="card-head"><h2>${esc(S.month)}</h2></div><div class="empty" role="status">${esc(S.partErrors.calendar || '달력 일정을 불러오고 있어요.')}</div></section>`;
+      return;
+    }
     const weeks = C.layoutRanges(S.items, S.month);
     const gridHtml = weeks.map(week => {
       const rows = week.lanes + 2;
@@ -265,14 +348,15 @@
       if (epoch !== monthEpoch || !activeView(sessionEpoch)) return;
       const grid = C.monthGrid(month), result = await api(`/api/calendar?start=${grid.start}&end=${grid.end}`, {signal: controller.signal});
       if (epoch !== monthEpoch || !activeView(sessionEpoch)) return;
-      S.month = month; S.items = result.items; S.selected = selected;
+      S.month = month; S.items = connectionRejectsTeams() ? result.items.filter(item => item.source === 'personal') : result.items; S.selected = selected; S.ready.calendar = true; delete S.partErrors.calendar;
     } catch (error) {
       if (epoch === monthEpoch && activeView(sessionEpoch)) failure(error);
     } finally {
       if (epoch === monthEpoch && activeView(sessionEpoch)) {monthRequest = null; S.pendingMonth = ''; render();}
     }
   }
-  function openDialog(title, content, footer = '') {
+  function openDialog(title, content, footer = '', containsTeams = false) {
+    dialogContainsTeams = containsTeams;
     dialogEpoch++; dialogRequestId++;
     if (modal.open) modal.close();
     modal.innerHTML = `<div class="dialog-head"><h2 id="dialog-title">${esc(title)}</h2><button class="dialog-close" aria-label="닫기" data-action="close">×</button></div><div class="dialog-body">${content}<p id="mutation-status" class="muted fine" role="status" aria-live="polite" hidden></p></div>${footer ? `<div class="dialog-foot">${footer}</div>` : ''}`;
@@ -294,14 +378,14 @@
   let detailItem = null;
   function detail(e) {
     detailItem = e;
-    openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + sourceLink(e.source_url) : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : (testServer() ? '<button class="secondary" data-action="override-detail">나만 수정</button>' : '')}${testServer() ? '<button class="secondary" data-action="reminders">예약 알림</button>' : ''}`);
+    openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + sourceLink(e.source_url) : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : (testServer() ? '<button class="secondary" data-action="override-detail">나만 수정</button>' : '')}${testServer() ? '<button class="secondary" data-action="reminders">예약 알림</button>' : ''}`, e.source === 'teams');
   }
   function taskForm(e = null) {
     detailItem = e;
     const day = S.view === 'calendar' ? S.selected : S.day;
     const val = e || {title: '', notes: '', start_date: day, end_date: day, time: '', display_mode: 'daily', selected_dates: []};
     const personalFields = e?.source === 'teams' ? '' : `<label class="field"><span class="field-label">오늘 할 일에 표시할 날짜</span><select name="display_mode"><option value="daily" ${val.display_mode === 'daily' ? 'selected' : ''}>기간 중 매일</option><option value="selected" ${val.display_mode === 'selected' ? 'selected' : ''}>선택한 날짜 + 마지막 날</option><option value="final" ${val.display_mode === 'final' ? 'selected' : ''}>마지막 날만</option></select></label><div id="selected-date-field" ${val.display_mode === 'selected' ? '' : 'hidden'}><div class="date-picker-row"><input type="date" id="pick-date" aria-label="표시할 날짜"><button type="button" class="secondary small" data-action="pick-date">날짜 추가</button></div><div class="date-chips" id="date-chips"></div><p class="fine muted">마지막 날에는 항상 표시됩니다.</p></div>`;
-    openDialog(e?.source === 'teams' ? '내 일정만 수정' : e ? '개인 할 일 수정' : '개인 할 일 추가', `<form id="task-form"><label class="field"><span class="field-label">무엇을 할까요?</span><input name="title" required maxlength="500" placeholder="예: 1주치 숙제하기, 개발 완료하기" value="${esc(val.title)}"></label><div class="form-two"><label class="field"><span class="field-label">시작 날짜</span><input name="start_date" type="date" required value="${val.start_date}"></label><label class="field"><span class="field-label">마지막 날짜</span><input name="end_date" type="date" required value="${val.end_date}"></label></div><label class="field"><span class="field-label">마감 시간 (선택)</span><input name="time" type="time" value="${esc(val.time || '')}"></label>${personalFields}<label class="field"><span class="field-label">메모 (선택)</span><textarea name="notes" rows="4" maxlength="10000">${esc(val.notes)}</textarea></label><p class="fine muted">캘린더에는 기간 전체가 이어져 표시돼요. 지난 미완료 항목은 다음 날로 옮겨지지 않아요.</p><p class="error-message" id="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">저장</button></div></form>`);
+    openDialog(e?.source === 'teams' ? '내 일정만 수정' : e ? '개인 할 일 수정' : '개인 할 일 추가', `<form id="task-form"><label class="field"><span class="field-label">무엇을 할까요?</span><input name="title" required maxlength="500" placeholder="예: 1주치 숙제하기, 개발 완료하기" value="${esc(val.title)}"></label><div class="form-two"><label class="field"><span class="field-label">시작 날짜</span><input name="start_date" type="date" required value="${val.start_date}"></label><label class="field"><span class="field-label">마지막 날짜</span><input name="end_date" type="date" required value="${val.end_date}"></label></div><label class="field"><span class="field-label">마감 시간 (선택)</span><input name="time" type="time" value="${esc(val.time || '')}"></label>${personalFields}<label class="field"><span class="field-label">메모 (선택)</span><textarea name="notes" rows="4" maxlength="10000">${esc(val.notes)}</textarea></label><p class="fine muted">캘린더에는 기간 전체가 이어져 표시돼요. 지난 미완료 항목은 다음 날로 옮겨지지 않아요.</p><p class="error-message" id="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">저장</button></div></form>`, '', e?.source === 'teams');
     selectedDates = new Set(val.selected_dates); syncDates();
   }
   let selectedDates = new Set();
@@ -324,6 +408,9 @@
     monthEpoch++; monthRequest?.abort(); monthRequest = null; if (!S.syncing) S.pendingMonth = '';
     S.loading = false; S.refreshing = false;
   }
+  function lockWriteControls() {
+    document.querySelectorAll('button,input,select,textarea').forEach(el => {if (!el.disabled && !['close', 'logout', 'disconnect-device', 'logout-all'].includes(el.dataset.action)) {el.disabled = true; el.dataset.locked = '1';}});
+  }
   async function mutate(operation, message, clearQuick = false, onSaved, pendingMessage = '저장 중…') {
     if (S.busy) return;
     S.busy = true;
@@ -331,7 +418,7 @@
     mutationSettled = new Promise(resolve => {finishMutation = resolve;});
     const sessionEpoch = authEpoch, originalDialog = dialogEpoch;
     mutationStatus(pendingMessage, originalDialog);
-    document.querySelectorAll('button,input,select,textarea').forEach(el => {if (!el.disabled && !['close', 'logout', 'disconnect-device', 'logout-all'].includes(el.dataset.action)) {el.disabled = true; el.dataset.locked = '1';}});
+    lockWriteControls();
     let saved = false, released = false;
     const release = () => {
       if (released) return;
@@ -368,7 +455,7 @@
     const matches = candidate => candidate.id === original.id && candidate.source === original.source;
     const wasVisible = [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming].some(matches);
     const channel = S.channels.find(candidate => candidate.id === item.channel_id);
-    const allowed = !item.hidden && (item.source === 'personal' || (!(S.prefs?.disabled_kinds || []).includes(item.kind) && (channel ? channel.enabled : !item.channel_id && wasVisible)));
+    const allowed = !item.hidden && (item.source === 'personal' || (!(S.prefs?.disabled_kinds || []).includes(item.kind) && (channel ? channel.enabled : (!S.ready.channels || !item.channel_id) && wasVisible)));
     const order = (a,b) => (a.time || '99:99').localeCompare(b.time || '99:99') || a.source.localeCompare(b.source) || a.id.localeCompare(b.id);
     const replace = (items, include) => [...items.filter(candidate => !matches(candidate)), ...(include ? [item] : [])].sort(order);
     if (S.today) {
@@ -408,7 +495,7 @@
     }
   }
   function filters() {
-    openDialog('표시 설정', `<form id="filters-form"><h3>Teams 채널</h3>${S.channels.map(ch => `<label class="toggle-row"><span>${esc(ch.name)}</span><input type="checkbox" name="channel" value="${esc(ch.id)}" ${ch.enabled ? 'checked' : ''}></label>`).join('')}<h3>일정 종류</h3>${Object.entries(kindName).filter(([key]) => key !== 'personal').map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" name="kind" value="${key}" ${S.prefs.disabled_kinds.includes(key) ? '' : 'checked'}></label>`).join('')}<p class="fine muted">설정은 내 계정에만 적용돼요.</p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">적용</button></div></form>`);
+    openDialog('표시 설정', `<form id="filters-form"><h3>Teams 채널</h3>${S.channels.map(ch => `<label class="toggle-row"><span>${esc(ch.name)}</span><input type="checkbox" name="channel" value="${esc(ch.id)}" ${ch.enabled ? 'checked' : ''}></label>`).join('')}<h3>일정 종류</h3>${Object.entries(kindName).filter(([key]) => key !== 'personal').map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" name="kind" value="${key}" ${S.prefs.disabled_kinds.includes(key) ? '' : 'checked'}></label>`).join('')}<p class="fine muted">설정은 내 계정에만 적용돼요.</p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">적용</button></div></form>`, '', S.channels.length > 0);
   }
   let hiddenItems = [];
   async function hidden() {
@@ -416,7 +503,7 @@
     const result = await readDialog(SCHOOL ? `/api/hidden?start=${year}-01-01&end=${year}-12-31` : '/api/beta/hidden');
     if (!result) return;
     hiddenItems = result.items;
-    openDialog(SCHOOL ? `숨긴 일정 · ${year}년` : '숨긴 일정', `<p class="muted">개별적으로 숨긴 일정이에요. 복원해도 꺼둔 채널·종류 설정은 유지돼요.</p><div class="hidden-list">${hiddenItems.length ? hiddenItems.map((e, i) => `<div class="hidden-item"><div><strong>${esc(e.title)}</strong><p class="fine muted">${esc(period(e))} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</p></div><button class="secondary small" data-restore="${i}">복원</button></div>`).join('') : '<div class="empty">숨긴 일정이 없어요.</div>'}</div>`);
+    openDialog(SCHOOL ? `숨긴 일정 · ${year}년` : '숨긴 일정', `<p class="muted">개별적으로 숨긴 일정이에요. 복원해도 꺼둔 채널·종류 설정은 유지돼요.</p><div class="hidden-list">${hiddenItems.length ? hiddenItems.map((e, i) => `<div class="hidden-item"><div><strong>${esc(e.title)}</strong><p class="fine muted">${esc(period(e))} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</p></div><button class="secondary small" data-restore="${i}">복원</button></div>`).join('') : '<div class="empty">숨긴 일정이 없어요.</div>'}</div>`, '', hiddenItems.some(item => item.source === 'teams'));
   }
   function feedback() {
     openDialog('베타 의견 남기기', `<form id="feedback-form"><p class="muted">불편한 점이나 원하는 기능을 적어주세요. 이 베타 서버에 저장되며, 운영자가 나중에 확인할 수 있어요.</p><label class="field"><span class="field-label">의견</span><textarea name="message" rows="6" required maxlength="4000" placeholder="어느 화면에서 무엇이 불편했나요?"></textarea></label><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">저장</button></div></form>`);
@@ -438,12 +525,12 @@
       if (action === 'refresh') {if (!S.refreshing) return await load(); return;}
       if (action === 'retry-boot') return await boot();
       if (action === 'new') return taskForm();
-      if (action === 'filters') return filters();
+      if (action === 'filters') {if (S.prefs && S.ready.channels) return filters(); return;}
       if (action === 'hidden') return await hidden();
       if (action === 'feedback') return feedback();
       if (action === 'sync-teams') return syncTeams();
-      if (action === 'changes') return changesPanel();
-      if (action === 'notifications') return await notificationsPanel();
+      if (action === 'changes') {if (S.ready.changes) return changesPanel(); return;}
+      if (action === 'notifications') {if (S.prefs) return await notificationsPanel(); return;}
       if (action === 'push-enable') return await enablePush();
       if (action === 'push-disable') return await disablePush();
       if (action === 'push-test') {const result = await api('/api/push/test',{method:'POST'}); return toast(result.accepted ? '알림 전송을 요청했어요. 이 기기의 알림을 확인해 주세요.' : '알림 전송에 실패했어요. 서버 연결 상태를 확인해 주세요.', !result.accepted);}
@@ -577,7 +664,7 @@
   }
   function changesPanel() {
     reviewDialogItems = new Map(reviewItems.map(item => [String(item.id), item]));
-    openDialog('변경사항 검토', `<p class="muted">원문이 바뀐 일정은 확인 후 반영해요. 변경을 반영하면 현재 내 수정 내용을 대체해요. 검토 중인 일정의 예약 알림은 잠시 멈춰요.</p>${reviewItems.length ? reviewItems.map((change,i) => `<section class="change-item"><h3>${esc(change.before.title)}</h3><p class="fine">기존 · ${esc(period(change.before))} ${esc(change.before.time || '종일')}</p><p>변경 · ${esc(period(change.after))} ${esc(change.after.time || '종일')} ${change.after.cancelled ? '· 취소 또는 원문 삭제' : ''}</p><div class="detail-notes">${esc(change.after.notes || '')}</div><div class="button-row"><button class="secondary small" data-change-id="${esc(change.id)}" data-change-decision="keep">기존 유지</button><button class="primary small" data-change-id="${esc(change.id)}" data-change-decision="accept">변경 반영</button></div></section>`).join('') : '<div class="empty">검토할 변경사항이 없어요.</div>'}`);
+    openDialog('변경사항 검토', `<p class="muted">원문이 바뀐 일정은 확인 후 반영해요. 변경을 반영하면 현재 내 수정 내용을 대체해요. 검토 중인 일정의 예약 알림은 잠시 멈춰요.</p>${reviewItems.length ? reviewItems.map((change,i) => `<section class="change-item"><h3>${esc(change.before.title)}</h3><p class="fine">기존 · ${esc(period(change.before))} ${esc(change.before.time || '종일')}</p><p>변경 · ${esc(period(change.after))} ${esc(change.after.time || '종일')} ${change.after.cancelled ? '· 취소 또는 원문 삭제' : ''}</p><div class="detail-notes">${esc(change.after.notes || '')}</div><div class="button-row"><button class="secondary small" data-change-id="${esc(change.id)}" data-change-decision="keep">기존 유지</button><button class="primary small" data-change-id="${esc(change.id)}" data-change-decision="accept">변경 반영</button></div></section>`).join('') : '<div class="empty">검토할 변경사항이 없어요.</div>'}`, '', reviewItems.length > 0);
   }
   async function notificationsPanel() {
     const push = await readDialog('/api/push');
@@ -637,26 +724,31 @@
   async function checkResumedSession() {
     if (!S.me || resumeCheck) return;
     const check = {epoch: authEpoch, id: S.me.id, csrf: S.me.csrf_token};
-    resumeCheck = check;
+    resumeCheck = check; autoReadsPaused = true;
     lastSessionCheckAt = Date.now();
     try {
       // Revalidate the session without repeating Teams reads or replacing the UI.
       const me = await api('/api/me');
       if (!activeView(check.epoch) || expireIdle()) return;
       if (me.id !== check.id || me.csrf_token !== check.csrf) {clearPrivate(); loginScreen();}
+      else autoReadsPaused = false;
     } catch (error) {
       if (activeView(check.epoch)) {
         if ([401, 403].includes(error.status)) failure(error);
         else toast('로그인 연결을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.', true);
       }
     } finally {
-      if (resumeCheck === check) resumeCheck = null;
+      if (resumeCheck === check) {
+        resumeCheck = null; updateRefreshStatus();
+        if (activeView(check.epoch)) {scheduleCheckingRefresh(); scheduleIngestionRefresh();}
+      }
     }
   }
   if (SCHOOL) {
     for (const type of ['pointerdown','keydown','touchstart']) document.addEventListener(type,resetIdle,{passive:true});
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && !expireIdle()) checkResumedSession();
+      if (document.hidden) {clearTimeout(ingestionTimer); ingestionTimer = null;}
+      else if (!expireIdle()) {checkResumedSession(); scheduleCheckingRefresh(); scheduleIngestionRefresh();}
     });
     resetIdle();
   }

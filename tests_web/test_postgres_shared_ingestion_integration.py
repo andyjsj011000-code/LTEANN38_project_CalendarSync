@@ -1,12 +1,14 @@
 """Real PostgreSQL evidence for cross-account channel leases and late writers."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Event
 
 import pytest
 
 from test_postgres_server_integration import postgres_server
+from test_ingestion_status import CatalogSource, seed_catalog, session_device
 from web_service.postgres_shared_schema import enable_shared_channel_schema
-from web_service.storage import digest
+from web_service.storage import Missing, PermissionPending, digest
 
 
 @pytest.fixture
@@ -145,3 +147,146 @@ def test_lease_expiry_during_cache_row_lock_wait_prevents_late_mutation(shared, 
     assert s.db.cached_analysis(key, 'v1') == [prior]
     assert s.db.finish_channel_ingestion(ch, lease, True) is False
     assert not s.db.channel_ingestion_fresh(ch)
+
+
+def progressive_context(s):
+    s.integration.source = CatalogSource()
+    client = s.client()
+    session, device = session_device(s, client)
+    assert client.get('/api/today').status_code == 200
+    return client, session, device
+
+
+def permission_rows(s, user):
+    with s.db.connect() as db:
+        return db.execute('''SELECT channel_id,confirmed_at,valid_until FROM web_channel_access
+            WHERE user_id=%s ORDER BY channel_id''', (user,)).fetchall()
+
+
+def test_get_publishes_completed_posts_before_collection_finishes_without_extending_proof(shared):
+    s = shared
+    client, session, device = progressive_context(s)
+    access = permission_rows(s, session['user_id'])
+    status = s.db.sync_status(session['user_id'])
+    ingest_at = s.db.device(device['id_hash'])['ingest_at']
+    calls = s.graph.calls
+    seed_catalog(s)  # One authorized post and one from an inaccessible class.
+
+    first = client.get('/api/today')
+    assert first.status_code == 200
+    assert [item['title'] for item in first.json()['teams']] == ['Cached deadline']
+    event = s.db.catalog_events(['class'])[0]
+    s.db.cache_analysis(digest('class|second'), 'class', 'second', 'v1',
+                        [{**event, 'id': 'direct:second', 'title': 'Second completed post'}])
+    assert {item['title'] for item in client.get('/api/today').json()['teams']} == {
+        'Cached deadline', 'Second completed post'}
+    assert client.get('/api/calendar?start=2026-10-01&end=2026-10-31').status_code == 200
+    assert s.integration.source.calls == 0 and s.graph.calls == calls
+    assert permission_rows(s, session['user_id']) == access
+    assert s.db.sync_status(session['user_id']) == status
+    assert s.db.device(device['id_hash'])['ingest_at'] == ingest_at
+    with s.db.connect() as db:
+        assert db.execute('SELECT id FROM web_events ORDER BY id').fetchall() == [
+            ('direct:cached',), ('direct:second',)]
+
+
+def test_progressive_updates_preserve_hidden_completion_override_and_review(shared):
+    s = shared
+    _, session, device = progressive_context(s)
+    seed_catalog(s)
+    s.db.materialize_cached_events(device)
+    user, tenant = session['user_id'], session['tenant_id']
+    s.db.event_state(user, tenant, 'direct:cached', {'hidden': True, 'completed': True})
+    s.db.override_event(user, tenant, 'direct:cached', {'title': 'My own title'})
+    event = s.db.catalog_events(['class'])[0]
+    s.db.cache_analysis(digest('class|cached'), 'class', 'cached', 'v2',
+                        [{**event, 'title': 'Changed source', 'source_version': 'v2'}])
+    s.db.materialize_cached_events(device)
+    s.db.materialize_cached_events(device)
+    items = s.db.calendar(user, tenant, '2026-10-22', '2026-10-22', hidden_only=True)
+    assert len(items) == 1 and items[0]['title'] == 'My own title'
+    assert items[0]['hidden'] and items[0]['completed']
+    changes = s.db.changes(user, tenant)
+    assert len(changes) == 1 and changes[0]['after']['title'] == 'Changed source'
+
+
+@pytest.mark.parametrize('expiry', ['permission', 'device'])
+def test_progressive_publish_rolls_back_when_proof_expires_during_cache_lock(shared, monkeypatch, expiry):
+    s = shared
+    _, session, device = progressive_context(s)
+    seed_catalog(s)
+    access = permission_rows(s, session['user_id'])
+    original = s.db.connect
+    if expiry == 'device':
+        with original() as db:
+            db.execute('UPDATE web_connections SET expires_at=%s WHERE id_hash=%s',
+                       (s.now[0] + 1, device['id_hash']))
+    waiting = Event()
+
+    @contextmanager
+    def observed_connect():
+        with original() as db:
+            class Connection:
+                def execute(self, query, values=()):
+                    if query.startswith('SELECT channel_id,payload_blob FROM web_source_cache'):
+                        waiting.set()
+                    return db.execute(query, values)
+            yield Connection()
+
+    monkeypatch.setattr(s.db, 'connect', observed_connect)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with original() as blocker:
+            blocker.execute('SELECT cache_key FROM web_source_cache WHERE cache_key=%s FOR UPDATE',
+                            (digest('class|cached'),))
+            result = pool.submit(s.db.materialize_cached_events, device)
+            assert waiting.wait(2), 'Materialization must reach the authorized cache lock'
+            s.now[0] = min(row[2] for row in access) if expiry == 'permission' else s.now[0] + 2
+        with pytest.raises(PermissionPending if expiry == 'permission' else Missing):
+            result.result(timeout=5)
+    with original() as db:
+        assert db.execute('SELECT id FROM web_events').fetchall() == []
+        assert db.execute('SELECT event_id FROM web_user_source_versions').fetchall() == []
+    assert permission_rows(s, session['user_id']) == access
+
+
+@pytest.mark.parametrize('invalid', ['version', 'tenant', 'revoked'])
+def test_progressive_publish_rejects_stale_or_revoked_device(shared, invalid):
+    s = shared
+    _, _, device = progressive_context(s)
+    seed_catalog(s)
+    if invalid == 'version':
+        device = {**device, 'version': device['version'] + 1}
+    elif invalid == 'tenant':
+        device = {**device, 'tenant_id': 'another-school'}
+    else:
+        s.db.revoke_device(device['id_hash'])
+    with pytest.raises(Missing):
+        s.db.materialize_cached_events(device)
+    assert s.db.ingestion_pending(device) is False
+    with s.db.connect() as db:
+        assert db.execute('SELECT id FROM web_events').fetchall() == []
+
+
+def test_ingestion_pending_tracks_current_queue_and_only_authorized_channel_leases(shared):
+    s = shared
+    client, session, device = progressive_context(s)
+    s.db.mark_ingested(device['id_hash'])
+    assert s.db.ingestion_pending(device) is False
+    other = channel()
+    foreign_lease = s.db.claim_channel_ingestion(other)
+    assert foreign_lease and s.db.ingestion_pending(device) is False
+    allowed = {'id': 'class', 'team_id': 'verified-team', 'name': 'Class'}
+    lease = s.db.claim_channel_ingestion(allowed)
+    assert lease and s.db.ingestion_pending(device) is True
+    assert client.get('/api/settings').json()['connection']['ingestion_pending'] is True
+    s.db.finish_channel_ingestion(allowed, lease, True)
+    assert s.db.ingestion_pending(device) is False
+    assert s.db.request_ingestion(device['id_hash'])
+    assert s.db.ingestion_pending(device) is True
+    proof = s.db.begin_sync(session['user_id'], 0, preserve_access=True)
+    assert s.db.fail_sync(session['user_id'], 'verification_failed', proof)
+    seed_catalog(s)
+    assert s.db.materialize_cached_events(device) == 0
+    assert s.db.ingestion_pending(device) is False
+    with s.db.connect() as db:
+        assert db.execute('SELECT id FROM web_events').fetchall() == []

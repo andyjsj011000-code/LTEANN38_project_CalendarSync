@@ -4,7 +4,7 @@ import pytest
 from test_server import server
 from test_ingestion_status import CatalogSource, seed_catalog, session_device
 from web_service.school_graph import GraphFailure
-from web_service.storage import Missing
+from web_service.storage import Missing, digest
 
 
 class DeferredTasks:
@@ -321,3 +321,21 @@ def test_final_graph_failure_revokes_preserved_access(server, monkeypatch):
     assert server.db.sync_status(session['user_id'])['state'] == 'verification_failed'
     assert server.db.channels(session['user_id'], session['tenant_id']) == []
     assert server.db.device(device['id_hash'])['ingest_at'] == 0
+
+
+def test_reads_publish_each_finished_post_without_waiting_for_collection_or_new_graph(server):
+    client, session, device = enable_shared(server)
+    server.integration.run_sync(device)
+    calls = server.graph.calls
+    before = server.db.sync_status(session['user_id'])
+    event = server.db.catalog_events(['class'])[0]
+    server.db.cache_analysis(digest('class|new'), 'class', 'new', 'v1',
+                            [{**event, 'id': 'direct:new', 'title': 'Just analyzed'}])
+    response = client.get('/api/today')
+    assert response.status_code == 200
+    assert {item['title'] for item in response.json()['teams']} == {'Cached deadline', 'Just analyzed'}
+    assert server.graph.calls == calls and server.integration.source.calls == 0
+    assert server.db.sync_status(session['user_id']) == before
+    assert client.get('/api/settings').json()['connection']['ingestion_pending'] is True
+    server.db.mark_ingested(device['id_hash'])
+    assert client.get('/api/settings').json()['connection']['ingestion_pending'] is False

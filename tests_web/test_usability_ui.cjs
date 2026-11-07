@@ -701,7 +701,259 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     assert.match(h.elements.modal.innerHTML,/New task after permission request/); assert.equal(h.elements['mutation-status'].textContent,status);
     assert.equal(h.elements.toast.textContent,toast); assert.equal(writes(h).length,0);
   }
-  console.log('Usability UI: 65 synthetic scenarios passed (dialog request ordering/cancellation, inline errors, confirmed personal CRUD, supported override fields and prior regressions).');
+
+  // Today is useful before any independent calendar, channel, preference or change response.
+  {
+    const settings=deferred(), channels=deferred(), changes=deferred(), month=deferred(), upcoming=deferred();
+    const h=harness({overrides:{'/api/settings':()=>settings.promise,'/api/channels':()=>channels.promise,'/api/changes':()=>changes.promise,
+      '/api/calendar':(_,url)=>url.includes('start=2026-11-07') ? upcoming.promise : month.promise}}); await settle();
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.match(h.elements.app.innerHTML,/다가오는 일정을 불러오고/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/다시 로그인|학교 계정 연결|data-load-state/);
+    assert.match(h.elements.app.innerHTML,/data-action="filters" disabled/);
+    await h.click({action:'filters'}); assert.ok(!h.elements.modal.open);
+    await h.click({action:'calendar'}); assert.match(h.elements.app.innerHTML,/달력 일정을 불러오고/);
+    month.resolve(response({items:[{...h.item,title:'Independent calendar result'}]})); await settle();
+    assert.match(h.elements.app.innerHTML,/Independent calendar result/);
+    await h.click({action:'today'});
+    upcoming.resolve(response({items:[{...h.item,title:'Independent upcoming result',end_date:'2026-11-09'}]})); await settle();
+    assert.match(h.elements.app.innerHTML,/Independent upcoming result/);
+    settings.resolve(response({preferences:{disabled_kinds:[]},connection:{state:'connected'}})); await settle();
+    assert.match(h.elements.app.innerHTML,/data-action="filters" disabled/);
+    channels.resolve(response([{id:'fixture-channel',enabled:true}])); await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/data-action="filters" disabled/);
+    await h.click({action:'filters'}); assert.equal(h.elements.modal.open,true); await h.click({action:'close'});
+    changes.resolve(response({detail:'Changes failed'},503)); await settle();
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/); assert.match(h.elements['refresh-status'].textContent,/일부 최신 정보/);
+  }
+  // An empty confirmed snapshot is still described as being checked until metadata arrives.
+  {
+    const settings=deferred(), h=harness({overrides:{'/api/today':()=>response({date:'2026-11-07',teams:[],personal:[]}),'/api/settings':()=>settings.promise}}); await settle();
+    assert.match(h.elements.app.innerHTML,/Teams 일정을 확인하는 대로/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/다시 로그인|확인 필요/);
+    settings.resolve(response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})); await settle();
+    assert.match(h.elements.app.innerHTML,/Teams 일정을 확인하는 대로/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/오늘은 Teams 일정이 없어요/);
+  }
+  // Partial rendering still treats a later metadata 403 as loss of the whole private session.
+  {
+    const settings=deferred(), h=harness({overrides:{'/api/settings':()=>settings.promise}}); await settle();
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    settings.resolve(response({},403)); await settle();
+    assert.match(h.elements.app.innerHTML,/school-signin/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+  }
+  // New independent responses during a write must lock the newly rendered quick input too.
+  {
+    const settings=deferred(), saving=deferred(), h=harness({overrides:{'/api/settings':()=>settings.promise}}); await settle();
+    const descriptor=Object.getOwnPropertyDescriptor(h.elements.app,'innerHTML'); let latest;
+    Object.defineProperty(h.elements.app,'innerHTML',{get:descriptor.get,set(value){descriptor.set.call(this,value);
+      latest={value:'Pending quick draft',dataset:{},disabled:false}; h.elements['quick-form']={elements:{title:latest}}; h.controls.push(latest);}});
+    const form={id:'quick-form',elements:{title:{value:'Pending quick draft',dataset:{},disabled:false}}}; h.elements['quick-form']=form; h.controls.push(form.elements.title);
+    h.overrides['/api/tasks']=()=>saving.promise; const save=h.submit(form); await settle();
+    settings.resolve(response({preferences:{disabled_kinds:[]},connection:{state:'connected'}})); await settle();
+    assert.ok(latest); assert.equal(latest.disabled,true);
+    saving.resolve(response({detail:'Temporary save error'},503)); await save;
+    assert.equal(latest.disabled,false); assert.equal(latest.value,'Pending quick draft');
+  }
+  // Connected ingestion uses bounded GETs and displays each newly materialized schedule.
+  {
+    let pending=true, reads=0;
+    const h=harness({overrides:{'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:pending}})}}); await settle();
+    h.overrides['/api/today']=()=>{reads++; return response({...h.today,teams:[...h.today.teams,{...h.item,id:'new-post',title:'New analyzed post'}]});};
+    const identityReads=h.requests.filter(r=>r.url==='/api/me').length;
+    await h.advance(3000); assert.equal(reads,1); assert.match(h.elements.app.innerHTML,/New analyzed post/);
+    pending=false; await h.advance(3000); assert.equal(reads,3); // observed completion + final data pass
+    const count=h.requests.length; await h.advance(20000); assert.equal(h.requests.length,count);
+    assert.equal(writes(h).length,0); assert.equal(h.requests.filter(r=>r.url==='/api/me').length,identityReads);
+  }
+  // A first pending=false can race the worker's last commit; one final pass catches it.
+  {
+    const h=harness({overrides:{'/api/service':()=>response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:false}})}}); await settle();
+    h.overrides['/api/today']=()=>response({...h.today,teams:[{...h.item,title:'Last post committed after first today'}]});
+    await h.advance(3000); assert.match(h.elements.app.innerHTML,/Last post committed after first today/);
+    const count=h.requests.length; await h.advance(30000); assert.equal(h.requests.length,count);
+  }
+  // Unchanged polling data never replaces the root repeatedly; real changes preserve quick focus/selection.
+  {
+    const h=harness({overrides:{'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}}); await settle();
+    const before=h.history.filter(x=>x.id==='app').length;
+    await h.advance(18000); assert.equal(h.history.filter(x=>x.id==='app').length,before);
+    const descriptor=Object.getOwnPropertyDescriptor(h.elements.app,'innerHTML'); let focusCalls=0;
+    const makeInput=value=>({value,dataset:{},selectionStart:3,selectionEnd:7,selectionDirection:'backward',
+      focus(){focusCalls++; h.context.document.activeElement=this;},setSelectionRange(a,b,d){this.selectionStart=a;this.selectionEnd=b;this.selectionDirection=d;}});
+    const old=makeInput('Keep typing this draft'); h.elements['quick-form']={elements:{title:old}}; h.context.document.activeElement=old;
+    Object.defineProperty(h.elements.app,'innerHTML',{get:descriptor.get,set(value){descriptor.set.call(this,value);h.elements['quick-form']={elements:{title:makeInput(value.match(/name="title"/) ? 'Keep typing this draft' : '')}};}});
+    h.overrides['/api/today']=()=>response({...h.today,teams:[{...h.item,title:'Arrived while typing'}]});
+    await h.advance(3000); const input=h.elements['quick-form'].elements.title;
+    assert.match(h.elements.app.innerHTML,/Arrived while typing/); assert.match(h.elements.app.innerHTML,/Keep typing this draft/);
+    assert.notEqual(input,old); assert.equal(h.context.document.activeElement,input); assert.equal(focusCalls,1);
+    assert.equal(input.selectionStart,3);assert.equal(input.selectionEnd,7);assert.equal(input.selectionDirection,'backward');
+  }
+  // Hidden tabs do not poll; becoming visible schedules checks without an immediate full reload.
+  {
+    const h=harness({overrides:{'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}}); await settle();
+    await h.visibility(true); const before=h.requests.filter(r=>r.url==='/api/today').length;
+    await h.advance(30000); assert.equal(h.requests.filter(r=>r.url==='/api/today').length,before);
+    await h.visibility(false); await settle(); assert.equal(h.requests.filter(r=>r.url==='/api/today').length,before);
+    await h.advance(3000); assert.equal(h.requests.filter(r=>r.url==='/api/today').length,before+1);
+  }
+  // A delayed poll cannot overlap another poll or mutate an open dialog.
+  {
+    const h=harness({overrides:{'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}}); await settle();
+    await h.click({action:'new'}); h.elements.modal.innerHTML+='<textarea>Open draft</textarea>';
+    const slow=deferred(); h.overrides['/api/today']=()=>slow.promise;
+    await h.advance(3000); const count=h.requests.filter(r=>r.url==='/api/today').length;
+    await h.advance(9000); assert.equal(h.requests.filter(r=>r.url==='/api/today').length,count);
+    slow.resolve(response({...h.today,teams:[{...h.item,title:'Background result'}]})); await settle();
+    assert.match(h.elements.modal.innerHTML,/Open draft/); assert.match(h.elements.app.innerHTML,/Background result/);
+  }
+  // Confirmed writes fence a pre-write polling response even if transport ignores abort.
+  {
+    const h=harness({ignoreAbort:new Set(['/api/today']),overrides:{'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}}); await settle();
+    const stale=deferred(); h.overrides['/api/today']=()=>stale.promise; await h.advance(3000);
+    await h.click({detail:'fixture',source:'teams'});
+    h.overrides['/api/events/fixture/state']=()=>response({hidden:true});
+    h.overrides['/api/today']=()=>response({detail:'Read failed'},503);
+    await h.click({action:'hide-detail'}); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    stale.resolve(response(h.today)); await settle(); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.equal(writes(h).length,1);
+  }
+  // The ingestion budget is finite and its status stops promising automatic progress.
+  {
+    const h=harness({overrides:{'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}}); await settle();
+    await h.advance(180001); const count=h.requests.filter(r=>r.url==='/api/today').length;
+    assert.ok(count>1&&count<=61); assert.match(h.elements['refresh-status'].textContent,/나머지는 새로고침/);
+    await h.advance(60000); assert.equal(h.requests.filter(r=>r.url==='/api/today').length,count); assert.equal(writes(h).length,0);
+  }
+  // A polling error preserves verified results and stops automatic retries.
+  {
+    const h=harness({overrides:{'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}}); await settle();
+    h.overrides['/api/today']=()=>response({detail:'Read failed'},503); await h.advance(3000);
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/); assert.match(h.elements['refresh-status'].textContent,/다시 확인/);
+    const count=h.requests.length; await h.advance(30000); assert.equal(h.requests.length,count); assert.equal(writes(h).length,0);
+  }
+  // Permission checking owns its slower retry, never a duplicate ingestion polling loop.
+  {
+    const h=harness({overrides:{'/api/service':()=>response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'checking',ingestion_pending:true}})}}); await settle();
+    const count=h.requests.filter(r=>r.url==='/api/today').length;
+    await h.advance(14999); assert.equal(h.requests.filter(r=>r.url==='/api/today').length,count);
+    await h.advance(1); assert.equal(h.requests.filter(r=>r.url==='/api/today').length,count+1);
+  }
+  // Polling is not user activity and cannot extend the local idle session.
+  {
+    const h=harness({overrides:{'/api/service':()=>response({mode:'test-server',idle_seconds:30}),
+      '/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}}); await settle();
+    h.activity(); await h.advance(30001); assert.match(h.elements.app.innerHTML,/school-signin/);
+    const count=h.requests.length; await h.advance(30000); assert.equal(h.requests.length,count);
+  }
+  // Logout invalidates an in-flight abort-ignoring poll and its future timers.
+  {
+    const h=harness({ignoreAbort:new Set(['/api/today']),overrides:{'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}}); await settle();
+    const slow=deferred();h.overrides['/api/today']=()=>slow.promise;await h.advance(3000);
+    await h.click({action:'logout'}); const count=h.requests.length;slow.resolve(response(h.today));await settle();await h.advance(30000);
+    assert.match(h.elements.app.innerHTML,/school-signin/);assert.equal(h.requests.length,count);
+  }
+
+  // A final completion read interrupted by a failed write stays pending until data is applied.
+  {
+    const h=harness({overrides:{'/api/service':()=>response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:false}})}}); await settle();
+    const finalRead=deferred(), write=deferred();h.overrides['/api/today']=()=>finalRead.promise;await h.advance(3000);
+    h.overrides['/api/tasks']=()=>write.promise;
+    const form={id:'quick-form',elements:{title:{value:'Keep failed draft'}}};h.elements['quick-form']=form;
+    const save=h.submit(form);await settle();finalRead.resolve(response(h.today));await settle();
+    write.resolve(response({detail:'Save rejected'},422));await save;
+    h.overrides['/api/today']=()=>response({...h.today,teams:[{...h.item,title:'Final result after failed write'}]});
+    await h.advance(3000);assert.match(h.elements.app.innerHTML,/Final result after failed write/);assert.match(h.elements.app.innerHTML,/Keep failed draft/);
+    const count=h.requests.length;await h.advance(15000);assert.equal(h.requests.length,count);assert.equal(writes(h).length,1);
+  }
+  // A known permission failure clears earlier Teams data and fences late same-cycle reads.
+  {
+    const settings=deferred(), calendar=deferred(), changes=deferred();
+    const h=harness({overrides:{'/api/settings':()=>settings.promise,'/api/calendar':()=>calendar.promise,'/api/changes':()=>changes.promise}});await settle();
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);await h.click({detail:'fixture',source:'teams'});
+    settings.resolve(response({preferences:{disabled_kinds:[]},connection:{state:'verification_failed',ingestion_pending:false}}));await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);assert.equal(h.elements.modal.open,false);
+    calendar.resolve(response({items:[h.item]}));changes.resolve(response({items:[{id:'stale-change',title:'Stale change'}]}));await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);await h.click({action:'calendar'});
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);assert.match(h.elements.app.innerHTML,/접근 권한을 확인하지 못해/);
+  }
+  // The new false field alone does not add background reads to non-shared deployments.
+  {
+    const h=harness({overrides:{'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:false}})}});await settle();
+    const count=h.requests.length;await h.advance(30000);assert.equal(h.requests.length,count);
+  }
+
+  // Automatic reads wait for identity revalidation after a tab/account switch.
+  for (const state of ['connected','checking']) {
+    const h=harness({overrides:{'/api/service':()=>response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state,ingestion_pending:true}})}});await settle();
+    const identity=deferred();h.overrides['/api/me']=()=>identity.promise;
+    h.overrides['/api/today']=()=>response({...h.today,teams:[{...h.item,title:'Other account private result'}]});
+    await h.visibility(true);await h.visibility(false);await settle();const count=h.requests.filter(r=>r.url==='/api/today').length;
+    await h.advance(16000);assert.equal(h.requests.filter(r=>r.url==='/api/today').length,count);
+    assert.doesNotMatch(h.elements.app.innerHTML,/Other account private result/);
+    identity.resolve(response({id:'other-account',name:'Other account',csrf_token:'other-csrf'}));await settle();
+    assert.match(h.elements.app.innerHTML,/school-signin/);await h.advance(20000);
+    assert.equal(h.requests.filter(r=>r.url==='/api/today').length,count);
+  }
+  // A read already in flight also cannot publish while resumed identity is unknown.
+  {
+    const h=harness({overrides:{'/api/service':()=>response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:false}})}});await settle();
+    const data=deferred(),identity=deferred();h.overrides['/api/today']=()=>data.promise;await h.advance(3000);
+    h.overrides['/api/me']=()=>identity.promise;await h.visibility(true);await h.visibility(false);await settle();
+    data.resolve(response({...h.today,teams:[{...h.item,title:'Unvalidated account snapshot'}]}));await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/Unvalidated account snapshot/);
+    identity.resolve(response({id:'fixture-user',name:'Fixture student',csrf_token:'fixture-csrf'}));await settle();
+    h.overrides['/api/today']=()=>response({...h.today,teams:[{...h.item,title:'Final result after identity check'}]});
+    await h.advance(3000);assert.match(h.elements.app.innerHTML,/Final result after identity check/);
+    const count=h.requests.length;await h.advance(15000);assert.equal(h.requests.length,count);
+  }
+
+  // Permission failure closes only a currently Teams-bearing dialog, preserving unrelated drafts.
+  {
+    const h=harness();await settle();await h.click({detail:'fixture',source:'teams'});await h.click({action:'close'});
+    await h.click({action:'feedback'});h.elements.modal.innerHTML+='<textarea>Unsent feedback after Teams detail</textarea>';
+    h.overrides['/api/settings']=()=>response({preferences:{disabled_kinds:[]},connection:{state:'verification_failed'}});
+    await h.click({action:'refresh'});assert.equal(h.elements.modal.open,true);
+    assert.match(h.elements.modal.innerHTML,/Unsent feedback after Teams detail/);assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+  }
+  // Hidden Teams data is removed on explicit permission failure without relying on detailItem.
+  {
+    const h=harness();await settle();
+    h.overrides['/api/hidden?start=2026-01-01&end=2026-12-31']=()=>response({items:[{...h.item,hidden:true}]});
+    await h.click({action:'hidden'});assert.match(h.elements.modal.innerHTML,/Fixture assignment/);
+    h.overrides['/api/settings']=()=>response({preferences:{disabled_kinds:[]},connection:{state:'verification_failed'}});
+    await h.click({action:'refresh'});assert.equal(h.elements.modal.open,false);assert.doesNotMatch(h.elements.modal.innerHTML,/Fixture assignment/);
+  }
+  // A change-review dialog also belongs to the revoked Teams data, even with no prior detail.
+  {
+    const h=harness();await settle();
+    h.overrides['/api/changes']=()=>response({items:[{id:'change-fixture',before:h.item,after:{...h.item,notes:'Changed private notes'}}]});
+    await h.click({action:'refresh'});await h.click({action:'changes'});assert.match(h.elements.modal.innerHTML,/Changed private notes/);
+    h.overrides['/api/settings']=()=>response({preferences:{disabled_kinds:[]},connection:{state:'verification_failed'}});
+    await h.click({action:'refresh'});assert.equal(h.elements.modal.open,false);assert.doesNotMatch(h.elements.modal.innerHTML,/Changed private notes/);
+  }
+
+  // A failed/expired resumed identity check never enables automatic reads under the old label.
+  for (const failure of ['http503','timeout']) {
+    const h=harness({overrides:{'/api/service':()=>response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',ingestion_pending:true}})}});await settle();
+    await h.click({action:'feedback'});h.elements.modal.innerHTML+='<textarea>Draft during identity failure</textarea>';
+    const identity=deferred();h.overrides['/api/me']=()=>failure==='timeout' ? identity.promise : response({},503);
+    h.overrides['/api/today']=()=>response({...h.today,teams:[{...h.item,title:'Unverified other account data'}]});
+    await h.visibility(true);await h.visibility(false);await settle();const before=h.requests.filter(r=>r.url==='/api/today').length;
+    await h.advance(61000);assert.equal(h.requests.filter(r=>r.url==='/api/today').length,before);
+    assert.doesNotMatch(h.elements.app.innerHTML,/Unverified other account data/);
+    assert.match(h.elements.modal.innerHTML,/Draft during identity failure/);assert.match(h.elements['refresh-status'].textContent,/자동 갱신을 잠시 멈췄어요/);
+    h.overrides['/api/me']=()=>response({id:'fixture-user',name:'Fixture student',csrf_token:'fixture-csrf'});
+    h.overrides['/api/today']=()=>response({...h.today,teams:[{...h.item,title:'Verified resumed account result'}]});
+    h.activity();await settle();await h.advance(3000);
+    assert.match(h.elements.app.innerHTML,/Verified resumed account result/);assert.match(h.elements.modal.innerHTML,/Draft during identity failure/);
+  }
+  console.log('Usability UI: 91 synthetic scenarios passed (progressive independent responses, bounded ingestion polling, final-pass races, focus preservation and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);

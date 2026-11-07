@@ -164,7 +164,9 @@ const signedOut = h => {
     await settle(); await h.advance(45000); loading(h);
     first.resolve(response(h.today)); await settle();
     assert.ok(h.requests.some(r => r.url.startsWith('/api/calendar?')));
-    await h.advance(55001); loadError(h);
+    await h.advance(55001); assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/data-load-state="error"/);
+    assert.match(h.elements.app.innerHTML,/불러오지 못했어요/);
     assert.ok(h.requests.filter(r => r.url.startsWith('/api/calendar?')).every(r => r.options.signal.aborted));
   }
   // Logging out works during loading. Even an abort-ignoring late response is discarded.

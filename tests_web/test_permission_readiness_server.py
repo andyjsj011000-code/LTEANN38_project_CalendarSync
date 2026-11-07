@@ -6,12 +6,16 @@ from test_server import server
 from test_postgres_server_integration import postgres_server
 from test_ingestion_status import CatalogSource, seed_catalog, session_device
 from web_service.school_graph import GraphFailure
+from web_service.postgres_shared_schema import enable_shared_channel_schema
 
 
 @pytest.fixture(params=['server', 'postgres_server'])
 def access_server(request):
     # Native PostgreSQL remains opt-in through its disposable-database fixture.
-    return request.getfixturevalue(request.param)
+    server = request.getfixturevalue(request.param)
+    if request.param == 'postgres_server':
+        enable_shared_channel_schema(server.db.connect, server.settings.tenant_id)
+    return server
 
 
 def connected(s):
