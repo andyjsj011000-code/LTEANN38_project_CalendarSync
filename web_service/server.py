@@ -1,12 +1,14 @@
 """Test-server entry point: persistent delegated ingestion, reviews and Web Push."""
 import asyncio
 import hmac
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime,timezone,timedelta
 import os
 from pathlib import Path
 import secrets
+from time import monotonic
 from fastapi import Depends,HTTPException,Request,Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse,JSONResponse
@@ -87,28 +89,56 @@ class ServerIntegration(SchoolIntegration):
         except Missing: return {**result,'connection_state':'reauth_required','background_enabled':False,'push_configured':self.sender.configured,'push_registered':False}
         return {**result,'mode':'test-server','background_enabled':bool(device['background']),'connection_expires':device['expires_at'],'connection_state':device['state'],'push_configured':self.sender.configured,'push_registered':bool(self.db.subscriptions(device['id_hash'])),'ingestion_mode':'direct' if hasattr(self.source,'collect') else 'oracle'}
     def run_sync(self,device,ingest=False):
+        started=monotonic(); logger=logging.getLogger('uvicorn.error')
+        def progress(stage,outcome):
+            # Only fixed stage/outcome labels and elapsed time leave this method.
+            # Diagnostics must never change synchronization or expose inputs.
+            try:
+                logger.info('CalendarSync sync stage=%s outcome=%s elapsed_ms=%d',
+                            stage,outcome,int((monotonic()-started)*1000))
+            except Exception:
+                pass
+        def failure_progress(saved):
+            progress('failure','recorded' if saved is True else
+                     'not_recorded' if saved is False else 'completed')
+        progress('sync','started'); progress('lease','started')
         user=device['user_id']; lease=self.db.begin_sync(user,0 if ingest else self.settings.access_seconds)
-        if not lease: return
+        progress('lease','acquired' if lease else 'skipped')
+        if not lease:
+            progress('sync','skipped'); return
         try:
+            progress('token','started')
             token,device=acquire_snapshot(self.tokens,device,self.db)
+            progress('token','completed'); progress('channels','started')
             channels=self.graph.channels(token,device['object_id'],device['tenant_id'])
+            progress('channels','completed')
             if not self.source.configured:
-                self.db.fail_sync(user,'source_not_configured',lease); return
+                progress('source','not_configured'); progress('failure','started')
+                failure_progress(self.db.fail_sync(user,'source_not_configured',lease)); return
+            progress('source','started')
             if hasattr(self.source,'collect'):
                 if ingest:
                     events=self.source.collect(token,channels,device['tenant_id'],self.db,user)
+                    progress('ingest_mark','started')
                     self.db.mark_ingested(device['id_hash'])
+                    progress('ingest_mark','completed')
                 else: events=self.db.catalog_events([ch['id'] for ch in channels])
             elif isinstance(self.source,OracleSource):
                 known=self.db.known_oracle_events(user,device['tenant_id'],channels)
                 events=self.source.events(channels,device['tenant_id'],known_events=known)
             else: events=self.source.events(channels,device['tenant_id'])
+            progress('source','completed'); progress('commit','started')
             self.db.commit_snapshot(device,channels,events,self.settings.access_seconds,lease)
+            progress('commit','completed')
         except GraphFailure as error:
-            self.db.fail_sync(user,error.state,lease)
+            progress('sync','graph_failure'); progress('failure','started')
+            failure_progress(self.db.fail_sync(user,error.state,lease))
             if error.state in {'reauth_required','account_not_allowed'}: self.db.fail_connection(device['id_hash'])
         except Exception:
-            self.db.fail_sync(user,'source_unavailable',lease); self.db.audit('sync_failed',user)
+            progress('sync','source_unavailable'); progress('failure','started')
+            failure_progress(self.db.fail_sync(user,'source_unavailable',lease)); self.db.audit('sync_failed',user)
+        finally:
+            progress('sync','finished')
     def sync(self,session):
         self.run_sync(self.db.session_device(session),ingest=True)
         return self.status(session)
