@@ -1,11 +1,14 @@
 """Source-package boundaries; no subprocesses, installation or network access."""
+import ast
 import hashlib
+from html.parser import HTMLParser
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import zipfile
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -29,6 +32,56 @@ def source(tmp_path):
 def contents(payload):
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         return {name: archive.read(name) for name in archive.namelist()}
+
+
+def local_imports(payload):
+    tree = ast.parse(payload.decode('utf-8'))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 1:
+            modules = ([node.module.split('.')[0]] if node.module else
+                       [alias.name.split('.')[0] for alias in node.names])
+            for module in modules:
+                yield 'web_service/' + module + '.py'
+
+
+def test_real_archive_contains_every_local_python_import_and_required_dependencies():
+    # Inspect the shipped source without importing app code, opening a database,
+    # or depending on a runtime feature flag to exercise an import branch.
+    files = contents(release.candidate()[0])
+    required = set(release.REQUIRED_FILES)
+    for name, payload in files.items():
+        if not name.startswith('web_service/') or not name.endswith('.py'):
+            continue
+        dependencies = set(local_imports(payload))
+        assert dependencies <= files.keys(), (name, sorted(dependencies - files.keys()))
+        if name in required:
+            assert dependencies <= required, (name, sorted(dependencies - required))
+
+
+def test_real_archive_contains_every_stylesheet_and_script_referenced_by_shipped_html():
+    class AssetReferences(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.paths = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            attribute = ('src' if tag == 'script' else 'href'
+                         if tag == 'link' and 'stylesheet' in attrs.get('rel', '').split() else None)
+            if attribute:
+                path = urlsplit(attrs.get(attribute, '')).path
+                if path.startswith('/assets/'):
+                    self.paths.append('web_service/static/' + path[len('/assets/'):])
+
+    files = contents(release.candidate()[0])
+    required = set(release.REQUIRED_FILES)
+    for name, payload in files.items():
+        if name.startswith('web_service/static/') and name.endswith('.html'):
+            references = AssetReferences()
+            references.feed(payload.decode('utf-8'))
+            assert references.paths, name
+            assert set(references.paths) <= files.keys(), name
+            assert set(references.paths) <= required, name
 
 
 def test_rebuild_is_deterministic_and_manifest_verifies_every_file(source):

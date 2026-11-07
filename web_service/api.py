@@ -200,7 +200,10 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
 
     @app.delete("/api/tasks/{task_id}", status_code=204)
     def delete_task(task_id: str, version: int = Query(ge=1), session=Depends(current_session)):
-        db.delete_task(session["user_id"], task_id, version)
+        if getattr(db, "planner_enhancements_enabled", False):
+            db.trash_task(session["user_id"], task_id, version)
+        else:
+            db.delete_task(session["user_id"], task_id, version)
         return Response(status_code=204)
 
     @app.patch("/api/events/{event_id}/state")
@@ -227,5 +230,11 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
     def personal_today(day: date | None = None, session=Depends(current_session)):
         selected = day or datetime.fromtimestamp(db.clock(), KST).date()
         return db.personal_agenda(session["user_id"], session["tenant_id"], selected.isoformat())
+
+    if getattr(db, "planner_enhancements_enabled", False):
+        from .planner_drafts import install_draft_routes
+        from .planner_trash import install_trash_routes
+        install_draft_routes(app, db, current_session)
+        install_trash_routes(app, db, current_session)
 
     return app

@@ -236,7 +236,8 @@ class DirectSource:
     def __init__(self,graph,extractor,images=True): self.graph,self.extractor,self.images=graph,extractor,images
     @property
     def configured(self): return self.extractor.configured
-    def collect(self,token,channels,tenant,db,user_id,*,selected_channels=None,selected_messages=None):
+    supports_progress = True
+    def collect(self,token,channels,tenant,db,user_id,*,selected_channels=None,selected_messages=None,on_progress=None):
         if not self.configured: raise ValueError('AI is not configured')
         targeted=None
         if selected_messages is not None:
@@ -256,6 +257,12 @@ class DirectSource:
         report={'channels_total':len(channels) if broad else len(selected_channels),
                 'channels_scanned':0,'messages_seen':0,'messages_analyzed':0,
                 'messages_cached':0,'messages_failed':0,'partial':False}
+        checked=set(); scanned=set()
+        def emit_progress():
+            if on_progress is not None:
+                try: on_progress({**report,'channels_checked':len(checked)})
+                except Exception: pass  # Observability must never fail collection.
+        emit_progress()
         deadline=monotonic()+80
         def expired():
             if monotonic() <= deadline:
@@ -294,10 +301,12 @@ class DirectSource:
                     if not broad: raise GraphFailure('source_unavailable')
                     if db.channel_ingestion_fresh(channel,freshness_seconds=300):
                         resolved_channels+=1
+                        checked.add(channel['id'])
                     else:
                         # Another owner is still collecting. Its eventual result
                         # can be reused, but this call cannot claim completeness.
                         report['partial']=True
+                    emit_progress()
                     continue
             complete=True; channel_failed=False; ended_normally=False
             try:
@@ -337,6 +346,7 @@ class DirectSource:
                             if not broad or (isinstance(error,GraphFailure) and error.state!='source_unavailable'):
                                 raise
                             channel_failed=True; report['messages_failed']+=1; report['partial']=True
+                            emit_progress()
                             continue
                         if changed_processing:
                             # Only posts whose valid input changed under these
@@ -348,7 +358,7 @@ class DirectSource:
                             complete=False; report['partial']=True
                             if not broad: raise GraphFailure('source_unavailable')
                             break
-                        report['messages_cached']+=1; continue
+                        report['messages_cached']+=1; emit_progress(); continue
                     if message.get('deletedDateTime'):
                         events=[{**e,'cancelled':True,'source_version':version} for e in (old['events'] if old else [])]
                         written=db.cache_analysis(key,channel['id'],mid,version,events,**({'ingestion_lease':lease} if shared else {}))
@@ -356,6 +366,7 @@ class DirectSource:
                             complete=False; report['partial']=True
                             if not broad: raise GraphFailure('source_unavailable')
                             break
+                        emit_progress()
                         continue
                     try:
                         created=message.get('createdDateTime','')
@@ -394,10 +405,12 @@ class DirectSource:
                     except (ValueError,httpx.HTTPError):
                         if not broad: raise
                         channel_failed=True; report['messages_failed']+=1; report['partial']=True
+                        emit_progress()
                         continue
                     except GraphFailure as error:
                         if not broad or error.state!='source_unavailable': raise
                         channel_failed=True; report['messages_failed']+=1; report['partial']=True
+                        emit_progress()
                         continue
                     report['messages_analyzed']+=1
                     link='https://teams.microsoft.com/l/message/'+quote(channel['id'],safe='')+'/'+quote(mid,safe='')+'?'+urlencode({'groupId':channel['team_id'],'tenantId':tenant})
@@ -412,6 +425,7 @@ class DirectSource:
                         complete=False; report['partial']=True
                         if not broad: raise GraphFailure('source_unavailable')
                         break
+                    emit_progress()
                 ended_normally=True
             finally:
                 if shared:
@@ -424,13 +438,24 @@ class DirectSource:
                     if finished is False:
                         complete=False; report['partial']=True
                         if not broad and ended_normally: raise GraphFailure('source_unavailable')
+                emit_progress()
             if complete:
                 report['channels_scanned']+=1; resolved_channels+=1
+                scanned.add(channel['id'])
+                if not channel_failed and targeted is None: checked.add(channel['id'])
+            emit_progress()
         if selected_channels is not None:
             expired()
         elif resolved_channels<report['channels_total'] or monotonic()>deadline:
             report['partial']=True
-        return CollectionResult(db.catalog_events([ch['id'] for ch in channels]),report)
+        emit_progress()
+        if on_progress is not None: report={**report,'channels_checked':len(checked)}
+        result=CollectionResult(db.catalog_events([ch['id'] for ch in channels]),report)
+        if on_progress is not None:
+            # In-process scope proof only; never part of report/API metadata.
+            result.checked_channels=frozenset(checked)
+            result.scanned_channels=frozenset(scanned)
+        return result
 
 def direct_source_from_env(graph):
     return DirectSource(graph,AIExtractor(os.environ.get('WEB_OPENAI_API_KEY',''),os.environ.get('WEB_LLM_MODEL','gpt-4o-mini')),images=os.environ.get('WEB_AI_IMAGES_ENABLED','1')=='1')

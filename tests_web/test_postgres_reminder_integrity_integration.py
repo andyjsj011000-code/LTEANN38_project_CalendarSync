@@ -1,12 +1,13 @@
 """Reminder target access and writes share one real PostgreSQL transaction."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from threading import Event
+from threading import Barrier, Event
 
 import pytest
 
 from test_postgres_database_integration import CHANNELS, postgres_database, source
-from web_service.storage import Missing, PermissionPending
+from web_service.planner_trash import TRASH_SCHEMA, TRASH_SECONDS
+from web_service.storage import Conflict, Missing, PermissionPending
 
 
 RULES = {'offsets': [-30], 'custom_times': []}
@@ -126,3 +127,209 @@ def test_expiry_after_rule_write_rolls_back_the_transaction(postgres_database, m
     with pytest.raises(PermissionPending):
         p.repo.save_rules(p.users['alice'], event['id'], 'teams', RULES)
     assert stored(p, event['id'], 'teams') is None
+
+
+def enable_trash(p):
+    with p.connect() as db:
+        for statement in TRASH_SCHEMA:
+            db.execute(statement)
+    p.repo.planner_enhancements_enabled = True
+
+
+def test_personal_trash_roundtrip_preserves_rules_and_sent_deliveries(postgres_database):
+    p = postgres_database
+    enable_trash(p)
+    task = personal(p)
+    task = p.repo.task_state(p.users['alice'], task['id'],
+                            {'hidden': True, 'completed': True}, task['version'])
+    p.repo.save_rules(p.users['alice'], task['id'], 'personal', RULES)
+    with p.connect() as db:
+        db.execute('''INSERT INTO web_push_subscriptions
+            (id,device_hash,endpoint_hash,subscription_blob,created_at)
+            VALUES(%s,%s,%s,%s,%s)''', ('fixture-subscription', p.devices['alice']['id_hash'],
+            'fixture-endpoint-hash', p.repo.seal({'endpoint': 'https://push.example.test/fixture'}), p.now[0]))
+        db.execute('''INSERT INTO web_deliveries(id,subscription_id,state,created_at)
+            VALUES(%s,%s,'sent',%s)''', ('already-sent', 'fixture-subscription', p.now[0]))
+        delivery = db.execute('SELECT * FROM web_deliveries').fetchone()
+    archived = p.repo.trash_task(p.users['alice'], task['id'], task['version'])
+    assert archived['expires_at'] - archived['deleted_at'] == TRASH_SECONDS
+    with pytest.raises(Missing):
+        p.repo.task(p.users['alice'], task['id'])
+    assert stored(p, task['id'], 'personal') is None
+    assert p.repo.list_task_trash(p.users['bob'], 'tenant')['items'] == []
+    restored = p.repo.restore_task_trash(p.users['alice'], 'tenant', archived['id'])
+    assert restored == {**task, 'version': task['version'] + 1}
+    assert stored(p, task['id'], 'personal') == RULES
+    with p.connect() as db:
+        assert db.execute('SELECT * FROM web_deliveries').fetchone() == delivery
+        assert db.execute('SELECT count(*) FROM web_task_trash').fetchone()[0] == 0
+    assert p.repo.claim_delivery_lease('already-sent', 'fixture-subscription') is None
+    with pytest.raises(Conflict):
+        p.repo.update_task(p.users['alice'], task['id'], {**task, 'title': 'Stale'}, task['version'])
+    with pytest.raises(Conflict):
+        p.repo.delete_task(p.users['alice'], task['id'], task['version'])
+
+
+def test_trash_and_restore_each_have_one_winner_under_concurrent_requests(postgres_database):
+    p = postgres_database
+    enable_trash(p)
+    task = personal(p)
+    gate = Barrier(2)
+    def archive(_):
+        gate.wait(timeout=3)
+        try:
+            return p.repo.trash_task(p.users['alice'], task['id'], task['version'])
+        except Missing:
+            return None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(archive, range(2)))
+    winners = [value for value in results if value]
+    assert len(winners) == 1
+    gate = Barrier(2)
+    def restore(_):
+        gate.wait(timeout=3)
+        try:
+            return p.repo.restore_task_trash(p.users['alice'], 'tenant', winners[0]['id'])
+        except Missing:
+            return None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        recovered = [value for value in pool.map(restore, range(2)) if value]
+    assert len(recovered) == 1 and recovered[0]['version'] == task['version'] + 1
+
+
+@pytest.mark.parametrize('rule', [None, {'offsets': [], 'custom_times': []}])
+def test_trash_restores_absent_and_disabled_rules_without_changing_default_policy(postgres_database, rule):
+    p = postgres_database
+    enable_trash(p)
+    task = personal(p)
+    if rule is not None:
+        p.repo.save_rules(p.users['alice'], task['id'], 'personal', rule)
+    archived = p.repo.trash_task(p.users['alice'], task['id'], task['version'])
+    p.repo.restore_task_trash(p.users['alice'], 'tenant', archived['id'])
+    assert stored(p, task['id'], 'personal') == rule
+    assert p.repo.rules(p.users['alice'], task['id'], 'personal') == (
+        rule if rule is not None else {'offsets': [-1440, -60], 'custom_times': []})
+
+
+def test_trash_restore_does_not_overwrite_existing_identity(postgres_database):
+    p = postgres_database
+    enable_trash(p)
+    task = personal(p)
+    archived = p.repo.trash_task(p.users['alice'], task['id'], task['version'])
+    with p.connect() as db:
+        db.execute('''INSERT INTO web_personal_tasks(id,user_id,start_date,end_date,payload_blob)
+            VALUES(%s,%s,%s,%s,%s)''', (task['id'], p.users['bob'], task['start_date'],
+            task['end_date'], p.repo.seal({'title': 'Bob fixture task', 'start_date': task['start_date'],
+                'end_date': task['end_date'], 'display_mode': 'daily', 'selected_dates': []})))
+    with pytest.raises(Conflict):
+        p.repo.restore_task_trash(p.users['alice'], 'tenant', archived['id'])
+    assert p.repo.task(p.users['bob'], task['id'])['title'] == 'Bob fixture task'
+    assert len(p.repo.list_task_trash(p.users['alice'], 'tenant')['items']) == 1
+
+
+def test_trash_rule_cleanup_failure_rolls_back_original_and_archive(postgres_database, monkeypatch):
+    p = postgres_database
+    enable_trash(p)
+    task = personal(p)
+    p.repo.save_rules(p.users['alice'], task['id'], 'personal', RULES)
+    original = p.repo.connect
+    @contextmanager
+    def intercepted():
+        with original() as db:
+            class Connection:
+                def execute(self, query, values=()):
+                    if 'DELETE FROM web_reminder_rules' in query:
+                        raise RuntimeError('Fixture cleanup failure')
+                    return db.execute(query, values)
+            yield Connection()
+    monkeypatch.setattr(p.repo, 'connect', intercepted)
+    with pytest.raises(RuntimeError, match='Fixture cleanup failure'):
+        p.repo.trash_task(p.users['alice'], task['id'], task['version'])
+    assert p.repo.task(p.users['alice'], task['id']) == task
+    assert stored(p, task['id'], 'personal') == RULES
+    with p.connect() as db:
+        assert db.execute('SELECT count(*) FROM web_task_trash').fetchone()[0] == 0
+
+
+def test_trash_rule_restore_failure_is_atomic(postgres_database, monkeypatch):
+    p = postgres_database
+    enable_trash(p)
+    task = personal(p)
+    p.repo.save_rules(p.users['alice'], task['id'], 'personal', RULES)
+    archived = p.repo.trash_task(p.users['alice'], task['id'], task['version'])
+    original = p.repo.connect
+    @contextmanager
+    def intercepted():
+        with original() as db:
+            class Connection:
+                def execute(self, query, values=()):
+                    if 'INSERT INTO web_reminder_rules' in query:
+                        raise RuntimeError('Fixture restore failure')
+                    return db.execute(query, values)
+            yield Connection()
+    monkeypatch.setattr(p.repo, 'connect', intercepted)
+    with pytest.raises(RuntimeError, match='Fixture restore failure'):
+        p.repo.restore_task_trash(p.users['alice'], 'tenant', archived['id'])
+    with pytest.raises(Missing):
+        p.repo.task(p.users['alice'], task['id'])
+    assert stored(p, task['id'], 'personal') is None
+    with p.connect() as db:
+        assert db.execute('SELECT count(*) FROM web_task_trash').fetchone()[0] == 1
+
+
+def test_trash_expiry_while_waiting_for_archive_lock_prevents_restore(postgres_database, monkeypatch):
+    p = postgres_database
+    enable_trash(p)
+    task = personal(p)
+    archived = p.repo.trash_task(p.users['alice'], task['id'], task['version'])
+    waiting = Event()
+    original = p.repo.connect
+    @contextmanager
+    def intercepted():
+        with original() as db:
+            class Connection:
+                def execute(self, query, values=()):
+                    if 'SELECT task_id,payload_blob,expires_at' in query:
+                        waiting.set()
+                    return db.execute(query, values)
+            yield Connection()
+    monkeypatch.setattr(p.repo, 'connect', intercepted)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with p.connect() as held:
+            held.execute('SELECT id FROM web_task_trash WHERE id=%s FOR UPDATE', (archived['id'],))
+            result = pool.submit(p.repo.restore_task_trash, p.users['alice'], 'tenant', archived['id'])
+            assert waiting.wait(2), 'The restore must reach the archive lock'
+            p.now[0] = archived['expires_at']
+        with pytest.raises(Missing):
+            result.result(timeout=5)
+    with pytest.raises(Missing):
+        p.repo.task(p.users['alice'], task['id'])
+    assert p.repo.prune_task_trash() == 1
+
+
+def test_trash_expiry_after_rule_write_rolls_back_native_restore(postgres_database, monkeypatch):
+    p = postgres_database
+    enable_trash(p)
+    task = personal(p)
+    p.repo.save_rules(p.users['alice'], task['id'], 'personal', RULES)
+    archived = p.repo.trash_task(p.users['alice'], task['id'], task['version'])
+    p.now[0] = archived['expires_at'] - 1
+    original = p.repo.connect
+    @contextmanager
+    def intercepted():
+        with original() as db:
+            class Connection:
+                def execute(self, query, values=()):
+                    value = db.execute(query, values)
+                    if 'INSERT INTO web_reminder_rules' in query:
+                        p.now[0] = archived['expires_at']
+                    return value
+            yield Connection()
+    monkeypatch.setattr(p.repo, 'connect', intercepted)
+    with pytest.raises(Missing):
+        p.repo.restore_task_trash(p.users['alice'], 'tenant', archived['id'])
+    with pytest.raises(Missing):
+        p.repo.task(p.users['alice'], task['id'])
+    assert stored(p, task['id'], 'personal') is None
+    with p.connect() as db:
+        assert db.execute('SELECT count(*) FROM web_task_trash').fetchone()[0] == 1

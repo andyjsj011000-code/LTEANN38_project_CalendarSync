@@ -5,3 +5,16 @@
 .school-signin{display:block;text-align:center;text-decoration:none;margin:24px 0}.beta-banner a{color:var(--blue);white-space:nowrap}
 
 .test-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:-4px 0 20px}.change-item{padding:15px 0;border-bottom:1px solid var(--line)}.change-item h3{font-size:15px;margin:0 0 8px}.change-item .detail-notes{max-height:180px;overflow:auto}
+.planner-tools {display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin:0 0 18px;}
+.planner-sync {display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px;color:var(--muted,#667085);}
+.planner-sync span {overflow-wrap:anywhere;}
+.list-controls {margin-bottom:20px;}
+.list-controls .dialog-body {padding:18px 22px;}
+.list-controls .field {margin-bottom:12px;}
+.list-controls .toggle-row {display:flex;align-items:center;gap:12px;}
+.list-controls [data-list-result-count]:empty {display:none;}
+.trash-row {display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid #e5e9f1;padding:16px 0;}
+.trash-row > div {min-width:0;overflow-wrap:anywhere;}
+.trash-row > button {flex-shrink:0;}
+#task-draft-actions {margin-bottom:14px;}
+@media(max-width:600px) {.planner-tools,.planner-sync {align-items:flex-start;}.planner-sync {width:100%;}.list-controls .dialog-body {padding:16px;}.trash-row {align-items:flex-start;}}

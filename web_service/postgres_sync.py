@@ -190,7 +190,7 @@ class PostgresSync:
                 raise PermissionPending()
             return len(events)
 
-    def commit_snapshot(self, device, channels, events, ttl, lease):
+    def commit_snapshot(self, device, channels, events, ttl, lease, *, ingestion=None):
         self._seconds(ttl)
         channels, events = self._snapshot(channels, events)
         if not isinstance(lease, str) or not lease:
@@ -238,13 +238,20 @@ class PostgresSync:
                 db.execute('''INSERT INTO web_channel_access(user_id,channel_id,confirmed_at,valid_until)
                     VALUES(%s,%s,%s,%s)''', (user_id, channel['id'], now, now + ttl))
             self._publish_snapshot_events(db, user_id, events, now)
+            ingestion_saved = None
+            if ingestion is not None:
+                if not getattr(self, 'planner_enhancements_enabled', False):
+                    raise ValueError('Ingestion status is not enabled')
+                ingestion_saved = self.finish_ingestion_snapshot_in(db, device, ingestion)
             # Shared-row locks above can wait even while this user's own rows
             # remain locked. Time expiry must still fence the final commit.
             finished=int(self.clock())
-            if current[3]<=finished or proof[1]<=finished or now+ttl<=finished:
+            if (current[3]<=finished or proof[1]<=finished or now+ttl<=finished or
+                    (ingestion_saved and ingestion['_attempt_until']<=finished)):
                 raise Missing()
             db.execute('''UPDATE web_school_sync SET checked_at=%s,state='connected',
                 lease_until=0,lease_token=NULL WHERE user_id=%s''', (now, user_id))
+        return ingestion_saved
 
     def _publish_snapshot_events(self, db, user_id, events, now, *, skip_unchanged=False):
         for event_id, event in events:

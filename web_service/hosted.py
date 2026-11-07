@@ -2,8 +2,9 @@
 
 The default server entry point is unchanged. Configuration checks do not connect
 or import a PostgreSQL driver. The database check is read-only. Only the separate
-app factory's explicit bootstrap flag can create a previously absent schema;
-it never migrates or overwrites an existing one.
+app factory's explicit bootstrap flag can create a previously absent schema.
+The separate planner opt-in creates fixed additive sidecars in an existing web
+schema; neither path migrates or overwrites existing tables or rows.
 """
 import argparse
 from dataclasses import dataclass,field
@@ -25,12 +26,14 @@ class HostedConfig:
     images: bool=True
     bootstrap_new_schema: bool=False
     shared_ingestion: bool=False
+    planner_enhancements: bool=False
 
     def describe(self):
         return {'storage_backend':'postgresql-experimental','callback_url':self.settings.callback_url,
                 'auth_configured':self.settings.auth_configured,'ai_configured':bool(self.ai_key),
                 'ingestion_mode':'direct','automatic_schema_changes':self.bootstrap_new_schema,
                 'shared_channel_ingestion':self.shared_ingestion,
+                'planner_enhancements':self.planner_enhancements,
                 'connection':self.connection.describe()}
 
 
@@ -63,9 +66,12 @@ def configuration(environ=None):
         raise ValueError('Invalid beta schema bootstrap setting')
     if env.get('WEB_SHARED_CHANNEL_INGESTION','0') not in {'0','1'}:
         raise ValueError('Invalid shared channel ingestion setting')
+    if env.get('WEB_PLANNER_ENHANCEMENTS','0') not in {'0','1'}:
+        raise ValueError('Invalid planner enhancement setting')
     return HostedConfig(settings,factory,ai_key,env.get('WEB_LLM_MODEL','gpt-4o-mini'),
                         env.get('WEB_AI_IMAGES_ENABLED','1')=='1',env.get('WEB_BOOTSTRAP_NEW_SCHEMA','0')=='1',
-                        env.get('WEB_SHARED_CHANNEL_INGESTION','0')=='1')
+                        env.get('WEB_SHARED_CHANNEL_INGESTION','0')=='1',
+                        env.get('WEB_PLANNER_ENHANCEMENTS','0')=='1')
 
 
 def create_hosted_app(environ=None,*,identity=None,graph=None,source=None,sender=None,worker=True):
@@ -84,8 +90,12 @@ def create_hosted_app(environ=None,*,identity=None,graph=None,source=None,sender
         # Explicit opt-in installs only the reviewed additive lease table.
         from .postgres_shared_schema import enable_shared_channel_schema
         enable_shared_channel_schema(config.connection,config.settings.tenant_id)
+    if config.planner_enhancements:
+        from .planner_schema import enable_planner_schema
+        enable_planner_schema(config.connection,config.settings.tenant_id)
     database=PostgresDatabase(config.connection,config.settings.data_key,config.settings.tenant_id,
-                             shared_ingestion_enabled=config.shared_ingestion)
+                             shared_ingestion_enabled=config.shared_ingestion,
+                             planner_enhancements_enabled=config.planner_enhancements)
     return create_test_server(config.settings,database,identity,graph,source,sender,worker=worker)
 
 
@@ -98,7 +108,9 @@ def main():
     try:
         config=configuration()
         if args.check_database:
-            PostgresDatabase(config.connection,config.settings.data_key,config.settings.tenant_id).initialize()
+            PostgresDatabase(config.connection,config.settings.data_key,config.settings.tenant_id,
+                             shared_ingestion_enabled=config.shared_ingestion,
+                             planner_enhancements_enabled=config.planner_enhancements).initialize()
     except Exception:
         # Do not echo input values, driver diagnostics or secrets on a console.
         parser.exit(1,'Beta preflight failed; check private environment and reviewed schema configuration.\n')

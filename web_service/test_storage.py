@@ -5,6 +5,9 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from .school_storage import SchoolDatabase
 from .storage import Missing, Conflict, PermissionPending, digest
+from .planner_drafts import SQLiteTaskDrafts
+from .planner_trash import SQLiteTaskTrash
+from .sqlite_ingestion_status import SQLiteIngestionStatus
 
 EXTRA_SCHEMA="""
 CREATE TABLE IF NOT EXISTS web_connections (
@@ -39,11 +42,26 @@ CREATE TABLE IF NOT EXISTS web_worker_lock (id INTEGER PRIMARY KEY,owner TEXT NO
 def source_hash(e):
     return digest(json.dumps({k:e.get(k) for k in ('title','notes','time','source_url','start_date','end_date','kind','cancelled','source_version')},sort_keys=True,ensure_ascii=False))
 
-class TestDatabase(SchoolDatabase):
+class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, SchoolDatabase):
     __test__=False
+    def __init__(self,path,data_key,*,planner_enhancements_enabled=False,**kwargs):
+        super().__init__(path,data_key,**kwargs)
+        self.planner_enhancements_enabled=bool(planner_enhancements_enabled)
+
     def initialize(self):
         super().initialize()
         with self.connect() as c: c.executescript(EXTRA_SCHEMA)
+        if self.planner_enhancements_enabled:
+            from .planner_schema import enable_sqlite_planner_schema
+            with self.connect() as c:
+                c.execute('BEGIN IMMEDIATE')
+                enable_sqlite_planner_schema(c)
+
+    def planner_maintenance(self):
+        if not self.planner_enhancements_enabled:
+            return {'drafts_expired':0,'trash_expired':0}
+        return {'drafts_expired':self.prune_task_drafts(),
+                'trash_expired':self.prune_task_trash()}
 
     def add_connection(self,raw_session,user_id,token,lifetime,cache='',background=False):
         raw=secrets.token_urlsafe(32); now=int(self.clock())
@@ -222,7 +240,7 @@ class TestDatabase(SchoolDatabase):
             # This local adapter has no shared channel ingestion lease table.
             return current[1]<=now
 
-    def commit_snapshot(self,device,channels,events,ttl,lease):
+    def commit_snapshot(self,device,channels,events,ttl,lease,*,ingestion=None):
         now=int(self.clock()); user=device['user_id']; tenant=device['tenant_id']; allowed={ch['id'] for ch in channels}
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
@@ -236,7 +254,15 @@ class TestDatabase(SchoolDatabase):
                 c.execute('INSERT INTO web_channels VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET label_blob=excluded.label_blob',(ch['id'],tenant,self.seal({'name':ch['name']})))
                 c.execute('INSERT INTO web_channel_access VALUES(?,?,?,?)',(user,ch['id'],now,now+ttl))
             self._publish_cached_events(c,user,allowed,events,now)
+            finished_status=None
+            if self.planner_enhancements_enabled and ingestion is not None:
+                finished_status=self.finish_ingestion_snapshot_in(c,device,ingestion)
+                finished=int(self.clock())
+                self._progress_device(c,device,finished)
+                if lease<=finished or now+ttl<=finished: raise Missing()
+                if finished_status is True and ingestion['_attempt_until']<=finished: raise Missing()
             c.execute("UPDATE web_school_sync SET checked_at=?,state='connected',lease_until=0 WHERE user_id=?",(now,user))
+            return finished_status
 
     def _shared(self,user_id,tenant_id):
         items=super()._shared(user_id,tenant_id)
@@ -367,10 +393,13 @@ class TestDatabase(SchoolDatabase):
     def request_ingestion(self,device_hash):
         now=int(self.clock())
         with self.connect() as c:
-            return bool(c.execute('''UPDATE web_connections SET ingest_at=0,next_sync=?
+            changed=bool(c.execute('''UPDATE web_connections SET ingest_at=0,next_sync=?
                 WHERE id_hash=? AND active=1 AND expires_at>? AND state<>'reauth_required'
                 AND EXISTS(SELECT 1 FROM web_users u WHERE u.id=web_connections.user_id AND u.active=1)''',
                 (now,device_hash,now)).rowcount)
+            if changed and self.planner_enhancements_enabled:
+                self._queue_ingestion_in(c,device_hash,now)
+            return changed
 
     def has_pending_change(self,user,event):
         with self.connect() as c: return bool(c.execute("SELECT 1 FROM web_changes WHERE user_id=? AND event_id=? AND status='pending'",(user,event)).fetchone())

@@ -110,3 +110,89 @@ def test_hosted_first_start_creates_schema_and_restart_preserves_existing_data(b
     assert app().state.database.tenant_id==TENANT
     with p.factory() as connection:
         assert connection.execute('SELECT payload FROM sentinel').fetchall()==[('preserve-on-restart',)]
+
+
+def test_planner_additive_install_preserves_existing_data_and_sidecars_on_parallel_restart(bootstrap_database):
+    from concurrent.futures import ThreadPoolExecutor
+    from web_service.planner_schema import enable_planner_schema
+    p = bootstrap_database
+    apply_bootstrap(p.factory)
+    key = Fernet.generate_key().decode()
+    db = PostgresDatabase(p.factory, key, 'school')
+    db.initialize()
+    user = db.save_user('school', 'alice', {'name': 'Existing profile'})
+    db.add_task(user, {'title': 'Existing task', 'start_date': '2026-11-07',
+                       'end_date': '2026-11-07'})
+    with p.factory() as connection:
+        before = connection.execute('SELECT * FROM web_personal_tasks').fetchall()
+        profile = connection.execute('SELECT * FROM web_users').fetchall()
+        assert connection.execute("SELECT to_regclass('web_task_drafts')").fetchone() == (None,)
+    enable_planner_schema(p.factory, 'school')
+    with p.factory() as connection:
+        connection.execute('INSERT INTO web_task_drafts VALUES(%s,%s,3,100,200)',
+                           (user, 'preserved-encrypted-draft'))
+        connection.execute('INSERT INTO web_task_trash VALUES(%s,%s,%s,%s,100,200)',
+                           ('trash-nonce', user, 'deleted-task', 'preserved-encrypted-trash'))
+        connection.execute('''INSERT INTO web_connections
+            (id_hash,user_id,credential_blob,token_expires,expires_at,background)
+            VALUES(%s,%s,%s,9000,9000,1)''', ('device-hash', user, 'encrypted-credential'))
+        connection.execute('''INSERT INTO web_ingestion_status(device_hash,state,last_success_at)
+            VALUES('device-hash','completed',100)''')
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(lambda _: enable_planner_schema(p.factory, 'school'), range(3)))
+    enabled = PostgresDatabase(p.factory, key, 'school', planner_enhancements_enabled=True)
+    enabled.initialize()
+    with p.factory() as connection:
+        assert connection.execute('SELECT * FROM web_personal_tasks').fetchall() == before
+        assert connection.execute('SELECT * FROM web_users').fetchall() == profile
+        assert connection.execute('SELECT payload_blob,version FROM web_task_drafts').fetchall() == [
+            ('preserved-encrypted-draft', 3)]
+        assert connection.execute('SELECT payload_blob FROM web_task_trash').fetchall() == [
+            ('preserved-encrypted-trash',)]
+        assert connection.execute('SELECT state,last_success_at FROM web_ingestion_status').fetchall() == [
+            ('completed', 100)]
+
+
+@pytest.mark.parametrize('foreign_table', ['web_users', 'web_channels'])
+def test_planner_install_rejects_another_school_without_creating_sidecars(bootstrap_database, foreign_table):
+    from web_service.planner_schema import enable_planner_schema, PLANNER_COLUMNS
+    p = bootstrap_database
+    apply_bootstrap(p.factory)
+    with p.factory() as connection:
+        if foreign_table == 'web_users':
+            connection.execute("INSERT INTO web_users VALUES('foreign-user','other-school','alice','cipher',1)")
+        else:
+            connection.execute("INSERT INTO web_channels VALUES('foreign-channel','other-school','cipher')")
+    with pytest.raises(ValueError, match='another school'):
+        enable_planner_schema(p.factory, 'school')
+    with p.factory() as connection:
+        for table in PLANNER_COLUMNS:
+            assert connection.execute('SELECT to_regclass(%s)', (table,)).fetchone() == (None,)
+        assert connection.execute('SELECT count(*) FROM ' + foreign_table).fetchone() == (1,)
+
+
+def test_planner_install_failure_rolls_back_only_new_tables(bootstrap_database):
+    from web_service.planner_schema import enable_planner_schema
+    p = bootstrap_database
+    apply_bootstrap(p.factory)
+    with p.factory() as connection:
+        connection.execute('CREATE TABLE web_task_trash(id TEXT PRIMARY KEY)')
+        connection.execute("INSERT INTO web_task_trash VALUES('preserve-existing-table')")
+    with pytest.raises(Exception):
+        enable_planner_schema(p.factory, 'school')
+    with p.factory() as connection:
+        assert connection.execute('SELECT * FROM web_task_trash').fetchall() == [('preserve-existing-table',)]
+        assert connection.execute("SELECT to_regclass('web_task_drafts')").fetchone() == (None,)
+        assert connection.execute("SELECT to_regclass('web_ingestion_status')").fetchone() == (None,)
+        assert connection.execute('SELECT version FROM web_schema_version').fetchall() == [(1,)]
+
+
+def test_planner_validation_never_creates_missing_tables(bootstrap_database):
+    p = bootstrap_database
+    apply_bootstrap(p.factory)
+    db = PostgresDatabase(p.factory, Fernet.generate_key().decode(), 'school',
+                          planner_enhancements_enabled=True)
+    with pytest.raises(RuntimeError, match='validation failed'):
+        db.initialize()
+    with p.factory() as connection:
+        assert connection.execute("SELECT to_regclass('web_task_drafts')").fetchone() == (None,)

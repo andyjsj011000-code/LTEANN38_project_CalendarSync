@@ -109,6 +109,8 @@ class PostgresOperations:
                 return False
             db.execute('UPDATE web_connections SET ingest_at=0,next_sync=0 WHERE id_hash=%s',
                        (device_hash,))
+            if getattr(self, 'planner_enhancements_enabled', False):
+                self._queue_ingestion_in(db, device_hash, int(self.clock()))
         return True
 
     @staticmethod

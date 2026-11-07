@@ -107,6 +107,21 @@ class ServerIntegration(SchoolIntegration):
                      'not_recorded' if saved is False else 'completed')
         progress('sync','started'); progress('lease','started')
         user=device['user_id']
+        tracked=bool(ingest and hasattr(self.source,'collect') and
+                     getattr(self.db,'planner_enhancements_enabled',False))
+        attempt=self.db.claim_ingestion(device) if tracked else None
+        if tracked and not attempt:
+            progress('sync','skipped'); return {'state':'busy'}
+        attempt_closed=False
+        def end_tracking(error_code=None,queued=False):
+            nonlocal attempt_closed
+            if attempt and not attempt_closed:
+                try: self.db.end_ingestion(device,attempt,error_code=error_code,queued=queued)
+                except Exception: pass
+                attempt_closed=True
+        def collection_progress(report):
+            try: self.db.update_ingestion(device,attempt,report)
+            except Exception: pass
         reuse=bool(ingest and self.shared_ingestion_enabled and prepared and
                    prepared['device']['id_hash']==device['id_hash'] and
                    prepared['device']['user_id']==user and
@@ -116,6 +131,7 @@ class ServerIntegration(SchoolIntegration):
             **({'preserve_access':True} if self.shared_ingestion_enabled else {}))
         progress('lease','reused' if reuse else 'acquired' if lease else 'skipped')
         if not reuse and not lease:
+            end_tracking(queued=True)
             progress('sync','skipped'); return {'state':'busy'} if ingest else None
         def fail_current(state):
             nonlocal lease
@@ -124,7 +140,8 @@ class ServerIntegration(SchoolIntegration):
             if lease is None: lease=self.db.begin_sync(user,0)
             return self.db.fail_sync(user,state,lease) if lease else False
         try:
-            ingestion=None
+            ingestion=None; report=None; reset_channels=False
+            collected_scope=None; collected_checked=None; collected_scanned=None
             progress('token','started')
             token,device=acquire_snapshot(self.tokens,device,self.db)
             progress('token','completed'); progress('channels','started')
@@ -133,10 +150,12 @@ class ServerIntegration(SchoolIntegration):
             progress('channels','completed')
             if not self.source.configured:
                 progress('source','not_configured'); progress('failure','started')
-                failure_progress(fail_current('source_not_configured')); return
+                failure_progress(fail_current('source_not_configured'))
+                end_tracking('source_not_configured'); return
             progress('source','started')
             if hasattr(self.source,'collect'):
                 if ingest:
+                    collected_scope={ch['id'] for ch in channels}
                     if self.shared_ingestion_enabled and not reuse:
                         # Publish the authorized cache before potentially slow AI
                         # work, and let normal permission checks run meanwhile.
@@ -145,8 +164,17 @@ class ServerIntegration(SchoolIntegration):
                         lease=None
                         progress('cached_commit','completed')
                     try:
-                        events=self.source.collect(token,channels,device['tenant_id'],self.db,user)
+                        options=({'on_progress':collection_progress} if attempt and
+                                 getattr(self.source,'supports_progress',False) else {})
+                        events=self.source.collect(token,channels,device['tenant_id'],self.db,user,**options)
                         report=getattr(events,'report',None)
+                        if tracked:
+                            collected_checked=getattr(events,'checked_channels',None)
+                            collected_scanned=getattr(events,'scanned_channels',None)
+                            for scope in (collected_checked,collected_scanned):
+                                if scope is not None and (not isinstance(scope,(set,frozenset)) or
+                                                          not scope<=collected_scope):
+                                    raise ValueError('Invalid ingestion channel scope')
                     except GraphFailure as error:
                         if not self.shared_ingestion_enabled or error.state not in {'verification_failed','source_unavailable'}:
                             raise
@@ -169,31 +197,59 @@ class ServerIntegration(SchoolIntegration):
                         ingestion={key:report[key] for key in counts}
                         ingestion.update(partial=report['partial'],
                                          state='partial' if report['partial'] else 'completed')
-                    if self.shared_ingestion_enabled:
+                    if self.shared_ingestion_enabled or tracked:
                         # Membership or credentials may have changed during AI
                         # work. Keep the still-valid prior snapshot readable
                         # while a lease serializes the replacement proof. Its
                         # original permission expiry is never extended here.
-                        lease=self.db.begin_sync(user,0,preserve_access=True)
-                        if not lease: return {'state':'busy'}
+                        # Non-shared collection still owns its initial lease.
+                        if self.shared_ingestion_enabled:
+                            lease=self.db.begin_sync(user,0,preserve_access=True)
+                            if not lease:
+                                end_tracking(queued=True)
+                                return {'state':'busy'}
                         token,device=acquire_snapshot(self.tokens,device,self.db)
                         channels=self.graph.channels(token,device['object_id'],device['tenant_id'])
                         events=self.db.catalog_events([ch['id'] for ch in channels])
+                        final_scope={ch['id'] for ch in channels}
+                        if tracked and final_scope!=collected_scope:
+                            reset_channels=True
+                            was_partial=bool(report and report.get('partial'))
+                            if collected_checked is None and not was_partial:
+                                collected_checked=collected_scope
+                            report={**(report or {}),'channels_total':len(final_scope),
+                                    'partial':was_partial or bool(final_scope-collected_scope)}
+                            for key,scope in (('channels_checked',collected_checked),
+                                              ('channels_scanned',collected_scanned)):
+                                if scope is None: report.pop(key,None)
+                                else: report[key]=len(final_scope & scope)
+                            if ingestion is not None:
+                                for key in ('channels_total','channels_scanned'):
+                                    if key in report: ingestion[key]=report[key]
+                                    else: ingestion.pop(key,None)
+                                ingestion.update(partial=report['partial'],
+                                    state='partial' if report['partial'] else 'completed')
                 else: events=self.db.catalog_events([ch['id'] for ch in channels])
             elif isinstance(self.source,OracleSource):
                 known=self.db.known_oracle_events(user,device['tenant_id'],channels)
                 events=self.source.events(channels,device['tenant_id'],known_events=known)
             else: events=self.source.events(channels,device['tenant_id'])
             progress('source','completed'); progress('commit','started')
-            self.db.commit_snapshot(device,channels,events,self.settings.access_seconds,lease)
+            context=({'ingestion':{'attempt':attempt,'report':report or {'partial':False},
+                                   'reset_channels':reset_channels}}
+                     if tracked else {})
+            recorded=self.db.commit_snapshot(device,channels,events,self.settings.access_seconds,lease,**context)
             progress('commit','completed')
+            if tracked:
+                attempt_closed=True
+                if not recorded: return {'state':'busy'}
             if prepare_collection and self.shared_ingestion_enabled and not ingest:
                 # Internal-only handoff. It contains no token and never enters
                 # the API response; queued work revalidates the live device.
                 identity={key:device[key] for key in ('id_hash','user_id','tenant_id','object_id','version')}
                 return {'device':identity,'channels':[dict(ch) for ch in channels],
                         'valid_until':verified_at+self.settings.access_seconds}
-            if ingest and hasattr(self.source,'collect') and not (ingestion and ingestion['partial']):
+            if ingest and hasattr(self.source,'collect') and not tracked and not (ingestion and ingestion['partial']):
                 # Advance the schedule only after the snapshot was committed;
                 # failed commits and partial collection need a prompt retry.
                 progress('ingest_mark','started')
@@ -203,11 +259,14 @@ class ServerIntegration(SchoolIntegration):
         except GraphFailure as error:
             progress('sync','graph_failure'); progress('failure','started')
             failure_progress(fail_current(error.state))
+            end_tracking(error.state)
             if error.state in {'reauth_required','account_not_allowed'}: self.db.fail_connection(device['id_hash'])
         except Exception:
             progress('sync','source_unavailable'); progress('failure','started')
             failure_progress(fail_current('source_unavailable')); self.db.audit('sync_failed',user)
+            end_tracking('source_unavailable')
         finally:
+            end_tracking('interrupted')
             progress('sync','finished')
     def run_deferred_ingestion(self,device,prepared=None):
         try:
@@ -261,6 +320,7 @@ class ServerIntegration(SchoolIntegration):
         if not self.db.worker_lock(owner): return
         try:
             self.db.maintenance()
+            if getattr(self.db,'planner_enhancements_enabled',False): self.db.planner_maintenance()
             for device in self.db.due_devices(3):
                 self.db.defer_device(device['id_hash'],60)
                 # In injected notification mode, do not poll Graph on the timer.
@@ -338,7 +398,7 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     app.router.lifespan_context=lifespan
 
     @app.get('/api/service')
-    def info(): return {'mode':'preview' if preview else 'test-server','school_login':not preview,'synthetic_data_only':preview,'idle_seconds':settings.idle_seconds,'shared_channel_ingestion':integration.shared_ingestion_enabled,'personal_agenda':True}
+    def info(): return {'mode':'preview' if preview else 'test-server','school_login':not preview,'synthetic_data_only':preview,'idle_seconds':settings.idle_seconds,'shared_channel_ingestion':integration.shared_ingestion_enabled,'personal_agenda':True,'planner_enhancements':bool(getattr(db,'planner_enhancements_enabled',False))}
     @app.get('/service-worker.js')
     def service_worker(): return FileResponse(static/'service-worker.js',media_type='text/javascript',headers={'Service-Worker-Allowed':'/','Cache-Control':'no-store'})
     @app.get('/manifest.webmanifest')
@@ -349,6 +409,10 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     def sync(background_tasks:BackgroundTasks,session=Depends(require)):
         if not db.allow('manual-sync:'+session['user_id'],2): raise HTTPException(429,'Wait before syncing again')
         return integration.sync(session,background_tasks)
+    @app.get('/api/teams/ingestion-status')
+    def ingestion_status(session=Depends(require)):
+        if not getattr(db,'planner_enhancements_enabled',False): raise HTTPException(404,'Not available')
+        return db.ingestion_status(db.session_device(session))
     @app.post('/auth/logout-all',status_code=204)
     def logout_all(session=Depends(require)):
         db.revoke_all(session['user_id']); response=Response(status_code=204)

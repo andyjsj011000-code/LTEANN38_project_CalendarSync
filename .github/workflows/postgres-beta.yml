@@ -99,6 +99,7 @@ jobs:
             test_postgres_notification_integration \
             test_postgres_server_integration \
             test_postgres_shared_ingestion_integration \
+            test_postgres_ingestion_status_integration \
             test_postgres_retention_integration \
             test_postgres_change_conflicts_integration \
             test_postgres_reminder_integrity_integration \
@@ -125,6 +126,7 @@ jobs:
               'test_postgres_notification_integration',
               'test_postgres_server_integration',
               'test_postgres_shared_ingestion_integration',
+              'test_postgres_ingestion_status_integration',
               'test_postgres_retention_integration',
               'test_postgres_change_conflicts_integration',
               'test_postgres_reminder_integrity_integration',

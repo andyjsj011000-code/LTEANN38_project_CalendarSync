@@ -82,6 +82,30 @@ def test_second_account_reuses_fresh_shared_results_and_empty_channel_marker():
     assert second.report['partial'] is False
 
 
+def test_progress_counts_fresh_channels_without_calling_them_new_scans():
+    candidates, cache = channels(2), SharedCache()
+    source = DirectSource(Graph({candidates[0]['id']: [message('one')]}), Extractor(), images=False)
+    source.collect('token', candidates, 'tenant', cache, 'alice')
+    progress = []
+    result = source.collect('token', candidates, 'tenant', cache, 'bob', on_progress=progress.append)
+    assert result.report['channels_scanned'] == 0 and result.report['channels_checked'] == 2
+    assert progress[-1]['channels_checked'] == 2
+    assert all(set(value) <= {'channels_total', 'channels_scanned', 'channels_checked',
+        'messages_seen', 'messages_analyzed', 'messages_cached', 'messages_failed', 'partial'} for value in progress)
+
+
+def test_failed_channel_is_not_counted_checked_and_progress_failure_is_isolated():
+    candidates, cache = channels(1), SharedCache()
+    source = DirectSource(Graph({candidates[0]['id']: [message('bad', 'bad-message')]}),
+                          Extractor(ValueError('bad response')), images=False)
+    def broken_callback(_):
+        raise RuntimeError('Status database unavailable')
+    result = source.collect('token', candidates, 'tenant', cache, 'alice', on_progress=broken_callback)
+    assert result.report['partial'] is True
+    assert result.report['channels_scanned'] == 1 and result.report['channels_checked'] == 0
+    assert result.report['messages_failed'] == 1
+
+
 def test_only_new_or_stale_verified_channels_are_scanned_for_next_account():
     candidates,cache,extractor=channels(3),SharedCache(),Extractor()
     graph=Graph({row['id']:[message(row['id'])] for row in candidates})
