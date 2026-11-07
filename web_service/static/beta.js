@@ -229,7 +229,7 @@
     }).join('');
     const selected = S.items.filter(e => e.start_date <= S.selected && e.end_date >= S.selected);
     const monthLabel = `${S.month.slice(0, 4)}년 ${Number(S.month.slice(5))}월`;
-    root.innerHTML = intro('캘린더', '기간이 있는 일정은 시작일부터 마감일까지 이어져요.') + `<section class="card calendar-card"><div class="calendar-toolbar"><h2>${monthLabel}</h2><span role="status" aria-live="polite">${S.pendingMonth ? esc(S.pendingMonth + ' 일정을 불러오는 중…') : ''}</span><div class="month-actions"><button class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button><button class="secondary small" data-action="this-month">이번 달</button><button class="icon-button" aria-label="다음 달" data-action="next-month">›</button></div></div><div class="calendar-legend"><span><i class="dot"></i>${SCHOOL ? 'Teams' : 'Teams 예시'}</span><span><i class="dot personal"></i>개인 할 일</span><span class="muted">날짜를 누르면 아래에 상세 목록이 보여요.</span></div><div class="calendar-grid"><div class="weekdays">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="weekday">${d}</div>`).join('')}</div>${gridHtml}</div></section><section class="card" style="margin-top:20px"><div class="card-head selected-heading"><h2>${esc(pretty(S.selected))}</h2><span class="muted fine">기간 전체 기준 · 오늘 표시는 선택한 날짜를 따릅니다</span></div><div class="date-detail">${list(selected, '이 날짜에는 표시할 일정이 없어요.')}</div></section>`;
+    root.innerHTML = intro('캘린더', '기간이 있는 일정은 시작일부터 마감일까지 이어져요.') + `<section class="card calendar-card"><div class="calendar-toolbar"><h2>${monthLabel}</h2><span role="status" aria-live="polite">${S.pendingMonth ? esc(S.pendingMonth + ' 일정을 불러오는 중…') : ''}</span><div class="month-actions"><button class="secondary small" data-action="hidden">숨긴 일정</button><button class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button><button class="secondary small" data-action="this-month">이번 달</button><button class="icon-button" aria-label="다음 달" data-action="next-month">›</button></div></div><div class="calendar-legend"><span><i class="dot"></i>${SCHOOL ? 'Teams' : 'Teams 예시'}</span><span><i class="dot personal"></i>개인 할 일</span><span class="muted">날짜를 누르면 아래에 상세 목록이 보여요.</span></div><div class="calendar-grid"><div class="weekdays">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="weekday">${d}</div>`).join('')}</div>${gridHtml}</div></section><section class="card" style="margin-top:20px"><div class="card-head selected-heading"><h2>${esc(pretty(S.selected))}</h2><span class="muted fine">기간 전체 기준 · 오늘 표시는 선택한 날짜를 따릅니다</span></div><div class="date-detail">${list(selected, '이 날짜에는 표시할 일정이 없어요.')}</div></section>`;
   }
   async function changeMonth(action) {
     const date = new Date((S.pendingMonth || S.month) + '-01T00:00:00Z');
@@ -559,7 +559,7 @@
       if (me.id !== check.id || me.csrf_token !== check.csrf) {clearPrivate(); loginScreen();}
     } catch (error) {
       if (activeView(check.epoch)) {
-        if (error.status === 401) failure(error);
+        if ([401, 403].includes(error.status)) failure(error);
         else toast('로그인 연결을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.', true);
       }
     } finally {

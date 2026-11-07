@@ -400,6 +400,7 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
   {
     const h=harness(); await settle(); await h.click({action:'calendar'});
     await h.click({action:'next-month'}); await h.click({action:'next-month'});
+    assert.match(h.elements.app.innerHTML,/class="month-actions"[^]*data-action="hidden"/);
     const future={...h.item,id:'future-task',source:'personal',title:'Hidden next year',start_date:'2027-01-02',end_date:'2027-01-02',version:1};
     h.overrides['/api/hidden?start=2027-01-01&end=2027-12-31']=() => response({items:[future]});
     h.overrides['/api/tasks/future-task/state']=options => {assert.deepEqual(JSON.parse(options.body),{hidden:false,version:1}); return response({...future,hidden:false});};
@@ -453,7 +454,15 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     const before=h.requests.length; pending.resolve(response({id:'late-task'},201)); await settle(); await h.advance(90001);
     assert.equal(h.requests.length,before); assert.equal(writes(h).filter(r => r.url==='/api/tasks').length,1);
   }
-  console.log('Usability UI: 40 synthetic scenarios passed (state-preserving refresh, permission-pending recovery, fail-closed auth, usable sign-out during writes, encoded hide IDs, selected-year restore and prior sync/race regressions).');
+  // Resuming a tab after access is forbidden removes the previously visible private screen.
+  {
+    const h=harness(); await settle(); h.elements.modal.open=true; h.elements.modal.innerHTML='Private tab draft';
+    h.overrides['/api/me']=() => response({},403);
+    h.visibility(true); h.visibility(false); await settle();
+    assert.match(h.elements.app.innerHTML,/school-signin/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.equal(h.elements.modal.open,false); assert.equal(h.elements['account-name'].textContent,'');
+  }
+  console.log('Usability UI: 41 synthetic scenarios passed (state-preserving refresh, permission-pending recovery, fail-closed auth, usable sign-out during writes, encoded hide IDs, selected-year restore and prior sync/race regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);
