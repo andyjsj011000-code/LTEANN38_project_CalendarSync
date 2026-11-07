@@ -33,7 +33,8 @@ def test_expired_own_event_and_channel_proofs_are_retryable_but_unknown_ids_are_
                           (p.users['alice'], EVENT['id'])).fetchone() == (0,)
 
 
-def test_hide_rolls_back_if_access_expires_after_update_before_return(postgres_database, monkeypatch):
+@pytest.mark.parametrize('action', ['hide', 'override'])
+def test_action_rolls_back_if_access_expires_before_return(postgres_database, monkeypatch, action):
     p = postgres_database
     publish(p)
     original = p.repo._shared_in
@@ -42,7 +43,10 @@ def test_hide_rolls_back_if_access_expires_after_update_before_return(postgres_d
         return original(*args, **kwargs)
     monkeypatch.setattr(p.repo, '_shared_in', expired_read)
     with pytest.raises(PermissionPending):
-        p.repo.event_state(p.users['alice'], 'tenant', EVENT['id'], {'hidden': True})
+        if action == 'hide':
+            p.repo.event_state(p.users['alice'], 'tenant', EVENT['id'], {'hidden': True})
+        else:
+            p.repo.override_event(p.users['alice'], 'tenant', EVENT['id'], {'title': 'Should not be saved'})
     with p.connect() as db:
         assert db.execute('SELECT hidden FROM web_event_states WHERE user_id=%s AND event_id=%s',
                           (p.users['alice'], EVENT['id'])).fetchone() == (0,)

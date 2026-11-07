@@ -147,6 +147,8 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
             expiry = self._lock_event_access(db, user_id, tenant_id, event_id)
             rows = self._shared_in(db, user_id, tenant_id, event_id)
             if not rows:
+                if expiry <= int(self.clock()):
+                    raise PermissionPending()
                 raise Missing()
             current, = rows
             fields = {key: value for key, value in current.items() if key in _SOURCE_FIELDS}
