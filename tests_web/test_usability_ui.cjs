@@ -335,7 +335,125 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     const secondRecovery=h.requests.length; await h.advance(60000);
     assert.equal(h.requests.length,secondRecovery); assert.equal(writes(h).length,0);
   }
-  console.log('Usability UI: 28 synthetic scenarios passed (bounded checking recovery, nonblocking sync, queued ingestion, preserved drafts, bounded writes, queued months, busy leases, review IDs, minimal preference writes and save recovery).');
+  // An explicit refresh leaves the current screen and unsaved dialog available until replacement arrives.
+  {
+    const h=harness(); await settle(); const pending=deferred();
+    h.elements.modal.open=true; h.elements.modal.innerHTML='<textarea>Refresh draft</textarea>';
+    h.elements['quick-form']={elements:{title:{value:'Keep refresh input'}}};
+    h.overrides['/api/today']=() => pending.promise;
+    const refresh=h.click({action:'refresh'}); await settle();
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/); assert.doesNotMatch(h.elements.app.innerHTML,/data-load-state/);
+    assert.equal(h.elements['refresh-button'].disabled,true); assert.match(h.elements['refresh-status'].textContent,/최신 일정을 확인/);
+    const before=h.requests.length; await h.click({action:'refresh'}); assert.equal(h.requests.length,before);
+    await h.click({action:'calendar'}); assert.match(h.elements.app.innerHTML,/calendar-grid/);
+    pending.resolve(response({...h.today,teams:[{...h.item,title:'Refreshed assignment'}]})); await refresh;
+    await h.click({action:'today'}); assert.match(h.elements.app.innerHTML,/Refreshed assignment/);
+    assert.equal(h.elements.modal.open,true); assert.equal(h.elements.modal.innerHTML,'<textarea>Refresh draft</textarea>');
+    assert.match(h.elements.app.innerHTML,/value="Keep refresh input"/); assert.equal(h.elements['refresh-button'].disabled,false);
+  }
+  // A transient refresh failure keeps the old snapshot and a persistent retry explanation.
+  {
+    const h=harness(); await settle(); h.overrides['/api/today']=() => response({detail:'Temporary unavailable'},503);
+    await h.click({action:'refresh'}); assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.equal(h.elements['refresh-button'].disabled,false); assert.match(h.elements['refresh-status'].textContent,/마지막으로 확인한 일정/);
+    await h.advance(10000); assert.match(h.elements['refresh-status'].textContent,/다시 확인해 주세요/);
+    delete h.overrides['/api/today']; await h.click({action:'refresh'}); assert.equal(h.elements['refresh-status'].textContent,'');
+  }
+  // Authorization failures clear the preserved view immediately, even if the error body stalls.
+  for (const status of [401,403]) {
+    const h=harness(); await settle(); let bodyReads=0;
+    h.elements.modal.open=true; h.elements.modal.innerHTML='Private detail';
+    h.overrides['/api/today']=() => ({status,ok:false,json(){bodyReads++; return new Promise(() => {});}});
+    await h.click({action:'refresh'});
+    assert.equal(bodyReads,0); assert.match(h.elements.app.innerHTML,/school-signin/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/); assert.equal(h.elements.modal.open,false);
+  }
+  // A valid empty response replaces old events; preservation never invents authority for old data.
+  {
+    const h=harness(); await settle();
+    h.overrides['/api/today']=() => response({...h.today,teams:[],personal:[]});
+    h.overrides['/api/calendar']=() => response({items:[]});
+    h.overrides['/api/settings']=() => response({preferences:{disabled_kinds:[]},connection:{state:'verification_failed'}});
+    await h.click({action:'refresh'}); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+  }
+  // Direct event IDs are encoded exactly once and hiding sends only one PATCH.
+  {
+    const h=harness(); await settle(); h.item.id='direct:fixture-digest';
+    const route='/api/events/direct%3Afixture-digest/state';
+    h.overrides[route]=options => {assert.deepEqual(JSON.parse(options.body),{hidden:true}); h.today.teams=[]; return response({...h.item,hidden:true});};
+    h.overrides['/api/calendar']=() => response({items:[]});
+    await h.click({detail:h.item.id,source:'teams'}); await h.click({action:'hide-detail'});
+    assert.equal(writes(h).length,1); assert.equal(writes(h)[0].url,route); assert.equal(writes(h)[0].options.method,'PATCH');
+    assert.match(h.elements.toast.textContent,/숨겼어요/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.equal(h.elements['refresh-button'].disabled,false);
+  }
+  // A truly missing event refreshes the list and explains the issue without retrying the write.
+  {
+    const h=harness(); await settle(); const before=h.requests.filter(r => r.url==='/api/today').length;
+    h.overrides['/api/events/fixture/state']=() => response({detail:'Item not found'},404);
+    await h.click({detail:'fixture',source:'teams'}); await h.click({action:'hide-detail'});
+    assert.equal(writes(h).length,1); assert.equal(h.requests.filter(r => r.url==='/api/today').length,before+1);
+    assert.match(h.elements.toast.textContent,/최신 목록에서 다시 선택/); assert.doesNotMatch(h.elements.toast.textContent,/Item not found|숨겼어요/);
+    assert.equal(h.elements.modal.open,false);
+  }
+  // Hidden events follow the selected calendar year, so future events remain restorable.
+  {
+    const h=harness(); await settle(); await h.click({action:'calendar'});
+    await h.click({action:'next-month'}); await h.click({action:'next-month'});
+    const future={...h.item,id:'future-task',source:'personal',title:'Hidden next year',start_date:'2027-01-02',end_date:'2027-01-02',version:1};
+    h.overrides['/api/hidden?start=2027-01-01&end=2027-12-31']=() => response({items:[future]});
+    h.overrides['/api/tasks/future-task/state']=options => {assert.deepEqual(JSON.parse(options.body),{hidden:false,version:1}); return response({...future,hidden:false});};
+    await h.click({action:'hidden'}); assert.match(h.elements.modal.innerHTML,/숨긴 일정 · 2027년/); assert.match(h.elements.modal.innerHTML,/Hidden next year/);
+    await h.click({restore:'0'}); assert.equal(writes(h).at(-1).url,'/api/tasks/future-task/state');
+    await h.click({action:'today'}); h.overrides['/api/hidden?start=2026-01-01&end=2026-12-31']=() => response({items:[]});
+    await h.click({action:'hidden'}); assert.match(h.elements.modal.innerHTML,/숨긴 일정 · 2026년/);
+  }
+  // A typed permission-pending response on first entry gets bounded read retries and recovers.
+  {
+    const h=harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/today':() => response({detail:'Permission checking',code:'permission_check_pending'},503)
+    }}); await settle(); assert.match(h.elements.app.innerHTML,/Teams 권한 확인을 기다리고/);
+    await h.advance(15000); assert.match(h.elements.app.innerHTML,/Teams 권한 확인을 기다리고/);
+    delete h.overrides['/api/today']; await h.advance(15000);
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/); assert.equal(writes(h).length,0);
+  }
+  // A permission-pending hide keeps the dialog and retries reads, never the user's PATCH.
+  {
+    const h=harness({overrides:{'/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true})}}); await settle();
+    h.overrides['/api/events/fixture/state']=() => response({detail:'Permission checking',code:'permission_check_pending'},503);
+    await h.click({detail:'fixture',source:'teams'}); const dialog=h.elements.modal.innerHTML;
+    await h.click({action:'hide-detail'}); assert.equal(h.elements.modal.innerHTML,dialog); assert.equal(h.elements.modal.open,true);
+    assert.match(h.elements['refresh-status'].textContent,/Teams 접근 권한을 확인/);
+    await h.advance(15000); assert.equal(writes(h).length,1); assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.doesNotMatch(h.elements.toast.textContent,/숨겼어요/);
+  }
+  // Repeated typed pending responses cannot reset the same five-minute retry budget.
+  {
+    const h=harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true}),
+      '/api/today':() => response({code:'permission_check_pending'},503)
+    }}); await settle(); await h.advance(315000);
+    const reads=h.requests.filter(r => r.url==='/api/today').length; assert.ok(reads>1 && reads<=21);
+    const before=h.requests.length; await h.advance(60000); assert.equal(h.requests.length,before); assert.equal(writes(h).length,0);
+  }
+  // A slow write keeps close/sign-out controls usable; signing out cancels its private response.
+  {
+    const pending=deferred(), h=harness({ignoreAbort:new Set(['/api/tasks'])}); await settle();
+    const escapes=['close','logout','disconnect-device','logout-all'].map(action => ({disabled:false,dataset:{action}}));
+    const input={disabled:false,dataset:{}}, submit={disabled:false,dataset:{action:'save'}};
+    h.controls.push(...escapes,input,submit);
+    h.elements.modal.open=true; h.elements.modal.innerHTML='Private pending draft';
+    h.overrides['/api/tasks']=() => pending.promise;
+    const save=h.submit({id:'quick-form',elements:{title:{value:'Pending personal task'}}}); await settle();
+    assert.ok(escapes.every(control => !control.disabled)); assert.equal(input.disabled,true); assert.equal(submit.disabled,true);
+    await h.click({action:'close'}); assert.equal(h.elements.modal.open,false);
+    await h.click({action:'logout'}); await save;
+    assert.match(h.elements.app.innerHTML,/school-signin/); assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    const before=h.requests.length; pending.resolve(response({id:'late-task'},201)); await settle(); await h.advance(90001);
+    assert.equal(h.requests.length,before); assert.equal(writes(h).filter(r => r.url==='/api/tasks').length,1);
+  }
+  console.log('Usability UI: 40 synthetic scenarios passed (state-preserving refresh, permission-pending recovery, fail-closed auth, usable sign-out during writes, encoded hide IDs, selected-year restore and prior sync/race regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);
@@ -347,14 +465,14 @@ function abortable(value, signal) {
   });
 }
 function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new Set()} = {}) {
-  const listeners = {}, requests = [], history = [], timers = new Map();
+  const listeners = {}, requests = [], history = [], controls = [], timers = new Map();
   let timerId = 0, now = 0;
   const epoch = Date.UTC(2026, 10, 7, 0, 0);
   class ClockDate extends Date {
     constructor(...args) {super(...(args.length ? args : [epoch + now]));}
     static now() {return epoch + now;}
   }
-  const elements = Object.fromEntries(['app', 'modal', 'topbar', 'account-name', 'nav-today', 'nav-calendar', 'toast', 'login-error', 'sync-status', 'sync-button'].map(id => {
+  const elements = Object.fromEntries(['app', 'modal', 'topbar', 'account-name', 'nav-today', 'nav-calendar', 'toast', 'login-error', 'sync-status', 'sync-button', 'refresh-status', 'refresh-button'].map(id => {
     let html = '';
     return [id, {textContent: '', hidden: true, dataset: {}, attributes: {},
       get innerHTML() {return html;},
@@ -374,8 +492,8 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
     setTimeout(callback, delay = 0) {const id = ++timerId; timers.set(id, {callback, at: now + Number(delay)}); return id;},
     clearTimeout(id) {timers.delete(id);},
     document: {hidden: false, documentElement: {dataset: {mode: 'school'}},
-      querySelector(selector) {return selector === '[data-action="sync-teams"]' ? elements['sync-button'] : elements[selector.slice(1)] || null;},
-      querySelectorAll() {return [];},
+      querySelector(selector) {return selector === '[data-action="sync-teams"]' ? elements['sync-button'] : selector === '[data-action="refresh"]' ? elements['refresh-button'] : elements[selector.slice(1)] || null;},
+      querySelectorAll(selector) {return selector === '[data-locked]' ? controls.filter(control => control.dataset.locked) : selector === 'button,input,select,textarea' ? controls : [];},
       addEventListener(type, handler) {listeners[type] = handler;}},
     async fetch(url, options = {}) {
       requests.push({url, options});
@@ -397,7 +515,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
   vm.createContext(context);
   vm.runInContext(source('beta-calendar.js'), context);
   vm.runInContext(source('beta.js'), context);
-  return {elements, requests, history, overrides, item, today, context,
+  return {elements, requests, history, controls, overrides, item, today, context,
     click(data) {return listeners.click({preventDefault() {}, target: {closest() {return {dataset: data, disabled: false};}}});},
     submit(form) {return listeners.submit({preventDefault() {}, target: form});},
     visibility(hidden) {context.document.hidden = hidden; return listeners.visibilitychange();},

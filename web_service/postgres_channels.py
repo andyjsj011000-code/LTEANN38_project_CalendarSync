@@ -7,7 +7,7 @@ must still be revalidated by the caller. This is not a complete storage adapter.
 import time
 
 from .postgres_preferences import PostgresPreferences
-from .storage import Missing
+from .storage import Missing, PermissionPending
 
 
 class PostgresChannels(PostgresPreferences):
@@ -39,8 +39,16 @@ class PostgresChannels(PostgresPreferences):
                 WHERE a.user_id=%s AND ch.tenant_id=%s AND ch.id=%s AND a.valid_until>%s
                 FOR UPDATE OF a''', (user_id, tenant_id, channel_id, int(self.clock()))).fetchone()
             # A row lock can wait; a proof that expired during the wait is stale.
-            if allowed is None or allowed[0] <= int(self.clock()):
+            if allowed is None:
+                previous = db.execute('''SELECT a.valid_until FROM web_channel_access a
+                    JOIN web_channels ch ON ch.id=a.channel_id
+                    WHERE a.user_id=%s AND ch.tenant_id=%s AND ch.id=%s FOR UPDATE OF a''',
+                    (user_id, tenant_id, channel_id)).fetchone()
+                if previous is not None and previous[0] <= int(self.clock()):
+                    raise PermissionPending()
                 raise Missing()
+            if allowed[0] <= int(self.clock()):
+                raise PermissionPending()
             db.execute('''INSERT INTO web_channel_preferences(user_id,channel_id,enabled)
                 VALUES(%s,%s,%s) ON CONFLICT(user_id,channel_id)
                 DO UPDATE SET enabled=excluded.enabled''', (user_id, channel_id, int(enabled)))

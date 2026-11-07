@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from .postgres_channels import PostgresChannels
 from .postgres_personal_tasks import PostgresPersonalTasks
 from .schemas import Preferences
-from .storage import Missing
+from .storage import Missing, PermissionPending
 
 
 _EDITABLE_FIELDS = frozenset({'title', 'notes', 'time', 'source_url', 'start_date',
@@ -82,12 +82,23 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
             WHERE a.user_id=%s AND ch.tenant_id=%s AND e.id=%s AND a.valid_until>%s
             FOR UPDATE OF a''', (user_id, tenant_id, event_id, int(self.clock()))).fetchone()
         if proof is None:
+            # An expired proof for this user's own previously accessible item
+            # is a renewal condition, not evidence that the item disappeared.
+            previous = db.execute('''SELECT a.valid_until FROM web_channel_access a
+                JOIN web_events e ON e.channel_id=a.channel_id
+                JOIN web_channels ch ON ch.id=a.channel_id
+                WHERE a.user_id=%s AND ch.tenant_id=%s AND e.id=%s FOR UPDATE OF a''',
+                (user_id, tenant_id, event_id)).fetchone()
+            if previous is not None and previous[0] <= int(self.clock()):
+                raise PermissionPending()
             raise Missing()
         event = db.execute('SELECT channel_id FROM web_events WHERE id=%s FOR UPDATE',
                            (event_id,)).fetchone()
         # Lock waits can outlive the proof. Recheck after acquiring both rows.
-        if event is None or event[0] != proof[0] or proof[1] <= int(self.clock()):
+        if event is None or event[0] != proof[0]:
             raise Missing()
+        if proof[1] <= int(self.clock()):
+            raise PermissionPending()
         return proof[1]
 
     def event_state(self, user_id, tenant_id, event_id, values):
@@ -100,13 +111,15 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
             raise ValueError('At least one state is required')
         assignments = ','.join(key + '=%s' for key in updates)
         with self.connect() as db:
-            self._lock_event_access(db, user_id, tenant_id, event_id)
+            expiry = self._lock_event_access(db, user_id, tenant_id, event_id)
             db.execute('''INSERT INTO web_event_states(user_id,event_id) VALUES(%s,%s)
                 ON CONFLICT(user_id,event_id) DO NOTHING''', (user_id, event_id))
             db.execute(f'''UPDATE web_event_states SET {assignments}
                 WHERE user_id=%s AND event_id=%s''', (*updates.values(), user_id, event_id))
             rows = self._shared_in(db, user_id, tenant_id, event_id)
             if not rows:
+                if expiry <= int(self.clock()):
+                    raise PermissionPending()
                 raise Missing()
             return rows[0]
 
@@ -141,7 +154,7 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
             self._validate_override(fields)
             blob = self.seal(fields)
             if expiry <= int(self.clock()):
-                raise Missing()
+                raise PermissionPending()
             db.execute('''INSERT INTO web_event_states(user_id,event_id,override_blob)
                 VALUES(%s,%s,%s) ON CONFLICT(user_id,event_id)
                 DO UPDATE SET override_blob=excluded.override_blob''',
@@ -196,20 +209,28 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
                 for row in rows if row[1] in accessible]
 
     def resolve_change(self, user_id, tenant_id, change_id, accept):
+        from .storage import Conflict
         if not isinstance(accept, bool):
             raise ValueError('A boolean review decision is required')
         with self.connect() as db:
             self._lock_user(db, user_id, tenant_id)
             initial = db.execute('''SELECT event_id FROM web_changes
-                WHERE id=%s AND user_id=%s AND status='pending' ''', (change_id, user_id)).fetchone()
+                WHERE id=%s AND user_id=%s''', (change_id, user_id)).fetchone()
             if initial is None:
                 raise Missing()
             expiry = self._lock_event_access(db, user_id, tenant_id, initial[0])
-            row = db.execute('''SELECT event_id,payload_blob,source_hash FROM web_changes
-                WHERE id=%s AND user_id=%s AND status='pending' FOR UPDATE''',
+            row = db.execute('''SELECT event_id,payload_blob,source_hash,status FROM web_changes
+                WHERE id=%s AND user_id=%s FOR UPDATE''',
                 (change_id, user_id)).fetchone()
-            if row is None or row[0] != initial[0] or expiry <= int(self.clock()):
+            if row is None or row[0] != initial[0]:
                 raise Missing()
+            if expiry <= int(self.clock()):
+                raise PermissionPending()
+            # Keep the displayed change identity fixed. A newer source or a
+            # decision from another window requires reloading the review list;
+            # it must never silently apply the replacement change instead.
+            if row[3] != 'pending':
+                raise Conflict()
             if accept:
                 fields = self._source_fields(row[1])
                 self._validate_override(fields)
@@ -224,7 +245,7 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
             db.execute('UPDATE web_changes SET status=%s WHERE id=%s AND user_id=%s',
                        ('accepted' if accept else 'kept', change_id, user_id))
             if expiry <= int(self.clock()):
-                raise Missing()
+                raise PermissionPending()
 
     def known_oracle_events(self, user_id, tenant_id, channels):
         """Recovery only: channels must come from a fresh delegated Graph check."""

@@ -19,7 +19,9 @@ def store(tmp_path):
             CREATE TABLE web_reminder_rules(user_id TEXT NOT NULL,item_id TEXT NOT NULL,
                 source TEXT NOT NULL,payload_blob TEXT NOT NULL,PRIMARY KEY(user_id,item_id,source));
             CREATE TABLE web_users(id TEXT PRIMARY KEY,active INTEGER NOT NULL);
-            INSERT INTO web_users VALUES('alice',1),('bob',1);''')
+            CREATE TABLE web_personal_tasks(id TEXT PRIMARY KEY,user_id TEXT NOT NULL);
+            INSERT INTO web_users VALUES('alice',1),('bob',1);
+            INSERT INTO web_personal_tasks VALUES('task','alice');''')
     class Shim:
         def __init__(self, db): self.db = db
         def execute(self, query, values=()):
@@ -46,6 +48,18 @@ def test_preferences_and_rules_are_isolated_and_encrypted(store):
     with sqlite3.connect(path) as db:
         blob = db.execute('SELECT payload_blob FROM web_preferences').fetchone()[0]
     assert '06:30' not in blob
+
+
+def test_personal_rule_write_rechecks_the_owned_task(store):
+    repo, path = store
+    with pytest.raises(Missing):
+        repo.save_rules('bob', 'task', 'personal', {'offsets': [], 'custom_times': []})
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM web_personal_tasks WHERE id='task'")
+    with pytest.raises(Missing):
+        repo.save_rules('alice', 'task', 'personal', {'offsets': [], 'custom_times': []})
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT * FROM web_reminder_rules').fetchall() == []
 
 
 @pytest.mark.parametrize('operation', ['preferences', 'rules', 'save_preferences', 'save_rules'])

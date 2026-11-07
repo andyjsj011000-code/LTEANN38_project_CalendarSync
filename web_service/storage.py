@@ -16,6 +16,11 @@ class Missing(Exception):
     pass
 
 
+class PermissionPending(Missing):
+    """No mutation was committed because a school permission proof needs renewal."""
+    pass
+
+
 class Conflict(Exception):
     pass
 

@@ -205,4 +205,4 @@ class PostgresSync:
             if current[3]<=finished or proof[1]<=finished or now+ttl<=finished:
                 raise Missing()
             db.execute('''UPDATE web_school_sync SET checked_at=%s,state='connected',
-                lease_until=0,lease_token=NULL WHERE user_id=%s''', (finished, user_id))
+                lease_until=0,lease_token=NULL WHERE user_id=%s''', (now, user_id))

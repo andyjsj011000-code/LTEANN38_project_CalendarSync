@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import Settings
 from .identity import MicrosoftIdentity, Unavailable, validate_identity
 from .schemas import ChannelPreference, EventState, Preferences, TaskInput, TaskState, TaskUpdate
-from .storage import Conflict, Database, Missing
+from .storage import Conflict, Database, Missing, PermissionPending
 
 SESSION_COOKIE = "calendarsync_session"
 FLOW_COOKIE = "calendarsync_login"
@@ -40,6 +40,12 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
     @app.exception_handler(Conflict)
     async def conflict(_request, _error):
         return JSONResponse({"detail": "Item changed on another device; reload before editing"}, status_code=409)
+
+    @app.exception_handler(PermissionPending)
+    async def permission_pending(_request, _error):
+        return JSONResponse({"detail": "Teams 접근 권한을 확인하고 있어요. 잠시 후 다시 시도해 주세요.",
+                             "code": "permission_check_pending"}, status_code=503,
+                            headers={"Retry-After": "2"})
 
     def current_session(request: Request):
         session = db.session(request.cookies.get(session_cookie))

@@ -10,7 +10,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from web_service.postgres_events import PostgresEvents
-from web_service.storage import Missing
+from web_service.storage import Conflict, Missing
 
 
 @pytest.fixture
@@ -156,7 +156,7 @@ def test_review_decision_updates_baseline_without_mutating_other_user(events,acc
     assert alice['title']==('Updated' if accept else 'Original')
     assert bob['title']=='Original'
     if accept: assert alice['source_version']=='v2'
-    with pytest.raises(Missing): e.repo.resolve_change('alice','tenant','change-alice',accept)
+    with pytest.raises(Conflict): e.repo.resolve_change('alice','tenant','change-alice',accept)
 
 
 def test_missing_baseline_rolls_back_accepted_override_and_review_status(events):

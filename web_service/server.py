@@ -23,7 +23,7 @@ from .school import SchoolIntegration
 from .school_graph import GraphFailure
 from .school_security import SecurityBoundary
 from .schemas import Input,TaskInput
-from .storage import Missing,digest
+from .storage import Missing,PermissionPending,digest
 from .test_storage import TestDatabase
 
 class ChangeDecision(Input): accept:bool
@@ -111,7 +111,8 @@ class ServerIntegration(SchoolIntegration):
                    prepared['device']['user_id']==user and
                    prepared['device']['tenant_id']==device['tenant_id'] and
                    prepared['valid_until']>self.db.clock())
-        lease=None if reuse else self.db.begin_sync(user,0 if ingest or force else self.settings.access_seconds)
+        lease=None if reuse else self.db.begin_sync(user,0 if ingest or force else self.settings.access_seconds,
+            **({'preserve_access':True} if self.shared_ingestion_enabled else {}))
         progress('lease','reused' if reuse else 'acquired' if lease else 'skipped')
         if not reuse and not lease:
             progress('sync','skipped'); return {'state':'busy'} if ingest else None
@@ -220,6 +221,13 @@ class ServerIntegration(SchoolIntegration):
         result=self.status(session)
         if ingestion is not None: result['ingestion']=ingestion
         return result
+    def require_permission_ready(self,session):
+        if (self.shared_ingestion_enabled and self.db.sync_status(session['user_id'])['state']=='checking'
+                and not self.db.channels(session['user_id'],session['tenant_id'])):
+            # Another request owns verification and the old permission proof
+            # is absent or expired. Do not turn that temporary state into an
+            # empty calendar or a misleading missing-item mutation error.
+            raise PermissionPending()
     def check_request(self,session,request):
         checked=self.db.school_session(request.cookies.get(self.session_cookie),self.settings.idle_seconds)
         if not checked: raise HTTPException(401,'Viewing session expired; device notifications remain linked')
@@ -227,6 +235,7 @@ class ServerIntegration(SchoolIntegration):
         path=request.url.path
         if path in {'/api/channels','/api/today','/api/calendar','/api/hidden','/api/changes'} or path.startswith(('/api/events/','/api/channels/','/api/changes/')):
             self.run_sync(self.db.session_device(session),ingest=False)
+            self.require_permission_ready(session)
     def tick(self):
         owner=secrets.token_hex(16)
         if not self.db.worker_lock(owner): return
@@ -349,6 +358,7 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
         if source=='personal': return db.task(session['user_id'],item_id)
         if source!='teams': raise Missing()
         integration.run_sync(db.session_device(session),False)
+        integration.require_permission_ready(session)
         return next((e for e in db._shared(session['user_id'],session['tenant_id']) if e['id']==item_id),None) or (_ for _ in ()).throw(Missing())
     @app.get('/api/reminders/{source}/{item_id}')
     def reminders(source:str,item_id:str,session=Depends(require)):

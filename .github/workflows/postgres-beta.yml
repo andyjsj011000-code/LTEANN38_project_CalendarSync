@@ -100,10 +100,19 @@ jobs:
             test_postgres_server_integration \
             test_postgres_shared_ingestion_integration \
             test_postgres_retention_integration \
+            test_postgres_change_conflicts_integration \
+            test_postgres_reminder_integrity_integration \
+            test_postgres_permission_expiry_integration \
+            test_permission_readiness_server \
             test_postgres_personal_tasks_integration
           do
-            python -m pytest "tests_web/${module}.py" -q -p no:cacheprovider \
-              --junitxml="test-results/${module}.xml"
+            if [ "$module" = test_permission_readiness_server ]; then
+              python -m pytest "tests_web/${module}.py" -q -p no:cacheprovider -k postgres_server \
+                --junitxml="test-results/${module}.xml"
+            else
+              python -m pytest "tests_web/${module}.py" -q -p no:cacheprovider \
+                --junitxml="test-results/${module}.xml"
+            fi
           done
           python - <<'PY'
           from pathlib import Path
@@ -117,6 +126,10 @@ jobs:
               'test_postgres_server_integration',
               'test_postgres_shared_ingestion_integration',
               'test_postgres_retention_integration',
+              'test_postgres_change_conflicts_integration',
+              'test_postgres_reminder_integrity_integration',
+              'test_postgres_permission_expiry_integration',
+              'test_permission_readiness_server',
               'test_postgres_personal_tasks_integration',
           )
           total = 0
