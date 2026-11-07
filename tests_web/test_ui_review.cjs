@@ -14,7 +14,7 @@ function harness({signedIn=true, overrides={}}={}) {
   const elements=Object.fromEntries(['app','modal','topbar','account-name','nav-today','nav-calendar','toast','login-error'].map(id => [id, {innerHTML:'',textContent:'',hidden:true,classList:{toggle(){}},replaceChildren(){this.innerHTML='';}}]));
   elements.modal.close=function(){this.open=false;}; elements.modal.showModal=function(){this.open=true;};
   const item={id:'sample',source:'teams',title:'Private homework',notes:'Private notes',channel:'Class',start_date:'2026-10-20',end_date:'2026-10-25',time:null,kind:'assignment',completed:false,cancelled:false};
-  const context={window:{},location:{protocol:'https:',search:''},URL,console,Intl,Date,Set,
+  const context={window:{},location:{protocol:'https:',search:''},URL,console,Intl,Date,Set,AbortController,DOMException,
     setTimeout(){return 1;},clearTimeout(){},
     document:{hidden:false,documentElement:{dataset:{mode:'school'}},querySelector(s){return elements[s.slice(1)]||null;},querySelectorAll(){return [];},addEventListener(type,handler){listeners[type]=handler;}},
     async fetch(url,options){

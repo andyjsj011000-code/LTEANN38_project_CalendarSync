@@ -48,6 +48,20 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r requirements-postgres-experimental.txt
 
+      - name: Set up Node for browser controller checks
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Run browser controller and initial loading regression checks
+        run: |
+          set -euo pipefail
+          for module in tests_web/test_*.cjs
+          do
+            node "$module"
+          done
+
       - name: Verify the disposable PostgreSQL 18 server and driver
         env:
           CALENDARSYNC_DISPOSABLE_POSTGRES_DSN: postgresql://calendarsync:test-only-calendarsync@127.0.0.1:5432/calendarsync_test

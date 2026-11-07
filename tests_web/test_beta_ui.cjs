@@ -14,7 +14,7 @@ const requests = [];
 let signedIn = false;
 const item = {id: 'sample', source: 'teams', title: '<img src=x onerror=alert(1)>', notes: '<script>bad()</script>', channel: '예시 공지', start_date: '2026-10-20', end_date: '2026-10-25', time: null, kind: 'assignment', completed: false, cancelled: false};
 const context = {
-  window: {}, location: {protocol: 'http:'}, console, Intl, Date, Set,
+  window: {}, location: {protocol: 'http:'}, console, Intl, Date, Set, AbortController, DOMException,
   setTimeout() {return 1;}, clearTimeout() {},
   document: {querySelector(s) {return elements[s.slice(1)] || null;}, querySelectorAll() {return [];}, addEventListener(type, handler) {listeners[type] = handler;}},
   async fetch(url, options) {
