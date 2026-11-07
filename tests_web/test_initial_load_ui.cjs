@@ -76,6 +76,10 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
   vm.runInContext(source('beta.js'), context);
   return {elements, requests, history, overrides, item, today, context,
     click(data) {return listeners.click({preventDefault() {}, target: {closest() {return {dataset: data, disabled: false};}}});},
+    visibility(hidden) {context.document.hidden = hidden; return listeners.visibilitychange();},
+    activity(type = 'pointerdown') {return listeners[type]({});},
+    // Simulates a suspended/throttled browser where clock time passes before timers run.
+    jump(milliseconds) {now += milliseconds;},
     async advance(milliseconds) {
       const until = now + milliseconds;
       for (let guard = 0; guard < 1000; guard++) {
@@ -234,5 +238,144 @@ const signedOut = h => {
     assert.ok(!h.elements.app.innerHTML.includes('\uC624\uB298\uC740 Teams \uC77C\uC815\uC774 \uC5C6\uC5B4\uC694.'));
     assert.doesNotMatch(h.elements.app.innerHTML, /Teams \uC77C\uC815\s*<span class="count">0/);
   }
-  console.log('Initial-load UI: 13 synthetic scenarios passed (delayed shell, GET/body/overall deadlines, persistent errors, read-only retries, immediate 401/invalid identity, logout/overlap privacy, success and unverified empty-state).');
+  // Ordinary tab switches preserve the selected calendar and unsaved open form.
+  {
+    const h = harness(); await settle(); await h.click({action: 'calendar'}); await h.click({action: 'new'});
+    h.elements.modal.innerHTML += '<input name="fixture-draft" value="Unsaved fixture draft">';
+    const app = h.elements.app.innerHTML, draft = h.elements.modal.innerHTML;
+    const before = h.requests.length, historyStart = h.history.length;
+    for (let count = 0; count < 3; count++) {
+      h.visibility(true); assert.equal(h.elements.topbar.hidden, false);
+      h.visibility(false); await settle();
+    }
+    assert.equal(h.elements.app.innerHTML, app);
+    assert.equal(h.elements.modal.innerHTML, draft); assert.equal(h.elements.modal.open, true);
+    assert.equal(h.requests.filter(r => r.url === '/api/today').length, 1);
+    assert.equal(h.requests.filter(r => r.url.startsWith('/api/calendar?')).length, 2);
+    assert.equal(h.requests.filter(r => r.url === '/api/service').length, 1);
+    assert.equal(h.requests.length, before + 3);
+    assert.ok(h.requests.slice(before).every(r => r.url === '/api/me' && !r.options.method));
+    assert.ok(h.history.slice(historyStart).every(change => !['app', 'modal'].includes(change.id)));
+  }
+  // Returning during an initial permission read neither aborts nor restarts that read.
+  {
+    const pending = deferred();
+    const h = harness({overrides: {'/api/today': () => pending.promise}}); await settle();
+    const read = h.requests.find(r => r.url === '/api/today'); loading(h);
+    h.visibility(true); assert.equal(read.options.signal.aborted, false);
+    h.visibility(false); await settle(); loading(h);
+    assert.equal(read.options.signal.aborted, false);
+    assert.equal(h.requests.filter(r => r.url === '/api/today').length, 1);
+    assert.equal(h.requests.filter(r => r.url === '/api/service').length, 1);
+    pending.resolve(response(h.today)); await settle();
+    assert.ok(h.elements.app.innerHTML.includes('Fixture assignment'));
+    assert.equal(h.requests.filter(r => r.url.startsWith('/api/calendar?')).length, 2);
+  }
+  // Fast repeated returns share one identity check and keep the loaded page usable.
+  {
+    const pending = deferred(), h = harness(); await settle();
+    h.overrides['/api/me'] = () => pending.promise;
+    const before = h.requests.length;
+    for (let count = 0; count < 5; count++) {h.visibility(true); h.visibility(false);}
+    await settle();
+    assert.equal(h.requests.length, before + 1);
+    assert.equal(h.requests.at(-1).url, '/api/me');
+    await h.click({action: 'calendar'});
+    assert.match(h.elements.app.innerHTML, /calendar-card/);
+    pending.resolve(response({id: 'fixture-user', name: 'Fixture student', csrf_token: 'fixture-csrf'})); await settle();
+    assert.match(h.elements.app.innerHTML, /calendar-card/);
+    assert.equal(h.requests.length, before + 1);
+  }
+  // Tab visibility is not user activity: it cannot extend an idle deadline.
+  {
+    const h = harness(); await settle();
+    await h.advance(1700000); h.visibility(true); h.visibility(false); await settle();
+    await h.advance(100001); signedOut(h);
+    const before = h.requests.length;
+    h.visibility(true); h.visibility(false); await settle();
+    assert.equal(h.requests.length, before);
+  }
+  // A throttled hidden timer still expires immediately on return, before any network read.
+  {
+    const h = harness(); await settle();
+    h.visibility(true); h.jump(1800001); const before = h.requests.length;
+    h.visibility(false); await settle(); signedOut(h);
+    assert.equal(h.requests.length, before);
+  }
+  // An overdue pointer/keyboard event cannot reset a deadline before enforcing its lock.
+  for (const type of ['pointerdown', 'keydown', 'touchstart']) {
+    const h = harness(); await settle(); h.jump(1800001); h.activity(type); await settle(); signedOut(h);
+  }
+  // Real input before expiry extends the deadline; its timer still clears private data.
+  {
+    const h = harness(); await settle(); await h.advance(1700000); h.activity();
+    await h.advance(200000); assert.ok(h.elements.app.innerHTML.includes('Fixture assignment'));
+    await h.advance(1600001); signedOut(h);
+  }
+  // Server-revoked sessions are cleared by the lightweight return check.
+  {
+    const h = harness(); await settle();
+    h.overrides['/api/me'] = () => response({detail: 'Fixture session revoked'}, 401);
+    const before = h.requests.length; h.visibility(true); h.visibility(false); await settle(); signedOut(h);
+    assert.equal(h.requests.length, before + 1);
+    assert.equal(h.requests.at(-1).url, '/api/me');
+  }
+  // A changed account or replaced session cannot inherit the prior account's calendar.
+  for (const me of [
+    {id: 'another-user', name: 'Another student', csrf_token: 'fixture-csrf'},
+    {id: 'fixture-user', name: 'Fixture student', csrf_token: 'replaced-session'}
+  ]) {
+    const h = harness(); await settle(); await h.click({action: 'new'});
+    h.overrides['/api/me'] = () => response(me);
+    const before = h.requests.length; h.visibility(true); h.visibility(false); await settle(); signedOut(h);
+    assert.equal(h.elements.modal.open, false); assert.equal(h.elements.modal.innerHTML, '');
+    assert.equal(h.requests.length, before + 1);
+  }
+  // Transient identity-check errors preserve data and the draft, with no hidden reload loop.
+  {
+    const h = harness(); await settle(); await h.click({action: 'new'});
+    const app = h.elements.app.innerHTML, draft = h.elements.modal.innerHTML;
+    h.overrides['/api/me'] = () => response({detail: 'Fixture temporarily unavailable'}, 503);
+    const before = h.requests.length; h.visibility(true); h.visibility(false); await settle();
+    assert.equal(h.elements.app.innerHTML, app); assert.equal(h.elements.modal.innerHTML, draft);
+    assert.equal(h.elements.modal.open, true); assert.equal(h.elements.toast.hidden, false);
+    await h.advance(30000); assert.equal(h.requests.length, before + 1);
+    delete h.overrides['/api/me']; h.visibility(true); h.visibility(false); await settle();
+    assert.equal(h.requests.length, before + 2); assert.equal(h.elements.app.innerHTML, app);
+  }
+  // A stalled return check times out without replacing data and can be retried on a later return.
+  {
+    const pending = deferred(), h = harness(); await settle();
+    const app = h.elements.app.innerHTML;
+    h.overrides['/api/me'] = () => pending.promise;
+    const before = h.requests.length; h.visibility(true); h.visibility(false); await settle();
+    await h.advance(20001);
+    assert.equal(h.requests.at(-1).options.signal.aborted, true);
+    assert.equal(h.elements.app.innerHTML, app); assert.equal(h.elements.topbar.hidden, false);
+    assert.equal(h.requests.length, before + 1);
+    delete h.overrides['/api/me']; h.visibility(true); h.visibility(false); await settle();
+    assert.equal(h.requests.length, before + 2); assert.equal(h.elements.app.innerHTML, app);
+  }
+  // A late return-check success or 401 cannot alter a newer logged-out view.
+  for (const status of [200, 401]) {
+    const pending = deferred(), h = harness({ignoreAbort: new Set(['/api/me'])}); await settle();
+    h.overrides['/api/me'] = () => pending.promise;
+    h.visibility(true); h.visibility(false); await settle();
+    await h.click({action: 'logout'}); await settle(); signedOut(h);
+    const before = h.requests.length, historyStart = h.history.length;
+    pending.resolve(response({id: 'fixture-user', name: 'Late student', csrf_token: 'fixture-csrf'}, status)); await settle(); signedOut(h);
+    assert.equal(h.requests.length, before);
+    assert.ok(h.history.slice(historyStart).every(change => !change.html.includes('Fixture assignment')));
+  }
+  // Visibility while the first identity request is pending does not duplicate bootstrap.
+  {
+    const pending = deferred();
+    const h = harness({overrides: {'/api/me': () => pending.promise}}); await settle();
+    h.visibility(true); h.visibility(false); await settle();
+    assert.equal(h.requests.filter(r => r.url === '/api/service').length, 1);
+    assert.equal(h.requests.filter(r => r.url === '/api/me').length, 1);
+    pending.resolve(response({id: 'fixture-user', name: 'Fixture student', csrf_token: 'fixture-csrf'})); await settle();
+    assert.ok(h.elements.app.innerHTML.includes('Fixture assignment'));
+  }
+  console.log('Initial-load UI: 30 synthetic scenarios passed (bounded initial loads, state-preserving tab returns, deduped session checks, drafts, idle deadlines, session replacement, transient errors and logout races).');
 })().catch(error => {console.error(error); process.exitCode = 1;});

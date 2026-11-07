@@ -33,20 +33,20 @@ function harness({signedIn=true, overrides={}}={}) {
   vm.createContext(context); vm.runInContext(source('beta-calendar.js'),context); vm.runInContext(source('beta.js'),context);
   return {context,listeners,requests,elements,item,
     click: data => listeners.click({target:{closest(){return {dataset:data};}}}),
-    hide(){context.document.hidden=true; listeners.visibilitychange();}};
+    logout(){return listeners.click({target:{closest(){return {dataset:{action:'logout'}};}}});}};
 }
 (async()=>{
-  // A reminder response that arrives after a privacy lock must not reinsert private text.
+  // A reminder response that arrives after logout must not reinsert private text.
   {
     const pending=deferred(); const h=harness({overrides:{'/api/reminders/teams/sample':()=>pending.promise}}); await settle();
-    await h.click({detail:'sample',source:'teams'}); const opening=h.click({action:'reminders'}); await tick(); h.hide();
+    await h.click({detail:'sample',source:'teams'}); const opening=h.click({action:'reminders'}); await tick(); await h.logout();
     pending.resolve(response({offsets:[-60],custom_times:[]})); await opening;
     assert.equal(h.elements.modal.open,false); assert.ok(!h.elements.modal.innerHTML.includes('Private homework'));
     assert.equal(h.elements.topbar.hidden,true);
   }
-  // Late bootstrap identity responses cannot create a new load after the tab was locked.
+  // Late bootstrap identity responses cannot create a new load after logout.
   {
-    const pending=deferred(); const h=harness({overrides:{'/api/me':()=>pending.promise}}); await settle(); h.hide();
+    const pending=deferred(); const h=harness({overrides:{'/api/me':()=>pending.promise}}); await settle(); await h.logout();
     pending.resolve(response({id:'user',name:'Private student',csrf_token:'csrf'})); await settle();
     assert.equal(h.elements.topbar.hidden,true); assert.equal(h.elements['account-name'].textContent,'');
     assert.ok(!h.requests.some(r=>r.url==='/api/today'));
@@ -69,22 +69,22 @@ function harness({signedIn=true, overrides={}}={}) {
     const posted=JSON.parse(h.requests.find(r=>r.url==='/api/reminders/teams/sample' && r.options.method==='PUT').options.body);
     assert.deepEqual(posted.custom_times,rules.custom_times); assert.deepEqual(posted.offsets,[-45,-1440]);
   }
-  // Late POST completions must not start another authenticated load after a privacy lock.
+  // Late POST completions must not start another authenticated load after logout.
   for (const kind of ['sync', 'task']) {
     const pending=deferred(), endpoint=kind==='sync'?'/api/teams/sync':'/api/tasks';
     const h=harness({overrides:{[endpoint]:()=>pending.promise}}); await settle();
     const before=h.requests.filter(r=>r.url==='/api/today').length;
     const operation=kind==='sync' ? h.click({action:'sync-teams'}) : h.listeners.submit({preventDefault(){},target:{id:'quick-form',elements:{title:{value:'Private new task'}}}});
-    await tick(); h.hide(); pending.resolve(response(kind==='sync'?{state:'connected'}:{id:'new'},kind==='sync'?200:201)); await operation;
+    await tick(); await h.logout(); pending.resolve(response(kind==='sync'?{state:'connected'}:{id:'new'},kind==='sync'?200:201)); await operation;
     assert.equal(h.requests.filter(r=>r.url==='/api/today').length,before);
     assert.equal(h.elements.topbar.hidden,true); assert.equal(h.elements['account-name'].textContent,'');
     assert.ok(!h.elements.app.innerHTML.includes('Private')); assert.ok(!h.elements.modal.innerHTML.includes('Private'));
   }
-  // A delayed GET cannot continue its fan-out or render after a lock either.
+  // A delayed GET cannot continue its fan-out or render after logout either.
   {
     const overrides={},h=harness({overrides}); await settle(); const pending=deferred();
     overrides['/api/today']=()=>pending.promise;
-    const loading=h.click({action:'refresh'}); await tick(); h.hide(); const before=h.requests.length;
+    const loading=h.click({action:'refresh'}); await tick(); await h.logout(); const before=h.requests.length;
     pending.resolve(response({date:'2026-10-22',teams:[h.item],personal:[]})); await loading;
     assert.equal(h.requests.length,before); assert.equal(h.elements.topbar.hidden,true);
     assert.ok(!h.elements.app.innerHTML.includes('Private'));
@@ -101,5 +101,5 @@ function harness({signedIn=true, overrides={}}={}) {
     const h=harness(); await settle(); await h.click({action:'filters'});
     assert.ok(!h.elements.modal.innerHTML.includes('name="kind" value="personal"'));
   }
-  console.log('UI review: delayed-response privacy locks, async 401 handling, reminder preservation and expired-session device disconnect passed.');
+  console.log('UI review: delayed-response logout locks, async 401 handling, reminder preservation and expired-session device disconnect passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -2,7 +2,7 @@
 (() => {
   const $ = s => document.querySelector(s);
   const SCHOOL = document.documentElement?.dataset.mode === 'school';
-  let idleTimer, authEpoch = 0;
+  let idleTimer, idleDeadline = 0, authEpoch = 0, resumeCheck = null;
   let activeLoad = null;
   const readRequests = new Set();
   let reminderRules = null, reminderCustomInitial = '';
@@ -66,7 +66,7 @@
     else toast(error.message || '연결하지 못했어요. 실행 창이 열려 있는지 확인해 주세요.', true);
   }
   function clearPrivate() {
-    clearTimeout(idleTimer); authEpoch++;
+    clearTimeout(idleTimer); idleDeadline = 0; resumeCheck = null; authEpoch++;
     activeLoad?.abort(); activeLoad = null;
     for (const controller of readRequests) controller.abort();
     reviewItems = []; reminderRules = null; reminderCustomInitial = ''; S.connection = null;
@@ -378,14 +378,42 @@
     if (!SCHOOL || !value) return '';
     try {const url = new URL(value); if (url.protocol !== 'https:' || url.hostname !== 'teams.microsoft.com' || !url.pathname.startsWith('/l/message/')) return ''; return `<p><a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer">Teams 원문 보기 →</a></p>`;} catch {return '';}
   }
+  function expireIdle() {
+    if (S.me && idleDeadline && Date.now() >= idleDeadline) {
+      clearPrivate(); loginScreen(); return true;
+    }
+    return false;
+  }
   function resetIdle() {
-    if (!SCHOOL) return;
+    if (!SCHOOL || document.hidden || expireIdle()) return;
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {if (S.me) {clearPrivate(); loginScreen();}}, (S.service?.idle_seconds || 1800) * 1000);
+    const delay = (S.service?.idle_seconds || 1800) * 1000;
+    idleDeadline = Date.now() + delay;
+    idleTimer = setTimeout(expireIdle, delay);
+  }
+  async function checkResumedSession() {
+    if (!S.me || resumeCheck) return;
+    const check = {epoch: authEpoch, id: S.me.id, csrf: S.me.csrf_token};
+    resumeCheck = check;
+    try {
+      // Revalidate the session without repeating Teams reads or replacing the UI.
+      const me = await api('/api/me');
+      if (!activeView(check.epoch) || expireIdle()) return;
+      if (me.id !== check.id || me.csrf_token !== check.csrf) {clearPrivate(); loginScreen();}
+    } catch (error) {
+      if (activeView(check.epoch)) {
+        if (error.status === 401) failure(error);
+        else toast('로그인 연결을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.', true);
+      }
+    } finally {
+      if (resumeCheck === check) resumeCheck = null;
+    }
   }
   if (SCHOOL) {
     for (const type of ['pointerdown','keydown','touchstart']) document.addEventListener(type,resetIdle,{passive:true});
-    document.addEventListener('visibilitychange', () => {if (document.hidden) {clearPrivate(); root.innerHTML = '<div class="loading">화면을 다시 열면 계정을 확인해요.</div>';} else {boot(); resetIdle();}});
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && !expireIdle()) checkResumedSession();
+    });
     resetIdle();
   }
   boot();
