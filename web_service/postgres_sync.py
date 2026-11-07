@@ -133,6 +133,18 @@ class PostgresSync:
                     not current[2] or current[3] <= now or current[4] == 'reauth_required' or
                     not proof or proof[0] != lease or proof[1] <= now or proof[2] != 'checking'):
                 raise Missing()
+            if getattr(self, 'shared_ingestion_enabled', False):
+                # Lock the cache before events, matching retention. Re-read the
+                # authoritative shared catalog so an older caller snapshot can
+                # never restore retired events or overwrite a newer analysis.
+                from .postgres_retention import decode_cache_payload
+                latest = []
+                rows = db.execute('''SELECT channel_id,payload_blob FROM web_source_cache
+                    WHERE channel_id=ANY(%s) ORDER BY cache_key FOR UPDATE''',
+                    ([channel['id'] for channel in channels],)).fetchall()
+                for channel_id, blob in rows:
+                    latest.extend(decode_cache_payload(self.unseal(blob), channel_id)['events'])
+                _, events = self._snapshot(channels, latest)
             db.execute('DELETE FROM web_channel_access WHERE user_id=%s', (user_id,))
             for channel in channels:
                 # The conditional upsert guards a cross-tenant first-insert race.

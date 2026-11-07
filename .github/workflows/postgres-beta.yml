@@ -98,6 +98,8 @@ jobs:
             test_postgres_database_integration \
             test_postgres_notification_integration \
             test_postgres_server_integration \
+            test_postgres_shared_ingestion_integration \
+            test_postgres_retention_integration \
             test_postgres_personal_tasks_integration
           do
             python -m pytest "tests_web/${module}.py" -q -p no:cacheprovider \
@@ -113,6 +115,8 @@ jobs:
               'test_postgres_database_integration',
               'test_postgres_notification_integration',
               'test_postgres_server_integration',
+              'test_postgres_shared_ingestion_integration',
+              'test_postgres_retention_integration',
               'test_postgres_personal_tasks_integration',
           )
           total = 0

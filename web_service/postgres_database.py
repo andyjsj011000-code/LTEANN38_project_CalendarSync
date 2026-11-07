@@ -18,9 +18,11 @@ from .postgres_operations import PostgresOperations
 from .postgres_push import PostgresPush
 from .postgres_source_cache import PostgresSourceCache
 from .postgres_sync import PostgresSync
+from .postgres_channel_ingestion import PostgresChannelIngestion
+from .postgres_retention import PostgresRetention
 
 
-class PostgresDatabase(PostgresAuthStore, PostgresDevices, PostgresEvents,
+class PostgresDatabase(PostgresAuthStore, PostgresDevices, PostgresEvents, PostgresChannelIngestion, PostgresRetention,
                        PostgresSourceCache, PostgresSync, PostgresPush, PostgresOperations):
     storage_backend = 'postgresql-experimental'
     # Closed identifiers: no caller-controlled SQL identifiers are interpolated.
@@ -51,10 +53,11 @@ class PostgresDatabase(PostgresAuthStore, PostgresDevices, PostgresEvents,
         'web_worker_lock': 'id,owner,expires_at',
     }
 
-    def __init__(self, connect, data_key, tenant_id, clock=time.time):
+    def __init__(self, connect, data_key, tenant_id, clock=time.time, *, shared_ingestion_enabled=False):
         if not callable(connect) or not isinstance(tenant_id, str) or not tenant_id:
             raise ValueError('An explicit connection factory and school tenant are required')
         self.connect, self.clock, self.tenant_id = connect, clock, tenant_id
+        self.shared_ingestion_enabled = bool(shared_ingestion_enabled)
         self.cipher = Fernet(data_key.encode('ascii'))
         self._audit_key = hashlib.sha256(('school-audit:' + data_key).encode()).digest()
 
@@ -71,6 +74,9 @@ class PostgresDatabase(PostgresAuthStore, PostgresDevices, PostgresEvents,
                     raise ValueError('Unsupported schema version')
                 for table, columns in self._REQUIRED_SCHEMA.items():
                     db.execute(f'SELECT {columns} FROM {table} WHERE 1=0')
+                if self.shared_ingestion_enabled:
+                    db.execute('''SELECT channel_id,tenant_id,team_id,checked_at,lease_token,lease_until
+                        FROM web_channel_ingestion WHERE 1=0''')
                 for table in ('web_users','web_channels'):
                     if db.execute(f'SELECT 1 FROM {table} WHERE tenant_id<>%s LIMIT 1',
                                   (self.tenant_id,)).fetchone():

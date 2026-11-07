@@ -103,6 +103,14 @@ class PostgresOperations:
                        (int(self.clock()) + 300, device_hash))
         return True
 
+    def request_ingestion(self, device_hash):
+        with self.connect() as db:
+            if not self._operational_device(db, device_hash):
+                return False
+            db.execute('UPDATE web_connections SET ingest_at=0,next_sync=0 WHERE id_hash=%s',
+                       (device_hash,))
+        return True
+
     @staticmethod
     def _operation_owner(owner):
         if not isinstance(owner, str) or not owner or len(owner) > 128:
@@ -182,4 +190,7 @@ class PostgresOperations:
             db.execute('DELETE FROM web_auth_flows WHERE expires_at<=%s', (now,))
             db.execute('DELETE FROM web_security_audit WHERE at<%s', (now - 7 * 86400,))
             db.execute('DELETE FROM web_security_limits WHERE bucket<%s', (now // 60 - 2,))
-            db.execute('DELETE FROM web_source_cache WHERE updated_at<%s', (now - 90 * 86400,))
+            if not getattr(self, 'shared_ingestion_enabled', False):
+                db.execute('DELETE FROM web_source_cache WHERE updated_at<%s', (now - 90 * 86400,))
+        if getattr(self, 'shared_ingestion_enabled', False):
+            self.prune_expired_team_events(retention_days=7, batch_size=100)

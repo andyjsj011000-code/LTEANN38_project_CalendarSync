@@ -185,6 +185,8 @@ class DirectSource:
                     raise GraphFailure('verification_failed')
             targeted=list(dict.fromkeys(selected_messages))
         broad=selected_channels is None
+        shared=bool(getattr(db,'shared_ingestion_enabled',False))
+        resolved_channels=0
         report={'channels_total':len(channels) if broad else len(selected_channels),
                 'channels_scanned':0,'messages_seen':0,'messages_analyzed':0,
                 'messages_cached':0,'messages_failed':0,'partial':False}
@@ -219,94 +221,137 @@ class DirectSource:
         for channel in selected:
             # Broad visits already check the deadline before advancing cursor.
             if not broad and expired(): break
-            complete=True
-            known=db.cached_messages(channel['id'])
-            if targeted is not None:
-                messages=[]
-                for message_id in targeted:
-                    expired()
-                    msg=self.graph.message(token,channel,message_id,complete_replies=True,deadline=deadline)
-                    if msg is not None and (not isinstance(msg,dict) or str(msg.get('id',''))!=message_id):
-                        raise GraphFailure('source_unavailable')
-                    messages.append(msg or {'id':message_id,'deletedDateTime':'verified-missing'})
-            else:
-                messages=self.graph.messages(token,channel)
-                returned={str(m.get('id','')) for m in messages}
-                # Missing from a limited list is not proof of deletion. Fetch known sources explicitly.
-                for message_id in list(known)[:5]:
-                    if message_id not in returned:
-                        if expired():
-                            complete=False; break
-                        msg=self.graph.message(token,channel,message_id)
-                        messages.append(msg or {'id':message_id,'deletedDateTime':'verified-missing'})
-            for message in messages:
-                if expired():
-                    complete=False; break
-                report['messages_seen']+=1
-                mid=str(message.get('id',''))
-                if not mid or len(mid)>200: continue
-                key=digest(channel['id']+'|'+mid)
-                version=digest(json.dumps({k:message.get(k) for k in ('body','subject','replies','deletedDateTime','lastModifiedDateTime')},sort_keys=True,ensure_ascii=False))
-                old=known.get(mid)
-                if old and old['version']==version:
-                    db.touch_analysis(key); report['messages_cached']+=1; continue
-                if message.get('deletedDateTime'):
-                    events=[{**e,'cancelled':True,'source_version':version} for e in (old['events'] if old else [])]
-                    db.cache_analysis(key,channel['id'],mid,version,events); continue
-                try:
-                    created=message.get('createdDateTime','')
-                    if created and not old and targeted is None:
-                        created_at=datetime.fromisoformat(created.replace('Z','+00:00'))
-                        if created_at<datetime.fromtimestamp(db.clock(),timezone.utc)-timedelta(days=30): continue
-                    html=(message.get('body') or {}).get('content','')
-                    replies=message.get('replies') or []
-                    as_text=complete_plain if targeted is not None else plain
-                    text='작성일: '+created+'\n제목: '+str(message.get('subject') or '')+'\n본문: '+as_text(html)
-                    for reply in (replies if targeted is not None else replies[:30]):
-                        reply_html=(reply.get('body') or {}).get('content','')
-                        if targeted is not None and self.images and '<img' in reply_html.lower():
-                            # Reply hosted images need their own Graph resource path;
-                            # do not acknowledge a thread while ignoring them.
+            lease=None
+            if shared:
+                lease=db.claim_channel_ingestion(channel,freshness_seconds=300 if broad else 0)
+                if lease is None:
+                    if not broad: raise GraphFailure('source_unavailable')
+                    if db.channel_ingestion_fresh(channel,freshness_seconds=300):
+                        resolved_channels+=1
+                    else:
+                        # Another owner is still collecting. Its eventual result
+                        # can be reused, but this call cannot claim completeness.
+                        report['partial']=True
+                    continue
+            complete=True; channel_failed=False; ended_normally=False
+            try:
+                known=db.cached_messages(channel['id'])
+                if targeted is not None:
+                    messages=[]
+                    for message_id in targeted:
+                        expired()
+                        msg=self.graph.message(token,channel,message_id,complete_replies=True,deadline=deadline)
+                        if msg is not None and (not isinstance(msg,dict) or str(msg.get('id',''))!=message_id):
                             raise GraphFailure('source_unavailable')
-                        text+='\n답글: '+as_text(reply_html)
-                    if targeted is not None and (len(replies)>500 or len(text)>16000):
-                        # AIExtractor has a 16000-character input bound. A complete
-                        # targeted thread must not silently lose its tail there.
-                        raise GraphFailure('source_unavailable')
-                    images=[]
-                    if self.images and '<img' in html:
-                        from html.parser import HTMLParser
-                        class ImageLinks(HTMLParser):
-                            def __init__(self): super().__init__(); self.links=[]
-                            def handle_starttag(self,tag,attrs):
-                                if tag=='img': self.links.append(dict(attrs).get('src',''))
-                        parser=ImageLinks(); parser.feed(html)
-                        for url in parser.links[:3]:
-                            image=self.graph.hosted_image(token,channel,mid,url)
-                            if image: images.append(image)
-                    previous=old['events'] if old else []
-                    extracted=self.extractor.extract(text,images,previous)
-                except (ValueError,httpx.HTTPError):
-                    if not broad: raise
-                    report['messages_failed']+=1; report['partial']=True
-                    continue
-                except GraphFailure as error:
-                    if not broad or error.state!='source_unavailable': raise
-                    report['messages_failed']+=1; report['partial']=True
-                    continue
-                report['messages_analyzed']+=1
-                link='https://teams.microsoft.com/l/message/'+quote(channel['id'],safe='')+'/'+quote(mid,safe='')+'?'+urlencode({'groupId':channel['team_id'],'tenantId':tenant})
-                events=[]
-                for event in extracted:
-                    event_id='direct:'+digest(channel['id']+'|'+mid+'|'+event['key'])
-                    events.append({**event,'id':event_id,'channel_id':channel['id'],'source_url':link,'source_version':version})
-                found={e['id'] for e in events}
-                events.extend({**e,'cancelled':True,'source_version':version} for e in previous if e['id'] not in found)
-                db.cache_analysis(key,channel['id'],mid,version,events)
-            if complete: report['channels_scanned']+=1
+                        messages.append(msg or {'id':message_id,'deletedDateTime':'verified-missing'})
+                else:
+                    messages=self.graph.messages(token,channel)
+                    returned={str(m.get('id','')) for m in messages}
+                    # Missing from a limited list is not proof of deletion. Fetch known sources explicitly.
+                    for message_id in list(known)[:5]:
+                        if message_id not in returned:
+                            if expired():
+                                complete=False; break
+                            msg=self.graph.message(token,channel,message_id)
+                            messages.append(msg or {'id':message_id,'deletedDateTime':'verified-missing'})
+                for message in messages:
+                    if expired():
+                        complete=False; break
+                    report['messages_seen']+=1
+                    mid=str(message.get('id',''))
+                    if not mid or len(mid)>200: continue
+                    key=digest(channel['id']+'|'+mid)
+                    version=digest(json.dumps({k:message.get(k) for k in ('body','subject','replies','deletedDateTime','lastModifiedDateTime')},sort_keys=True,ensure_ascii=False))
+                    old=known.get(mid)
+                    if old and old['version']==version:
+                        touched=db.touch_analysis(key,**({'ingestion_lease':lease} if shared else {}))
+                        if shared and touched is False:
+                            complete=False; report['partial']=True
+                            if not broad: raise GraphFailure('source_unavailable')
+                            break
+                        report['messages_cached']+=1; continue
+                    if message.get('deletedDateTime'):
+                        events=[{**e,'cancelled':True,'source_version':version} for e in (old['events'] if old else [])]
+                        written=db.cache_analysis(key,channel['id'],mid,version,events,**({'ingestion_lease':lease} if shared else {}))
+                        if shared and written is False:
+                            complete=False; report['partial']=True
+                            if not broad: raise GraphFailure('source_unavailable')
+                            break
+                        continue
+                    try:
+                        created=message.get('createdDateTime','')
+                        if created and not old and targeted is None:
+                            created_at=datetime.fromisoformat(created.replace('Z','+00:00'))
+                            if created_at<datetime.fromtimestamp(db.clock(),timezone.utc)-timedelta(days=30): continue
+                        html=(message.get('body') or {}).get('content','')
+                        replies=message.get('replies') or []
+                        as_text=complete_plain if targeted is not None else plain
+                        text='작성일: '+created+'\n제목: '+str(message.get('subject') or '')+'\n본문: '+as_text(html)
+                        for reply in (replies if targeted is not None else replies[:30]):
+                            reply_html=(reply.get('body') or {}).get('content','')
+                            if targeted is not None and self.images and '<img' in reply_html.lower():
+                                # Reply hosted images need their own Graph resource path;
+                                # do not acknowledge a thread while ignoring them.
+                                raise GraphFailure('source_unavailable')
+                            text+='\n답글: '+as_text(reply_html)
+                        if targeted is not None and (len(replies)>500 or len(text)>16000):
+                            # AIExtractor has a 16000-character input bound. A complete
+                            # targeted thread must not silently lose its tail there.
+                            raise GraphFailure('source_unavailable')
+                        images=[]
+                        if self.images and '<img' in html:
+                            from html.parser import HTMLParser
+                            class ImageLinks(HTMLParser):
+                                def __init__(self): super().__init__(); self.links=[]
+                                def handle_starttag(self,tag,attrs):
+                                    if tag=='img': self.links.append(dict(attrs).get('src',''))
+                            parser=ImageLinks(); parser.feed(html)
+                            for url in parser.links[:3]:
+                                image=self.graph.hosted_image(token,channel,mid,url)
+                                if image: images.append(image)
+                        previous=old['events'] if old else []
+                        # Retired event keys are hints for identity reuse only. They
+                        # must not be reintroduced as visible/cancelled events.
+                        prior_context=previous+list(old.get('retired',[])) if old else previous
+                        extracted=self.extractor.extract(text,images,prior_context)
+                    except (ValueError,httpx.HTTPError):
+                        if not broad: raise
+                        channel_failed=True; report['messages_failed']+=1; report['partial']=True
+                        continue
+                    except GraphFailure as error:
+                        if not broad or error.state!='source_unavailable': raise
+                        channel_failed=True; report['messages_failed']+=1; report['partial']=True
+                        continue
+                    report['messages_analyzed']+=1
+                    link='https://teams.microsoft.com/l/message/'+quote(channel['id'],safe='')+'/'+quote(mid,safe='')+'?'+urlencode({'groupId':channel['team_id'],'tenantId':tenant})
+                    events=[]
+                    for event in extracted:
+                        event_id='direct:'+digest(channel['id']+'|'+mid+'|'+event['key'])
+                        events.append({**event,'id':event_id,'channel_id':channel['id'],'source_url':link,'source_version':version})
+                    found={e['id'] for e in events}
+                    events.extend({**e,'cancelled':True,'source_version':version} for e in previous if e['id'] not in found)
+                    written=db.cache_analysis(key,channel['id'],mid,version,events,**({'ingestion_lease':lease} if shared else {}))
+                    if shared and written is False:
+                        complete=False; report['partial']=True
+                        if not broad: raise GraphFailure('source_unavailable')
+                        break
+                ended_normally=True
+            finally:
+                if shared:
+                    if ended_normally and complete and monotonic()>deadline:
+                        complete=False; report['partial']=True
+                    finished=db.finish_channel_ingestion(channel,lease,
+                        # An exact-root job proves only its requested roots. It
+                        # cannot make the entire channel fresh for broad scans.
+                        success=ended_normally and complete and not channel_failed and targeted is None)
+                    if finished is False:
+                        complete=False; report['partial']=True
+                        if not broad and ended_normally: raise GraphFailure('source_unavailable')
+            if complete:
+                report['channels_scanned']+=1; resolved_channels+=1
         if selected_channels is not None:
             expired()
-        elif report['channels_scanned']<report['channels_total'] or monotonic()>deadline:
+        elif resolved_channels<report['channels_total'] or monotonic()>deadline:
             report['partial']=True
         return CollectionResult(db.catalog_events([ch['id'] for ch in channels]),report)
 

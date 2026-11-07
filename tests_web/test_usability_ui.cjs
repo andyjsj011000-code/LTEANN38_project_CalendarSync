@@ -222,7 +222,28 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     assert.match(h.elements.app.innerHTML,/Saved during refresh/);
     assert.ok(h.history.slice(historyStart).filter(change => change.id==='app').every(change => change.html.includes('Saved during refresh')));
   }
-  console.log('Usability UI: 20 synthetic scenarios passed (nonblocking sync, preserved drafts, bounded writes, queued months, busy leases, review IDs, minimal preference writes and save recovery).');
+  // Queued shared ingestion displays the committed catalog without claiming new posts are ready.
+  {
+    const h = harness(); await settle();
+    h.elements.modal.open=true; h.elements.modal.innerHTML='<textarea>Queued collection draft</textarea>';
+    h.elements['quick-form']={elements:{title:{value:'Keep this quick draft'}}};
+    h.overrides['/api/teams/sync']=() => response({state:'connected',ingestion:{state:'queued'}});
+    const before=h.requests.filter(r => r.url === '/api/today').length;
+    await h.click({action:'sync-teams'});
+    assert.equal(h.requests.filter(r => r.url === '/api/today').length,before+1);
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.match(h.elements['sync-status'].textContent,/저장된 일정을 표시/);
+    assert.match(h.elements['sync-status'].textContent,/새 공지는 백그라운드에서 확인 중/);
+    assert.doesNotMatch(h.elements['sync-status'].textContent,/권한과 일정 자료를 확인했어요/);
+    assert.equal(h.elements['sync-button'].disabled,false);
+    assert.equal(h.elements.modal.open,true); assert.equal(h.elements.modal.innerHTML,'<textarea>Queued collection draft</textarea>');
+    assert.match(h.elements.app.innerHTML,/value="Keep this quick draft"/);
+    const requestCount=h.requests.length;
+    await h.advance(60000);
+    assert.equal(h.requests.length,requestCount); assert.equal(writes(h).length,1);
+    assert.match(h.elements['sync-status'].textContent,/백그라운드에서 확인 중/);
+  }
+  console.log('Usability UI: 21 synthetic scenarios passed (nonblocking sync, queued ingestion, preserved drafts, bounded writes, queued months, busy leases, review IDs, minimal preference writes and save recovery).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);

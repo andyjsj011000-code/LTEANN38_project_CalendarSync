@@ -294,6 +294,14 @@ class TestDatabase(SchoolDatabase):
     def mark_ingested(self,device_hash):
         with self.connect() as c: c.execute('UPDATE web_connections SET ingest_at=? WHERE id_hash=?',(int(self.clock())+300,device_hash))
 
+    def request_ingestion(self,device_hash):
+        now=int(self.clock())
+        with self.connect() as c:
+            return bool(c.execute('''UPDATE web_connections SET ingest_at=0,next_sync=?
+                WHERE id_hash=? AND active=1 AND expires_at>? AND state<>'reauth_required'
+                AND EXISTS(SELECT 1 FROM web_users u WHERE u.id=web_connections.user_id AND u.active=1)''',
+                (now,device_hash,now)).rowcount)
+
     def has_pending_change(self,user,event):
         with self.connect() as c: return bool(c.execute("SELECT 1 FROM web_changes WHERE user_id=? AND event_id=? AND status='pending'",(user,event)).fetchone())
 

@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import secrets
 from time import monotonic
-from fastapi import Depends,HTTPException,Request,Response
+from fastapi import BackgroundTasks,Depends,HTTPException,Request,Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse,JSONResponse
 from pydantic import Field,model_validator
@@ -51,6 +51,9 @@ class ServerIntegration(SchoolIntegration):
         self.device_cookie='__Host-calendarsync_device' if settings.secure_cookies else 'calendarsync_device'
     @property
     def push_enabled(self): return self.sender.configured
+    @property
+    def shared_ingestion_enabled(self):
+        return bool(getattr(self.db,'shared_ingestion_enabled',False) and hasattr(self.source,'collect'))
     def begin_login(self,provider,request): return provider.begin(background=request.query_params.get('background')=='1')
     def complete_sign_in(self,raw,user,claims,request):
         old=request.cookies.get(self.device_cookie)
@@ -88,7 +91,7 @@ class ServerIntegration(SchoolIntegration):
         try: device=self.db.session_device(session)
         except Missing: return {**result,'connection_state':'reauth_required','background_enabled':False,'push_configured':self.sender.configured,'push_registered':False}
         return {**result,'mode':'test-server','background_enabled':bool(device['background']),'connection_expires':device['expires_at'],'connection_state':device['state'],'push_configured':self.sender.configured,'push_registered':bool(self.db.subscriptions(device['id_hash'])),'ingestion_mode':'direct' if hasattr(self.source,'collect') else 'oracle'}
-    def run_sync(self,device,ingest=False):
+    def run_sync(self,device,ingest=False,force=False):
         started=monotonic(); logger=logging.getLogger('uvicorn.error')
         def progress(stage,outcome):
             # Only fixed stage/outcome labels and elapsed time leave this method.
@@ -102,10 +105,16 @@ class ServerIntegration(SchoolIntegration):
             progress('failure','recorded' if saved is True else
                      'not_recorded' if saved is False else 'completed')
         progress('sync','started'); progress('lease','started')
-        user=device['user_id']; lease=self.db.begin_sync(user,0 if ingest else self.settings.access_seconds)
+        user=device['user_id']; lease=self.db.begin_sync(user,0 if ingest or force else self.settings.access_seconds)
         progress('lease','acquired' if lease else 'skipped')
         if not lease:
             progress('sync','skipped'); return {'state':'busy'} if ingest else None
+        def fail_current(state):
+            nonlocal lease
+            # Shared collection runs after its first snapshot has committed.
+            # Reacquire our own lease before recording any collection failure.
+            if lease is None: lease=self.db.begin_sync(user,0)
+            return self.db.fail_sync(user,state,lease) if lease else False
         try:
             ingestion=None
             progress('token','started')
@@ -119,6 +128,13 @@ class ServerIntegration(SchoolIntegration):
             progress('source','started')
             if hasattr(self.source,'collect'):
                 if ingest:
+                    if self.shared_ingestion_enabled:
+                        # Publish the authorized cache before potentially slow AI
+                        # work, and let normal permission checks run meanwhile.
+                        cached=self.db.catalog_events([ch['id'] for ch in channels])
+                        self.db.commit_snapshot(device,channels,cached,self.settings.access_seconds,lease)
+                        lease=None
+                        progress('cached_commit','completed')
                     events=self.source.collect(token,channels,device['tenant_id'],self.db,user)
                     report=getattr(events,'report',None)
                     if report is not None:
@@ -132,6 +148,14 @@ class ServerIntegration(SchoolIntegration):
                         ingestion={key:report[key] for key in counts}
                         ingestion.update(partial=report['partial'],
                                          state='partial' if report['partial'] else 'completed')
+                    if self.shared_ingestion_enabled:
+                        # Membership or credentials may have changed during AI
+                        # work. Verify them again and only publish that catalog.
+                        lease=self.db.begin_sync(user,0)
+                        if not lease: return {'state':'busy'}
+                        token,device=acquire_snapshot(self.tokens,device,self.db)
+                        channels=self.graph.channels(token,device['object_id'],device['tenant_id'])
+                        events=self.db.catalog_events([ch['id'] for ch in channels])
                 else: events=self.db.catalog_events([ch['id'] for ch in channels])
             elif isinstance(self.source,OracleSource):
                 known=self.db.known_oracle_events(user,device['tenant_id'],channels)
@@ -149,14 +173,34 @@ class ServerIntegration(SchoolIntegration):
             if ingest: return ingestion
         except GraphFailure as error:
             progress('sync','graph_failure'); progress('failure','started')
-            failure_progress(self.db.fail_sync(user,error.state,lease))
+            failure_progress(fail_current(error.state))
             if error.state in {'reauth_required','account_not_allowed'}: self.db.fail_connection(device['id_hash'])
         except Exception:
             progress('sync','source_unavailable'); progress('failure','started')
-            failure_progress(self.db.fail_sync(user,'source_unavailable',lease)); self.db.audit('sync_failed',user)
+            failure_progress(fail_current('source_unavailable')); self.db.audit('sync_failed',user)
         finally:
             progress('sync','finished')
-    def sync(self,session):
+    def run_deferred_ingestion(self,device):
+        try:
+            self.run_sync(device,ingest=True)
+        except Exception:
+            # A response has already been sent. The durable due-device request
+            # will retry database failures without failing a finished response.
+            try: self.db.audit('worker_failed',device['user_id'])
+            except Exception: pass
+    def sync(self,session,background_tasks=None):
+        if self.shared_ingestion_enabled:
+            device=self.db.session_device(session)
+            self.run_sync(device,force=True)
+            result=self.status(session)
+            if result['state']=='checking': result['ingestion']={'state':'busy'}
+            elif result['state']=='connected' and self.db.request_ingestion(device['id_hash']):
+                # Durable due-device scheduling survives a lost response or
+                # process restart; the response task simply starts it sooner.
+                if background_tasks is not None:
+                    background_tasks.add_task(self.run_deferred_ingestion,device)
+                result['ingestion']={'state':'queued'}
+            return result
         ingestion=self.run_sync(self.db.session_device(session),ingest=True)
         result=self.status(session)
         if ingestion is not None: result['ingestion']=ingestion
@@ -258,9 +302,9 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     @app.get('/privacy')
     def privacy(): return FileResponse(Path(__file__).parent.parent/'docs'/'TEST_SERVER_PRIVACY.md',media_type='text/plain; charset=utf-8')
     @app.post('/api/teams/sync')
-    def sync(session=Depends(require)):
+    def sync(background_tasks:BackgroundTasks,session=Depends(require)):
         if not db.allow('manual-sync:'+session['user_id'],2): raise HTTPException(429,'Wait before syncing again')
-        return integration.sync(session)
+        return integration.sync(session,background_tasks)
     @app.post('/auth/logout-all',status_code=204)
     def logout_all(session=Depends(require)):
         db.revoke_all(session['user_id']); response=Response(status_code=204)

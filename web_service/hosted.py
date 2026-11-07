@@ -24,11 +24,13 @@ class HostedConfig:
     model: str='gpt-4o-mini'
     images: bool=True
     bootstrap_new_schema: bool=False
+    shared_ingestion: bool=False
 
     def describe(self):
         return {'storage_backend':'postgresql-experimental','callback_url':self.settings.callback_url,
                 'auth_configured':self.settings.auth_configured,'ai_configured':bool(self.ai_key),
                 'ingestion_mode':'direct','automatic_schema_changes':self.bootstrap_new_schema,
+                'shared_channel_ingestion':self.shared_ingestion,
                 'connection':self.connection.describe()}
 
 
@@ -59,8 +61,11 @@ def configuration(environ=None):
         raise ValueError('Invalid beta image ingestion setting')
     if env.get('WEB_BOOTSTRAP_NEW_SCHEMA','0') not in {'0','1'}:
         raise ValueError('Invalid beta schema bootstrap setting')
+    if env.get('WEB_SHARED_CHANNEL_INGESTION','0') not in {'0','1'}:
+        raise ValueError('Invalid shared channel ingestion setting')
     return HostedConfig(settings,factory,ai_key,env.get('WEB_LLM_MODEL','gpt-4o-mini'),
-                        env.get('WEB_AI_IMAGES_ENABLED','1')=='1',env.get('WEB_BOOTSTRAP_NEW_SCHEMA','0')=='1')
+                        env.get('WEB_AI_IMAGES_ENABLED','1')=='1',env.get('WEB_BOOTSTRAP_NEW_SCHEMA','0')=='1',
+                        env.get('WEB_SHARED_CHANNEL_INGESTION','0')=='1')
 
 
 def create_hosted_app(environ=None,*,identity=None,graph=None,source=None,sender=None,worker=True):
@@ -75,7 +80,12 @@ def create_hosted_app(environ=None,*,identity=None,graph=None,source=None,sender
     from .server import create_test_server
     graph=graph if graph is not None else TeamsGraph()
     source=source if source is not None else DirectSource(graph,AIExtractor(config.ai_key,config.model),images=config.images)
-    database=PostgresDatabase(config.connection,config.settings.data_key,config.settings.tenant_id)
+    if config.shared_ingestion:
+        # Explicit opt-in installs only the reviewed additive lease table.
+        from .postgres_shared_schema import enable_shared_channel_schema
+        enable_shared_channel_schema(config.connection,config.settings.tenant_id)
+    database=PostgresDatabase(config.connection,config.settings.data_key,config.settings.tenant_id,
+                             shared_ingestion_enabled=config.shared_ingestion)
     return create_test_server(config.settings,database,identity,graph,source,sender,worker=worker)
 
 

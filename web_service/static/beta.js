@@ -406,7 +406,7 @@
       if (!activeView(epoch)) return;
       const report = result.ingestion;
       const incomplete = !!(report?.partial || report?.messages_failed);
-      S.syncMessage = report?.state === 'busy' ? '이미 Teams 공지를 확인하고 있어요. 잠시 후 새로고침으로 결과를 확인해 주세요.' : incomplete ? `최근 공지 중 일부를 확인했어요 (${report.channels_scanned}/${report.channels_total}개 채널).${report.messages_failed ? ' 처리하지 못한 공지가 있어 다음 수집에서 다시 확인해요.' : ' 남은 채널은 다음 수집에서 이어서 확인해요.'}` : connectionText[result.state] || '연결 상태를 확인해 주세요.';
+      S.syncMessage = report?.state === 'busy' ? '이미 Teams 공지를 확인하고 있어요. 잠시 후 새로고침으로 결과를 확인해 주세요.' : report?.state === 'queued' ? '저장된 일정을 표시했어요. 새 공지는 백그라운드에서 확인 중이에요. 잠시 후 새로고침으로 확인해 주세요.' : incomplete ? `최근 공지 중 일부를 확인했어요 (${report.channels_scanned}/${report.channels_total}개 채널).${report.messages_failed ? ' 처리하지 못한 공지가 있어 다음 수집에서 다시 확인해요.' : ' 남은 채널은 다음 수집에서 이어서 확인해요.'}` : connectionText[result.state] || '연결 상태를 확인해 주세요.';
       S.syncUncertain = report?.state === 'busy';
       if (S.syncUncertain) {toast(S.syncMessage); return;}
       ready = true;
