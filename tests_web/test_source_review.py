@@ -82,8 +82,12 @@ def test_source_revision_image_failure_preserves_cache_and_retries(server, failu
     initial = source.collect('token', [channel], TENANT, server.db, 'fake-user')
     old = server.db.cached_messages('class')['m']
     state.update(version='2', failure=failure)
-    with pytest.raises(GraphFailure):
-        source.collect('token', [channel], TENANT, server.db, 'fake-user')
+    if failure=='oversize':
+        partial=source.collect('token', [channel], TENANT, server.db, 'fake-user')
+        assert partial.report['partial'] is True and partial.report['messages_failed']==1
+    else:
+        with pytest.raises(GraphFailure):
+            source.collect('token', [channel], TENANT, server.db, 'fake-user')
     assert extractor.calls == 1
     assert server.db.cached_messages('class')['m'] == old
     assert server.db.catalog_events(['class']) == initial

@@ -132,7 +132,9 @@ class TeamsGraph(DelegatedGraph):
                         data+=chunk
                         if len(data)>3_000_000:
                             _graph_log('hosted_image','response_limit',200)
-                            raise GraphFailure()
+                            # This successful source read exceeded a local
+                            # analysis bound; it does not disprove channel access.
+                            raise GraphFailure('source_unavailable')
                     if not data:
                         _graph_log('hosted_image','empty_response',200)
                         raise GraphFailure()
