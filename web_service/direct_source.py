@@ -365,8 +365,21 @@ class DirectSource:
                             activity=[stamp for item in [message]+(message.get('replies') or [])
                                       for field in ('createdDateTime','lastModifiedDateTime','lastEditedDateTime')
                                       if (stamp:=item.get(field))]
-                            latest=max(datetime.fromisoformat(stamp.replace('Z','+00:00')) for stamp in activity)
-                            if latest<datetime.fromtimestamp(db.clock(),timezone.utc)-timedelta(days=30): continue
+                            cutoff=datetime.fromtimestamp(db.clock(),timezone.utc)-timedelta(days=30)
+                            recent=False; uncertain=False
+                            for stamp in activity:
+                                try:
+                                    changed_at=datetime.fromisoformat(stamp.replace('Z','+00:00'))
+                                    if changed_at.tzinfo is None: raise ValueError('Missing activity timezone')
+                                except (ValueError,TypeError,AttributeError):
+                                    uncertain=True
+                                    continue
+                                if changed_at>=cutoff:
+                                    recent=True
+                                    break
+                            if not recent:
+                                if uncertain: raise GraphFailure('source_unavailable')
+                                continue
                         images=[]
                         for url in image_links:
                             image=self.graph.hosted_image(token,channel,mid,url)

@@ -137,6 +137,40 @@ def test_old_inactive_uncached_root_is_still_skipped():
     assert result.report['partial'] is False
 
 
+@pytest.mark.parametrize('stamp',['v1','1','2','2026-11-06T00:00:00'])
+def test_valid_fresh_creation_suffices_when_optional_activity_metadata_is_invalid(stamp):
+    candidates,cache,extractor=channels(1),SharedCache(),Recorder()
+    root={**message('post'),'createdDateTime':'2026-11-06T00:00:00Z','lastModifiedDateTime':stamp}
+    graph=InputGraph(candidates,root)
+    graph.values[candidates[0]['id']]=[root]
+    result=DirectSource(graph,extractor,images=False).collect('token',candidates,'tenant',cache,'alice')
+    assert len(extractor.calls)==1 and result.report['messages_analyzed']==1
+    assert result.report['messages_failed']==0 and result.report['partial'] is False
+    assert candidates[0]['id'] in cache.fresh_until
+
+
+def test_fresh_reply_suffices_after_invalid_optional_root_metadata():
+    candidates,cache,extractor=channels(1),SharedCache(),Recorder()
+    root={**message('post'),'createdDateTime':'2026-01-01T00:00:00Z','lastModifiedDateTime':'v1',
+          'replies':[{'createdDateTime':'2026-11-06T00:00:00Z','body':{'content':'Recent reply'}}]}
+    graph=InputGraph(candidates,root)
+    graph.values[candidates[0]['id']]=[root]
+    result=DirectSource(graph,extractor,images=False).collect('token',candidates,'tenant',cache,'alice')
+    assert len(extractor.calls)==1 and result.report['partial'] is False
+
+
+@pytest.mark.parametrize('stamp',['v1','2026-11-06T00:00:00'])
+def test_old_valid_activity_with_unknown_optional_activity_remains_partial(stamp):
+    candidates,cache,extractor=channels(1),SharedCache(),Recorder()
+    root={**message('post'),'createdDateTime':'2026-01-01T00:00:00Z','lastModifiedDateTime':stamp}
+    graph=InputGraph(candidates,root)
+    graph.values[candidates[0]['id']]=[root]
+    result=DirectSource(graph,extractor,images=False).collect('token',candidates,'tenant',cache,'alice')
+    assert extractor.calls==[] and cache.writes==[]
+    assert result.report['messages_failed']==1 and result.report['partial'] is True
+    assert cache.fresh_until=={} and cache.leases=={}
+
+
 def incomplete_root(reason):
     root=message('post')
     if reason=='reply_image':
