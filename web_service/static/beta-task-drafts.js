@@ -135,13 +135,13 @@
       },500);
       notify();
     }
-    async function start({context,resumeToken=null}={}) {
+    async function start({context,resumeToken=null,unsaved=false}={}) {
       if(!establish())return snapshot();
       clearTimeout(timer);timer=null;
       const value=draftOf(readDraft());
       if(!hasForm() || !value){form=null;notify();return snapshot();}
       const resumed=resumes.get(resumeToken),adopt=resumed && current(resumed) && metadata?.version===resumed.version;
-      form={serial:++formSerial,context,baseline:adopt ? copy(resumed.draft) : copy(value),desired:copy(value),force:false,ownedVersion:adopt ? resumed.version : null};
+      form={serial:++formSerial,context,baseline:adopt ? copy(resumed.draft) : copy(value),desired:copy(value),force:unsaved===true,ownedVersion:adopt ? resumed.version : null};
       lastError=null;forcedConflict=false;phase=adopt ? 'saved' : 'ready';notify();
       const scope=token(),owner=form;
       await load();if(current(scope)&&form===owner)schedule();return snapshot();
@@ -151,6 +151,11 @@
       if(!establish())return result(false,'signed-out');
       const initialScope=token(),initialForm=form;
       clearTimeout(timer);timer=null;capture();
+      while(writePromise) {
+        await writePromise;
+        if(!current(initialScope)||form!==initialForm)return result(false,'stale');
+      }
+      capture();
       if(lastError){lastError=null;await load({force:true});}
       if(!metadata)await load();
       if(!current(initialScope)||form!==initialForm)return result(false,'stale');

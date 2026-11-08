@@ -1,5 +1,6 @@
 """Verified-channel shared collection, ownership fences and retired-key hints."""
 import json
+import threading
 
 import pytest
 
@@ -60,6 +61,64 @@ class SharedCache(Cache):
 
     def touch_analysis(self,key,*,ingestion_lease=None):
         return ingestion_lease in self.leases.values()
+
+
+def test_same_users_devices_cannot_count_duplicate_cursor_visits_as_completion():
+    candidates=channels(2)
+    second_entered,second_release=threading.Event(),threading.Event()
+    results,failures={},[]
+
+    class InterleavedGraph(Graph):
+        def messages(self,token,channel):
+            if token=='device-b':
+                second_entered.set()
+                if not second_release.wait(5):
+                    raise AssertionError('Second device did not resume')
+            return super().messages(token,channel)
+
+    class InterleavedCache(SharedCache):
+        first_visits=0
+        def next_channels(self,user,candidates,count):
+            if threading.current_thread() is first_thread:
+                self.first_visits+=1
+                if self.first_visits==2:
+                    second.start()
+                    if not second_entered.wait(5):
+                        raise AssertionError('Second device did not claim its channel')
+            return super().next_channels(user,candidates,count)
+
+    first_thread=threading.current_thread()
+    cache,extractor=InterleavedCache(),Extractor()
+    graph=InterleavedGraph({row['id']:[message(row['id'])] for row in candidates})
+    source=DirectSource(graph,extractor,images=False)
+    def other_device():
+        try:
+            results['second']=source.collect('device-b',candidates,'tenant',cache,
+                                            'same-user',on_progress=lambda _:None)
+        except BaseException as error:
+            failures.append(error)
+    second=threading.Thread(target=other_device)
+    try:
+        first=source.collect('device-a',candidates,'tenant',cache,'same-user',
+                             on_progress=lambda _:None)
+        # B still owns the other channel. The first device's cursor has made a
+        # full two-call turn, but only one distinct channel is actually ready.
+        assert cache.visits==[candidates[0]['id'],candidates[1]['id'],candidates[0]['id']]
+        assert first.report['partial'] is True
+        assert first.report['channels_total']==2
+        assert first.report['channels_checked']==1
+        assert first.report['channels_scanned']==1
+        assert cache.fresh_until.keys()=={candidates[0]['id']}
+        assert len(extractor.calls)==1
+    finally:
+        second_release.set()
+        if second.ident is not None: second.join(5)
+    assert not second.is_alive() and not failures
+    assert results['second'].report['partial'] is False
+    assert results['second'].report['channels_checked']==2
+    assert results['second'].report['channels_scanned']==1
+    assert len(extractor.calls)==2
+    assert graph.reads==[row['id'] for row in candidates]
 
 
 @pytest.fixture(autouse=True)

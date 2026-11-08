@@ -55,6 +55,20 @@ await test('defaults load metadata but never save until meaningful input changes
   h.change('Typed');await h.advance(499);assert.equal(h.writes.length,0);assert.equal(h.controller.hasUnsaved(),true);
   await h.advance(1);assert.equal(h.writes.length,1);assert.equal(h.server.draft.fields.title,'Typed');assert.equal(h.controller.getState().phase,'saved');assert.equal(h.controller.hasUnsaved(),false);
 });
+await test('a prefilled new task marked unsaved is persisted without requiring another input event',async()=>{
+  const h=harness();h.form=content('Recovered deleted task');h.form.fields.notes='Keep all copied details';h.form.fields.display_mode='selected';h.form.fields.selected_dates=['2026-11-07'];
+  const copied=copy(h.form);await h.controller.start({context:1,unsaved:true});
+  assert.equal(h.controller.hasUnsaved(),true);await h.advance(499);assert.equal(h.writes.length,0);
+  await h.advance(1);assert.equal(h.writes.length,1);assert.equal(h.writes[0].options.body.version,0);
+  assert.deepEqual(h.server.draft,copied);assert.equal(h.server.draft.task_id,null);assert.equal(h.server.draft.base_version,null);assert.equal(h.controller.hasUnsaved(),false);
+});
+await test('a prefilled unsaved copy preserves another stored draft until explicit replacement',async()=>{
+  const h=harness();h.server.draft=content('Unrelated stored draft');h.server.version=4;h.form=content('Recovered deleted task');
+  await h.controller.start({context:1,unsaved:true});await h.advance(1000);
+  assert.equal(h.controller.getState().phase,'conflict');assert.equal(h.controller.hasUnsaved(),true);assert.equal(h.writes.length,0);
+  assert.equal(h.form.fields.title,'Recovered deleted task');assert.equal(h.server.draft.fields.title,'Unrelated stored draft');
+  assert.equal((await h.controller.replace()).ok,true);assert.equal(h.writes.length,1);assert.equal(h.writes[0].options.body.version,4);assert.equal(h.server.draft.fields.title,'Recovered deleted task');
+});
 await test('typing debounces for 500ms and only the latest fields are saved',async()=>{
   const h=harness();await h.start();h.change('A');await h.advance(400);h.change('AB');await h.advance(499);assert.equal(h.writes.length,0);
   await h.advance(1);assert.equal(h.writes.length,1);assert.equal(h.server.draft.fields.title,'AB');
@@ -83,6 +97,25 @@ await test('overlapping edits are serialized and the second save uses the acknow
   const h=harness(),first=deferred();await h.start();let request;
   h.overrides.PUT=value=>{request=value;delete h.overrides.PUT;return first.promise;};h.change('First');await h.advance(500);h.change('Latest');await h.advance(500);assert.equal(h.writes.length,1);
   first.resolve(h.commit(request));await settle();await h.advance(500);assert.equal(h.writes.length,2);assert.equal(h.maxWrites,1);assert.equal(h.server.draft.fields.title,'Latest');assert.equal(h.writes[1].options.body.version,1);
+});
+await test('flush waits for an in-flight autosave when input returns to its original baseline',async()=>{
+  const h=harness(),put=deferred();h.form=content('Original task');await h.start();let request;
+  h.overrides.PUT=value=>{request=value;delete h.overrides.PUT;return put.promise;};
+  h.change('Intermediate edit');await h.advance(500);h.change('Original task');
+  let finished=false;const flushing=h.controller.flush().then(value=>{finished=true;return value;});await settle();
+  assert.equal(finished,false);assert.equal(h.writes.length,1);
+  put.resolve(h.commit(request));const saved=await flushing;
+  assert.equal(saved.ok,true);assert.equal(saved.clearToken.version,2);assert.equal(h.maxWrites,1);
+  assert.equal(h.server.draft.fields.title,'Original task');assert.equal(h.writes.length,2);
+  assert.equal((await h.controller.clearConfirmed(saved)).cleared,true);assert.equal(h.server.draft,null);
+});
+await test('waiting for an autosave does not authorize a flush after its form is replaced',async()=>{
+  const h=harness(),put=deferred();h.form=content('Original task');await h.start();let request;
+  h.overrides.PUT=value=>{request=value;return put.promise;};
+  h.change('Intermediate edit');await h.advance(500);h.change('Original task');const flushing=h.controller.flush();await settle();
+  h.dialog(2);h.form=content('Replacement form');await h.start();put.resolve(h.commit(request));
+  const result=await flushing;assert.equal(result.ok,false);assert.equal(result.reason,'stale');
+  assert.equal(h.writes.length,1);assert.equal(h.form.fields.title,'Replacement form');
 });
 await test('CAS409 leaves current input, stops automatic writes and requires explicit conflict handling',async()=>{
   const h=harness();await h.start();h.server.draft=content('Other tab');h.server.version=1;h.change('Keep current input');await h.advance(500);

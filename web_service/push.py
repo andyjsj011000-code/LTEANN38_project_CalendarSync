@@ -125,17 +125,22 @@ class Notifications:
                 # task state and reminder changes made since the initial list.
                 try:
                     eligible=bool(self.due(device['user_id'],device['tenant_id'],only_key=key))
+                    # A user can disable this subscription, or refresh its
+                    # browser keys, while the delivery claim is waiting. Read
+                    # its current value after the potentially slow due check.
+                    current_subscription=(next((value for value in self.db.subscriptions(device['id_hash'])
+                        if value['id']==subscription['id']),None) if eligible else None)
                 except Exception:
                     if fenced: self.db.finish_delivery_lease(delivery,lease,False)
                     else: self.db.finish_delivery(delivery,False)
                     raise
-                if not eligible:
+                if not eligible or current_subscription is None:
                     if fenced: self.db.finish_delivery_lease(delivery,lease,False)
                     else: self.db.finish_delivery(delivery,False)
                     continue
                 current=self.db.device(device['id_hash'])
                 if not current or current.get('state')=='reauth_required': return sent
-                try: outcome=self.sender.send(subscription['subscription'],payload)
+                try: outcome=self.sender.send(current_subscription['subscription'],payload)
                 except Exception: outcome='retry'
                 if outcome=='expired':
                     self.db.unsubscribe_subscription(device['id_hash'],subscription['id']); break

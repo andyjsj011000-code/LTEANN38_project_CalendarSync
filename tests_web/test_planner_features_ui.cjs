@@ -40,7 +40,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
     constructor(...args) {super(...(args.length ? args : [epoch + now]));}
     static now() {return epoch + now;}
   }
-  const elements = Object.fromEntries(['app', 'modal', 'topbar', 'account-name', 'nav-today', 'nav-calendar', 'toast', 'login-error', 'sync-status', 'sync-button', 'refresh-status', 'refresh-button', 'mutation-status', 'planner-sync-status', 'task-draft-status', 'task-draft-actions', 'pick-date'].map(id => {
+  const elements = Object.fromEntries(['app', 'modal', 'topbar', 'account-name', 'nav-today', 'nav-calendar', 'toast', 'login-error', 'sync-status', 'sync-button', 'refresh-status', 'refresh-button', 'mutation-status', 'planner-sync-status', 'task-draft-status', 'task-draft-actions', 'task-copy-input', 'pick-date'].map(id => {
     let html = '';
     return [id, {id, textContent: '', hidden: true, dataset: {}, attributes: {}, isConnected:true,
       addEventListener: addListener, removeEventListener(type,fn){listeners[type]=(listeners[type]||[]).filter(x=>x!==fn);},
@@ -271,6 +271,71 @@ test('a newer-tab draft clear conflict preserves the confirmed task and does not
   assert.equal(h.requests.filter(x=>x.url==='/api/task-draft?version=1').length,1);
   assert.equal(h.requests.filter(x=>x.url==='/api/tasks'&&x.options.method==='POST').length,1);
   await h.advance(5000);assert.equal(h.requests.filter(x=>x.url==='/api/task-draft?version=1').length,1);
+});
+
+const draftRecord=(title,task=null)=>({draft:{task_id:task?.id || null,base_version:task?.version ?? null,
+  fields:{title,notes:'Stored notes',start_date:'2026-11-07',end_date:'2026-11-07',time:'',display_mode:'daily',selected_dates:[]}},version:4});
+test('resume preserves input typed while its metadata request is pending',async()=>{
+  const saved=draftRecord('Stored server draft'),h=planner([],{overrides:{'/api/task-draft':()=>response(saved)}});await settle();
+  const form=h.form({title:'',notes:''});await h.click({action:'new'});await settle();
+  let confirmations=0;h.context.confirm=()=>{confirmations++;return true;};
+  const pending=deferred();h.overrides['/api/task-draft']=()=>pending.promise;
+  const opening=h.click({action:'draft-resume'});await settle();await h.input(form.elements.title,'Newer input');
+  const before=h.elements.modal.innerHTML;pending.resolve(response(saved));await opening;
+  assert.equal(h.elements.modal.innerHTML,before);assert.equal(form.elements.title.value,'Newer input');
+  assert.equal(confirmations,0);assert.match(h.elements.toast.textContent,/입력.*유지/);
+});
+test('resume also preserves a form changed and then returned to its original contents',async()=>{
+  const saved=draftRecord('Stored server draft'),h=planner([],{overrides:{'/api/task-draft':()=>response(saved)}});await settle();
+  const form=h.form({title:'',notes:''});await h.click({action:'new'});await settle();
+  const pending=deferred();h.overrides['/api/task-draft']=()=>pending.promise;
+  const opening=h.click({action:'draft-resume'});await settle();
+  await h.input(form.elements.title,'Temporary input');await h.input(form.elements.title,'');
+  const before=h.elements.modal.innerHTML;pending.resolve(response(saved));await opening;
+  assert.equal(h.elements.modal.innerHTML,before);assert.match(h.elements.toast.textContent,/입력.*유지/);
+});
+test('resume preserves input typed while the original task is being checked',async()=>{
+  const task=personalTask('old'),saved=draftRecord('Stored edit draft',task),h=planner([task],{overrides:{'/api/task-draft':()=>response(saved)}});await settle();
+  const form=h.form({title:'',notes:''});await h.click({action:'new'});await settle();
+  const pending=deferred();h.overrides['/api/tasks/old']=()=>pending.promise;
+  const opening=h.click({action:'draft-resume'});await settle();await h.input(form.elements.notes,'Newer notes');
+  const before=h.elements.modal.innerHTML;pending.resolve(response(task));await opening;
+  assert.equal(h.elements.modal.innerHTML,before);assert.equal(form.elements.notes.value,'Newer notes');
+});
+test('resume still opens a confirmed draft when no input changed during the request',async()=>{
+  const saved=draftRecord('Stored server draft'),h=planner([],{overrides:{'/api/task-draft':()=>response(saved)}});await settle();
+  h.form({title:'',notes:''});await h.click({action:'new'});await settle();
+  await h.click({action:'draft-resume'});assert.match(h.elements.modal.innerHTML,/value="Stored server draft"/);
+});
+test('an edit deleted in another tab can keep every input field in a new automatically saved draft',async()=>{
+  const task=personalTask('deleted',{start_date:'2026-11-06',end_date:'2026-11-10',time:'12:34',display_mode:'selected',selected_dates:['2026-11-07','2026-11-09']}),h=planner([task]);await settle();
+  const fields={title:task.title,notes:'Keep notes',start_date:task.start_date,end_date:task.end_date,time:task.time,display_mode:task.display_mode};
+  const form=h.form(fields);await h.click({detail:task.id,source:'personal'});await h.click({action:'edit-detail'});await settle();
+  let persisted=null;
+  h.overrides['/api/task-draft']=options=>{if(!options.method)return response({draft:null,version:0});const body=JSON.parse(options.body);if(body.draft.task_id)return response({detail:'missing'},404);persisted=body.draft;return response({draft:persisted,version:1});};
+  await h.input(form.elements.title,'Keep edited title');await h.advance(500);
+  assert.equal(h.elements['task-copy-input'].hidden,false);assert.match(h.elements['task-draft-status'].textContent,/원래 할 일을 찾을 수 없어요/);
+  await h.click({action:'task-copy-input'});assert.match(h.elements.modal.innerHTML,/개인 할 일 추가/);
+  // Closing immediately must flush the prefilled copy instead of treating it as an untouched default form.
+  await h.click({action:'close'});assert.equal(h.elements.modal.open,false);
+  assert.ok(persisted);assert.equal(persisted.task_id,null);assert.equal(persisted.base_version,null);
+  assert.deepEqual(persisted.fields,{...fields,title:'Keep edited title',selected_dates:task.selected_dates});
+  assert.equal(h.requests.filter(r=>r.url.startsWith('/api/tasks') && ['POST','PUT'].includes(r.options.method)).length,0);
+});
+test('saving a missing edit as a new task preserves a different server draft and never reuses its old ID',async()=>{
+  const task=personalTask('missing'),foreign=draftRecord('A different server draft'),h=planner([task],{overrides:{'/api/task-draft':()=>response(foreign)}});await settle();
+  const form=h.form({title:task.title,notes:'Current notes'});await h.click({detail:task.id,source:'personal'});await h.click({action:'edit-detail'});await settle();
+  h.overrides['/api/tasks/missing']=()=>response({detail:'missing'},404);
+  await h.input(form.elements.title,'Current unsaved edit');await h.submit(form);
+  assert.equal(h.elements['task-copy-input'].hidden,false);
+  await h.click({action:'task-copy-input'});await h.click({action:'close'});
+  assert.equal(h.elements.modal.open,true);assert.equal(form.elements.title.value,'Current unsaved edit');
+  let body=null;h.overrides['/api/tasks']=options=>{body=JSON.parse(options.body);const created=personalTask('new-id',body);h.data.items=[created];return response(created,201);};
+  await h.submit(form);assert.ok(body);assert.equal(body.title,'Current unsaved edit');assert.equal(body.notes,'Current notes');
+  assert.equal(body.version,undefined);assert.equal(body.task_id,undefined);
+  assert.equal(h.requests.filter(r=>r.url==='/api/tasks/missing'&&r.options.method==='PUT').length,1);
+  assert.equal(h.requests.filter(r=>r.url.startsWith('/api/task-draft?')||r.url==='/api/task-draft'&&r.options.method==='PUT').length,0);
+  assert.match(h.elements.app.innerHTML,/Current unsaved edit/);
 });
 
 (async()=>{

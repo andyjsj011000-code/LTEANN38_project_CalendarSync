@@ -253,7 +253,6 @@ class DirectSource:
             targeted=list(dict.fromkeys(selected_messages))
         broad=selected_channels is None
         shared=bool(getattr(db,'shared_ingestion_enabled',False))
-        resolved_channels=0
         report={'channels_total':len(channels) if broad else len(selected_channels),
                 'channels_scanned':0,'messages_seen':0,'messages_analyzed':0,
                 'messages_cached':0,'messages_failed':0,'partial':False}
@@ -277,11 +276,21 @@ class DirectSource:
         # channel must not make the same later channels disappear every round.
         if broad:
             def visits():
+                visited=set()
                 for _ in range(len(channels)):
                     if expired(): break
                     chosen=db.next_channels(user_id,channels,1)
                     if not chosen: break
-                    yield chosen[0]
+                    channel=chosen[0]
+                    # The cursor is shared by this user's devices. Another
+                    # collector can advance it between our visits, so a full
+                    # turn of cursor calls need not cover distinct channels.
+                    if channel['id'] in visited:
+                        remaining=[row for row in channels if row['id'] not in visited]
+                        if not remaining: break
+                        channel=min(remaining,key=lambda row:row['id'])
+                    visited.add(channel['id'])
+                    yield channel
             selected=visits()
         else:
             # The caller supplies a verified channel list and selects only within it.
@@ -300,7 +309,6 @@ class DirectSource:
                 if lease is None:
                     if not broad: raise GraphFailure('source_unavailable')
                     if db.channel_ingestion_fresh(channel,freshness_seconds=300):
-                        resolved_channels+=1
                         checked.add(channel['id'])
                     else:
                         # Another owner is still collecting. Its eventual result
@@ -440,13 +448,13 @@ class DirectSource:
                         if not broad and ended_normally: raise GraphFailure('source_unavailable')
                 emit_progress()
             if complete:
-                report['channels_scanned']+=1; resolved_channels+=1
+                report['channels_scanned']+=1
                 scanned.add(channel['id'])
                 if not channel_failed and targeted is None: checked.add(channel['id'])
             emit_progress()
         if selected_channels is not None:
             expired()
-        elif resolved_channels<report['channels_total'] or monotonic()>deadline:
+        elif len(checked)<report['channels_total'] or monotonic()>deadline:
             report['partial']=True
         emit_progress()
         if on_progress is not None: report={**report,'channels_checked':len(checked)}

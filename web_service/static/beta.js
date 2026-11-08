@@ -19,7 +19,7 @@
   const L = window.BetaListControls;
   let listControls = null, taskDrafts = null, draftUi = null;
   let plannerStatus = null, statusRequest = null, statusReadAt = 0, statusRevision = 0;
-  let trashItems = [], undoTrash = null, draftRestoring = false;
+  let trashItems = [], undoTrash = null, draftRestoring = false, taskMissing = false, taskFormRevision = 0;
   const S = {me: null, view: 'today', day: '', month: '', selected: '', today: null, items: [], upcoming: [], channels: [], prefs: null, busy: false, loading: false, loadError: false, epoch: 0};
   S.listFilters = L?.createState() || {query:'',unfinishedOnly:false};
   const plannerEnabled = () => !!S.service?.planner_enhancements;
@@ -77,14 +77,14 @@
     if ([401, 403].includes(error.status)) {clearPrivate(); loginScreen(); toast(error.status === 403 ? '접근 권한을 확인할 수 없어요. 다시 로그인해 주세요.' : '다시 로그인해 주세요.', true);}
     else {
       const inline = ownerDialog !== null && modal.open && ownerDialog === dialogEpoch;
-      if (inline) mutationStatus(error.message || '요청을 마치지 못했어요. 다시 확인해 주세요.', ownerDialog, true);
+      if (inline) {noteMissingTask(error, ownerDialog); mutationStatus(error.message || '요청을 마치지 못했어요. 다시 확인해 주세요.', ownerDialog, true);}
       if (presentPermissionPending(error) || error.loadPresented) return;
       if (!inline && (ownerDialog === null || !modal.open)) toast(error.message || '연결하지 못했어요. 실행 창이 열려 있는지 확인해 주세요.', true);
     }
   }
   function clearPrivate() {
     taskDrafts?.reset(); draftUi = null; plannerStatus = null; statusRequest?.abort(); statusRequest = null; statusReadAt = 0; statusRevision++;
-    trashItems = []; undoTrash = null; draftRestoring = false;
+    trashItems = []; undoTrash = null; draftRestoring = false; taskMissing = false; taskFormRevision++;
     S.listFilters = L?.createState() || {query:'',unfinishedOnly:false}; listControls?.reset();
     clearTimeout(ingestionTimer); ingestionTimer = null; ingestionAttempts = 0; ingestionDeadline = 0; ingestionRefresh = false; ingestionFinalNeeded = false; lastRenderKey = null;
     S.ready = Object.fromEntries(partNames.map(name => [name,false])); S.partErrors = {};
@@ -328,10 +328,21 @@
   function updateDraftStatus() {
     const status = $('#task-draft-status'), controls = $('#task-draft-actions');
     if (!personalForm() || !status || draftUi?.context !== dialogEpoch) return;
-    status.textContent = draftUi.message ? draftUi.message + ' 서버에 7일 동안 보관돼요.' : '';
-    if (controls) controls.hidden = !draftUi.blocked && !draftUi.available;
+    status.textContent = taskMissing ? '원래 할 일을 찾을 수 없어요. 현재 입력을 새 할 일로 옮겨 저장할 수 있어요.' : draftUi.message ? draftUi.message + ' 서버에 7일 동안 보관돼요.' : '';
+    if (controls) controls.hidden = !taskMissing && !draftUi.blocked && !draftUi.available;
+    const copy = $('#task-copy-input'); if (copy) copy.hidden = !taskMissing;
     const replace = document.querySelector('[data-action="draft-replace"]');
     if (replace) replace.textContent = draftUi.available ? '현재 입력으로 임시저장 바꾸기' : '임시저장 다시 시도';
+  }
+  function noteMissingTask(error, context) {
+    if (error.status === 404 && context === dialogEpoch && personalForm() && detailItem?.id) {taskMissing = true; updateDraftStatus();}
+  }
+  function draftInputChanged() {taskFormRevision++; taskDrafts?.changed();}
+  function copyMissingTask() {
+    const current = readCurrentDraft();
+    if (!taskMissing || !current?.task_id) return;
+    taskForm(null,{fields:current.fields,unsaved:true});
+    toast('현재 입력을 새 할 일로 옮겼어요. 저장 버튼으로 추가할 수 있어요.');
   }
   async function leaveTaskForm() {
     if (!plannerEnabled() || !taskDrafts || !personalForm() || !taskDrafts.hasUnsaved()) return true;
@@ -345,16 +356,21 @@
   async function resumeDraft() {
     if (!plannerEnabled() || !taskDrafts || draftRestoring) return;
     if (personalForm() && taskDrafts.hasUnsaved() && !confirm('현재 입력 대신 서버에 임시저장된 내용을 열까요?')) return;
-    const epoch = authEpoch, dialog = dialogEpoch;
+    const epoch = authEpoch, dialog = dialogEpoch, revision = taskFormRevision, input = JSON.stringify(readCurrentDraft());
     draftRestoring = true;
+    const canApply = saved => {
+      if (!saved || !activeView(epoch) || dialog !== dialogEpoch || !taskDrafts.isCurrentResume(saved.token)) return false;
+      if (revision !== taskFormRevision || input !== JSON.stringify(readCurrentDraft())) {toast('입력이 바뀌어 임시저장을 열지 않았어요. 현재 입력은 유지했어요.'); return false;}
+      return true;
+    };
     try {
       const saved = await taskDrafts.resume();
-      if (!saved || !activeView(epoch) || dialog !== dialogEpoch || !taskDrafts.isCurrentResume(saved.token)) return;
+      if (!canApply(saved)) return;
       let item = null;
       if (saved.draft.task_id) {
         try {item = await api('/api/tasks/'+encodeURIComponent(saved.draft.task_id),{timeout:15000});}
         catch (error) {if (error.status !== 404) throw error;}
-        if (!activeView(epoch) || dialog !== dialogEpoch || !taskDrafts.isCurrentResume(saved.token)) return;
+        if (!canApply(saved)) return;
         if (!item || item.version !== saved.draft.base_version) {
           if (!confirm('원래 할 일이 삭제되었거나 변경되었어요. 임시저장을 새로운 할 일로 열까요?')) return;
           item = null;
@@ -503,13 +519,13 @@
     openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + sourceLink(e.source_url) : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : (testServer() ? '<button class="secondary" data-action="override-detail">나만 수정</button>' : '')}${testServer() ? '<button class="secondary" data-action="reminders">예약 알림</button>' : ''}`, e.source === 'teams');
   }
   function taskForm(e = null, draft = null) {
-    detailItem = e;
+    detailItem = e; taskMissing = false; taskFormRevision++;
     const day = S.view === 'calendar' ? S.selected : S.day;
     const val = {...(e || {title: '', notes: '', start_date: day, end_date: day, time: '', display_mode: 'daily', selected_dates: []}),...(draft?.fields || {})};
     const personalFields = e?.source === 'teams' ? '' : `<label class="field"><span class="field-label">오늘 할 일에 표시할 날짜</span><select name="display_mode"><option value="daily" ${val.display_mode === 'daily' ? 'selected' : ''}>기간 중 매일</option><option value="selected" ${val.display_mode === 'selected' ? 'selected' : ''}>선택한 날짜 + 마지막 날</option><option value="final" ${val.display_mode === 'final' ? 'selected' : ''}>마지막 날만</option></select></label><div id="selected-date-field" ${val.display_mode === 'selected' ? '' : 'hidden'}><div class="date-picker-row"><input type="date" id="pick-date" aria-label="표시할 날짜"><button type="button" class="secondary small" data-action="pick-date">날짜 추가</button></div><div class="date-chips" id="date-chips"></div><p class="fine muted">마지막 날에는 항상 표시됩니다.</p></div>`;
-    openDialog(e?.source === 'teams' ? '내 일정만 수정' : e ? '개인 할 일 수정' : '개인 할 일 추가', `<form id="task-form"><label class="field"><span class="field-label">무엇을 할까요?</span><input name="title" required maxlength="500" placeholder="예: 1주치 숙제하기, 개발 완료하기" value="${esc(val.title)}"></label><div class="form-two"><label class="field"><span class="field-label">시작 날짜</span><input name="start_date" type="date" required value="${esc(val.start_date)}"></label><label class="field"><span class="field-label">마지막 날짜</span><input name="end_date" type="date" required value="${esc(val.end_date)}"></label></div><label class="field"><span class="field-label">마감 시간 (선택)</span><input name="time" type="time" value="${esc(val.time || '')}"></label>${personalFields}<label class="field"><span class="field-label">메모 (선택)</span><textarea name="notes" rows="4" maxlength="10000">${esc(val.notes)}</textarea></label><p class="fine muted">캘린더에는 기간 전체가 이어져 표시돼요. 지난 미완료 항목은 다음 날로 옮겨지지 않아요.</p>${plannerEnabled() && e?.source !== 'teams' ? '<p id="task-draft-status" class="fine muted" role="status" aria-live="polite"></p><div id="task-draft-actions" class="button-row" hidden><button type="button" class="secondary small" data-action="draft-resume">임시저장 이어 쓰기</button><button type="button" class="secondary small" data-action="draft-replace">현재 입력으로 임시저장 바꾸기</button><button type="button" class="text-button" data-action="draft-discard">서버 임시저장 지우기</button></div>' : ''}<p class="error-message" id="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">저장</button></div></form>`, '', e?.source === 'teams');
+    openDialog(e?.source === 'teams' ? '내 일정만 수정' : e ? '개인 할 일 수정' : '개인 할 일 추가', `<form id="task-form"><label class="field"><span class="field-label">무엇을 할까요?</span><input name="title" required maxlength="500" placeholder="예: 1주치 숙제하기, 개발 완료하기" value="${esc(val.title)}"></label><div class="form-two"><label class="field"><span class="field-label">시작 날짜</span><input name="start_date" type="date" required value="${esc(val.start_date)}"></label><label class="field"><span class="field-label">마지막 날짜</span><input name="end_date" type="date" required value="${esc(val.end_date)}"></label></div><label class="field"><span class="field-label">마감 시간 (선택)</span><input name="time" type="time" value="${esc(val.time || '')}"></label>${personalFields}<label class="field"><span class="field-label">메모 (선택)</span><textarea name="notes" rows="4" maxlength="10000">${esc(val.notes)}</textarea></label><p class="fine muted">캘린더에는 기간 전체가 이어져 표시돼요. 지난 미완료 항목은 다음 날로 옮겨지지 않아요.</p>${plannerEnabled() && e?.source !== 'teams' ? '<p id="task-draft-status" class="fine muted" role="status" aria-live="polite"></p><div id="task-draft-actions" class="button-row" hidden><button type="button" class="secondary small" data-action="draft-resume">임시저장 이어 쓰기</button><button type="button" class="secondary small" data-action="draft-replace">현재 입력으로 임시저장 바꾸기</button><button type="button" class="text-button" data-action="draft-discard">서버 임시저장 지우기</button><button type="button" id="task-copy-input" class="secondary small" data-action="task-copy-input" hidden>현재 입력을 새 할 일로 열기</button></div>' : ''}<p class="error-message" id="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">저장</button></div></form>`, '', e?.source === 'teams');
     selectedDates = new Set(val.selected_dates || []); syncDates();
-    if (plannerEnabled() && e?.source !== 'teams') taskDrafts?.start({context:dialogEpoch,resumeToken:draft?.resumeToken || null});
+    if (plannerEnabled() && e?.source !== 'teams') taskDrafts?.start({context:dialogEpoch,resumeToken:draft?.resumeToken || null,unsaved:draft?.unsaved === true});
   }
   let selectedDates = new Set();
   function syncDates() {
@@ -645,12 +661,13 @@
       if (plannerEnabled() && action === 'undo-trash') return await restoreTrash(undoTrash?.id);
       if (plannerEnabled() && action === 'sync-details') return await refreshPlannerStatus({force:true});
       if (plannerEnabled() && action === 'draft-resume') return await resumeDraft();
+      if (plannerEnabled() && action === 'task-copy-input') return copyMissingTask();
       if (plannerEnabled() && action === 'draft-replace') {const result = await taskDrafts?.replace(); if (result?.ok) toast('현재 내용을 임시저장했어요.'); return;}
       if (plannerEnabled() && action === 'draft-discard') {if (confirm('서버의 임시저장을 지울까요? 현재 입력은 유지돼요.')) {const result = await taskDrafts?.discard(); if (result?.ok) toast('서버의 임시저장을 지웠어요.');} return;}
       if (button.dataset.changeDecision !== undefined) {const item = reviewDialogItems.get(button.dataset.changeId); if (!item) return; return mutate(() => api('/api/changes/'+encodeURIComponent(item.id),{method:'POST',body:{accept:button.dataset.changeDecision==='accept'}}),'변경사항을 처리했어요.');}
       if (button.dataset.detail) {const e = find(button.dataset.detail, button.dataset.source); if (e) detail(e); return;}
       if (button.dataset.day) {S.selected = button.dataset.day; render(); return;}
-      if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); taskDrafts?.changed(); return;}
+      if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); draftInputChanged(); return;}
       if (button.dataset.restore !== undefined) {const e = hiddenItems[Number(button.dataset.restore)]; return mutateState(e, {hidden: false}, '일정을 복원했어요.');}
       if (action === 'close') {closeDialog(); return;}
       if (action === 'today' || action === 'calendar') {S.view = action; if (S.me) render(); return;}
@@ -678,7 +695,7 @@
         return;
       }
       if (action === 'confirm-delete') {const item = {...detailItem}; return mutate(() => plannerEnabled() ? api(`/api/tasks/${encodeURIComponent(item.id)}/trash`,{method:'POST',body:{version:item.version}}) : api(`/api/tasks/${encodeURIComponent(item.id)}?version=${item.version}`,{method:'DELETE'}), plannerEnabled() ? '삭제했어요. 삭제 취소나 삭제한 할 일에서 복구할 수 있어요.' : '삭제했어요.', false, result => {if (plannerEnabled()) undoTrash = result; applyConfirmedDelete(item);}, '삭제하는 중…');}
-      if (action === 'pick-date') {const d = $('#pick-date'); if (d.value && d.checkValidity()) {selectedDates.add(d.value); syncDates(); taskDrafts?.changed();} else d.reportValidity(); return;}
+      if (action === 'pick-date') {const d = $('#pick-date'); if (d.value && d.checkValidity()) {selectedDates.add(d.value); syncDates(); draftInputChanged();} else d.reportValidity(); return;}
       if (['prev-month', 'next-month', 'this-month'].includes(action)) return await changeMonth(action);
       if (action === 'logout' || action === 'disconnect-device') {await api('/auth/logout', {method: 'POST'}); clearPrivate(); loginScreen(); if (action === 'disconnect-device') toast('이 기기의 연동과 알림을 해제했어요.'); if (testServer()) await detachBrowserPush();}
     } catch (error) {if (sessionEpoch === authEpoch) failure(error, ownerDialog);}
@@ -690,9 +707,9 @@
       const e = find(el.dataset.complete, el.dataset.source); if (!e) return; const checked = el.checked; el.checked = e.completed;
       return mutateState(e, {completed: checked}, checked ? '완료했어요.' : '완료 표시를 해제했어요.');
     }
-    if (el.closest('#task-form')) {if (['start_date','end_date','display_mode'].includes(el.name)) syncDates(); taskDrafts?.changed();}
+    if (el.closest('#task-form')) {if (['start_date','end_date','display_mode'].includes(el.name)) syncDates(); draftInputChanged();}
   });
-  document.addEventListener('input', event => {if (plannerEnabled() && event.target.closest?.('#task-form')) taskDrafts?.changed();});
+  document.addEventListener('input', event => {if (plannerEnabled() && event.target.closest?.('#task-form')) draftInputChanged();});
   document.addEventListener('submit', async event => {
     event.preventDefault(); const form = event.target;
     if (S.busy) return;
@@ -881,7 +898,7 @@
     }
   }
   if (L) listControls = L.bind(root,{getState:()=>S.listFilters,onChange:next=>{S.listFilters=next;render();},enabled:()=>!!S.me && plannerEnabled(),onCompositionEnd:()=>render()});
-  if (window.BetaTaskDrafts) taskDrafts = window.BetaTaskDrafts.create({api:(path,options)=>api(path,{timeout:15000,...options}),getIdentity:()=>S.me ? {id:S.me.id,epoch:authEpoch} : null,canPersist:()=>plannerEnabled() && !!S.me && !document.hidden && !autoReadsPaused && !resumeCheck,readDraft:readCurrentDraft,hasForm:personalForm,isDialogCurrent:context=>context===dialogEpoch,onStateChange:state=>{const available=!!draftUi?.available;draftUi=state;updateDraftStatus();if (available!==!!state.available && S.me && S.today) render();},onError:(error,{context})=>{if ([401,403].includes(error.status)) failure(error);else if (context===dialogEpoch) updateDraftStatus();}});
+  if (window.BetaTaskDrafts) taskDrafts = window.BetaTaskDrafts.create({api:(path,options)=>api(path,{timeout:15000,...options}),getIdentity:()=>S.me ? {id:S.me.id,epoch:authEpoch} : null,canPersist:()=>plannerEnabled() && !!S.me && !document.hidden && !autoReadsPaused && !resumeCheck,readDraft:readCurrentDraft,hasForm:personalForm,isDialogCurrent:context=>context===dialogEpoch,onStateChange:state=>{const available=!!draftUi?.available;draftUi=state;updateDraftStatus();if (available!==!!state.available && S.me && S.today) render();},onError:(error,{context})=>{if ([401,403].includes(error.status)) failure(error);else if (context===dialogEpoch) {noteMissingTask(error,context); updateDraftStatus();}}});
   window.addEventListener?.('beforeunload',event=>{if (S.me && plannerEnabled() && taskDrafts?.hasUnsaved()) {event.preventDefault();event.returnValue='';}});
   if (SCHOOL) {
     for (const type of ['pointerdown','keydown','touchstart']) document.addEventListener(type,resetIdle,{passive:true});
