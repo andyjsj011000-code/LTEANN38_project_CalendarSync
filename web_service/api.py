@@ -44,7 +44,10 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
     @app.exception_handler(PermissionPending)
     async def permission_pending(_request, _error):
         return JSONResponse({"detail": "Teams 접근 권한을 확인하고 있어요. 잠시 후 다시 시도해 주세요.",
-                             "code": "permission_check_pending"}, status_code=503,
+                             "code": "permission_check_pending",
+                             "connection_state": _error.connection_state,
+                             "retryable": _error.retryable,
+                             "teams_access_unverified": True}, status_code=503,
                             headers={"Retry-After": "2"})
 
     def current_session(request: Request):
@@ -63,6 +66,11 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
         return session
 
     app.state.require_session = current_session
+
+    def teams_read(session, operation):
+        if integration and hasattr(integration, "read_teams"):
+            return integration.read_teams(session, operation)
+        return operation()
 
     def cookie(response, name, value, max_age):
         response.set_cookie(name, value, httponly=True, secure=settings.secure_cookies, samesite="lax", max_age=max_age, path="/")
@@ -164,7 +172,7 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
 
     @app.get("/api/channels")
     def channels(session=Depends(current_session)):
-        return db.channels(session["user_id"], session["tenant_id"])
+        return teams_read(session, lambda: db.channels(session["user_id"], session["tenant_id"]))
 
     @app.put("/api/channels/{channel_id}/preference")
     def channel_preference(channel_id: str, body: ChannelPreference, session=Depends(current_session)):
@@ -214,17 +222,17 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
     @app.get("/api/calendar")
     def calendar(start: date, end: date, session=Depends(current_session)):
         lo, hi = window(start, end)
-        return {"start": lo, "end": hi, "items": db.calendar(session["user_id"], session["tenant_id"], lo, hi)}
+        return teams_read(session, lambda: {"start": lo, "end": hi, "items": db.calendar(session["user_id"], session["tenant_id"], lo, hi)})
 
     @app.get("/api/hidden")
     def hidden(start: date, end: date, session=Depends(current_session)):
         lo, hi = window(start, end)
-        return {"items": db.calendar(session["user_id"], session["tenant_id"], lo, hi, hidden_only=True)}
+        return teams_read(session, lambda: {"items": db.calendar(session["user_id"], session["tenant_id"], lo, hi, hidden_only=True)})
 
     @app.get("/api/today")
     def today(day: date | None = None, session=Depends(current_session)):
         selected = day or datetime.fromtimestamp(db.clock(), KST).date()
-        return db.agenda(session["user_id"], session["tenant_id"], selected.isoformat())
+        return teams_read(session, lambda: db.agenda(session["user_id"], session["tenant_id"], selected.isoformat()))
 
     @app.get("/api/personal/today")
     def personal_today(day: date | None = None, session=Depends(current_session)):

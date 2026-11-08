@@ -7,7 +7,7 @@
   let mutationSettled = Promise.resolve(), mutationRevision = 0;
   let dialogEpoch = 0, dialogRequestId = 0, lastRenderKey = null, dialogContainsTeams = false;
   let ingestionTimer = null, ingestionAttempts = 0, ingestionDeadline = 0, ingestionRefresh = false, ingestionFinalNeeded = false;
-  let checkingTimer = null, checkingAttempts = 0, checkingDeadline = 0, checkingRefresh = false;
+  let checkingTimer = null, checkingAttempts = 0, checkingDeadline = 0, checkingRefresh = false, teamsAccessRevision = 0;
   const readRequests = new Set();
   let reminderRules = null, reminderCustomInitial = '';
   const activeView = epoch => epoch === authEpoch && !!S.me;
@@ -62,7 +62,7 @@
       const value = await response.json().catch(error => {if (controller?.signal.aborted) throw abortError(); invalidJson = true; return {};});
       if (!response.ok) {
         const message = response.status === 409 ? '다른 화면에서 변경되었어요. 새로고침한 뒤 다시 시도해 주세요.' : response.status === 404 ? '일정이 변경되었거나 접근 권한을 다시 확인해야 해요. 최신 목록에서 다시 선택해 주세요.' : typeof value.detail === 'string' ? value.detail : '입력 내용과 날짜를 확인해 주세요.';
-        const error = new Error(message); error.status = response.status; error.code = value.code; throw error;
+        const error = new Error(message); error.status = response.status; error.code = value.code; error.teamsAccessUnverified = value.teams_access_unverified === true; if (typeof value.retryable === 'boolean') error.retryable = value.retryable; if (typeof value.connection_state === 'string') error.connectionState = value.connection_state; throw error;
       }
       if (invalidJson) throw new Error(read ? '서버 응답을 확인하지 못했어요. 잠시 후 다시 연결해 주세요.' : '처리 결과를 확인하지 못했어요. 다시 저장하기 전에 새로고침으로 결과를 확인해 주세요.');
       return value;
@@ -94,7 +94,7 @@
     activeLoad?.abort(); activeLoad = null;
     monthRequest?.abort(); monthRequest = null; monthEpoch++;
     S.pendingMonth = ''; S.syncing = false; S.syncUncertain = false; S.syncMessage = ''; S.quickDraft = ''; reviewDialogItems.clear();
-    S.refreshing = false; S.refreshError = ''; S.permissionPending = false;
+    S.refreshing = false; S.refreshError = ''; S.permissionPending = false; S.teamsUnverified = false; S.permissionMonth = ''; S.permissionMonthSelected = ''; teamsAccessRevision++;
     for (const controller of readRequests) controller.abort();
     reviewItems = []; reminderRules = null; reminderCustomInitial = ''; S.connection = null;
     S.epoch++; S.me = null; S.items = []; S.upcoming = []; S.today = null; S.channels = []; S.prefs = null; S.busy = false; S.loading = false; S.loadError = false;
@@ -112,7 +112,7 @@
     const pending = !!S.permissionPending, failed = error && !pending;
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
     $('#nav-today').classList.toggle('active', S.view === 'today'); $('#nav-calendar').classList.toggle('active', S.view === 'calendar');
-    root.innerHTML = `<section data-load-state="${pending ? 'checking' : failed ? 'error' : 'loading'}" aria-busy="${!failed}"><div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${S.view === 'calendar' ? '캘린더' : '오늘 할 일'}</h1><p class="muted">${failed ? '로그인한 계정의 일정을 다시 불러와 주세요.' : '로그인을 확인했어요. 일정 정보를 불러오고 있어요.'}</p></div><div class="actions"><button class="${failed ? 'primary' : 'secondary'}" data-action="refresh" ${failed || pending ? '' : 'disabled'}>${pending ? '다시 확인' : failed ? '다시 불러오기' : '불러오는 중'}</button></div></div><section class="card" role="${failed ? 'alert' : 'status'}" aria-live="polite"><div class="card-head"><h2>${pending ? 'Teams 권한 확인을 기다리고 있어요' : failed ? '일정을 아직 불러오지 못했어요' : '일정을 확인하고 있어요'}</h2></div><div class="empty">${pending ? '접근 권한을 확인하면 Teams 일정이 자동으로 표시돼요.' : failed ? '서버 응답이 늦거나 연결이 불안정할 수 있어요. 잠시 후 다시 불러와 주세요.' : '학교 일정의 접근 권한을 확인하는 데 시간이 걸릴 수 있어요. 완료되면 자동으로 표시해요.'}</div></section><div class="today-layout"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정</h2></div><div class="empty">${failed ? '일정을 불러온 뒤 확인할 수 있어요.' : 'Teams 일정을 불러오는 중이에요.'}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일</h2></div><div class="empty">${failed ? '할 일을 불러온 뒤 추가하거나 수정할 수 있어요.' : '개인 할 일을 불러오는 중이에요.'}</div></section></div></section>`;
+    root.innerHTML = `<section data-load-state="${pending ? 'checking' : failed ? 'error' : 'loading'}" aria-busy="${!failed}"><div class="intro"><div><p class="eyebrow">나의 학교생활 플래너</p><h1>${S.view === 'calendar' ? '캘린더' : '오늘 할 일'}</h1><p class="muted">${failed ? '로그인한 계정의 일정을 다시 불러와 주세요.' : '로그인을 확인했어요. 일정 정보를 불러오고 있어요.'}</p></div><div class="actions"><button class="${failed ? 'primary' : 'secondary'}" data-action="refresh" ${failed || pending ? '' : 'disabled'}>${pending ? '다시 확인' : failed ? '다시 불러오기' : '불러오는 중'}</button></div></div><section class="card" role="${failed ? 'alert' : 'status'}" aria-live="polite"><div class="card-head"><h2>${pending ? 'Teams 권한 확인을 기다리고 있어요' : failed ? '일정을 아직 불러오지 못했어요' : '일정을 확인하고 있어요'}</h2></div><div class="empty">${pending ? '접근 권한을 확인하면 Teams 일정이 자동으로 표시돼요.' : failed ? '서버 응답이 늦거나 연결이 불안정할 수 있어요. 잠시 후 다시 불러와 주세요.' : '학교 일정의 접근 권한을 확인하는 데 시간이 걸릴 수 있어요. 완료되면 자동으로 표시해요.'}</div></section><div class="today-layout"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정</h2></div><div class="empty">${failed ? '일정을 불러온 뒤 확인할 수 있어요.' : 'Teams 일정을 불러오는 중이에요.'}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일</h2></div><div class="empty">${failed ? '할 일을 불러온 뒤 추가하거나 수정할 수 있어요.' : '개인 할 일을 불러오는 중이에요.'}</div></section></div></section>` + connectionNotice();
   }
   async function ensureCollectionReady() {
     if (!S.syncUncertain) return;
@@ -121,18 +121,34 @@
     if (settings.connection?.state === 'checking') throw new Error('Teams 공지를 아직 확인 중이에요. 현재 일정은 유지했어요. 잠시 후 새로고침해 주세요.');
     S.syncUncertain = false;
   }
+  function permissionRetryNeeded() {
+    if (S.connection?.retryable === false) return false;
+    if (S.permissionPending) return true;
+    if (S.connection?.teams_verified === true && S.connection?.state === 'connected') return false;
+    return S.connection?.retryable === true || S.connection?.state === 'checking';
+  }
+  function redactTeams(unverified = true) {
+    if (unverified) S.teamsUnverified = true;
+    teamsAccessRevision++;
+    if (S.today) S.today = {...S.today,teams:[]};
+    S.items = S.items.filter(item => item.source === 'personal'); S.upcoming = S.upcoming.filter(item => item.source === 'personal');
+    S.channels = []; reviewItems = []; hiddenItems = hiddenItems.filter(item => item.source === 'personal'); reviewDialogItems.clear(); dialogRequestId++;
+    if (dialogContainsTeams && modal.open) {dialogEpoch++; modal.close(); modal.replaceChildren();}
+    if (detailItem?.source === 'teams') detailItem = null;
+  }
   function presentPermissionPending(error) {
     if (error.status !== 503 || error.code !== 'permission_check_pending' || !S.me) return false;
-    S.permissionPending = true; S.connection = {...S.connection, state:'checking'};
-    S.refreshError = 'Teams 접근 권한을 확인하고 있어요. 잠시 후 다시 확인해 주세요.';
+    S.permissionPending = error.retryable !== false; S.connection = {...S.connection, state:error.connectionState || 'checking', retryable:error.retryable !== false};
+    if (error.teamsAccessUnverified) {S.connection.teams_verified = false; redactTeams();}
+    S.refreshError = error.retryable === false ? connectionText[S.connection.state] || 'Teams 연결 상태를 확인해 주세요.' : 'Teams 접근 권한을 확인하고 있어요. 잠시 후 다시 확인해 주세요.';
     if (!S.today) {S.loadError = true; renderLoadState(true);}
-    else updateRefreshStatus();
+    else {updateRefreshStatus(); render();}
     scheduleCheckingRefresh(); return true;
   }
   function scheduleCheckingRefresh() {
     clearTimeout(checkingTimer); checkingTimer = null;
     if (!S.me || !S.service?.shared_channel_ingestion || document.hidden || autoReadsPaused) return;
-    if (S.connection?.state !== 'checking') {
+    if (!permissionRetryNeeded()) {
       if (S.connection?.state) {checkingAttempts = 0; checkingDeadline = 0;}
       return;
     }
@@ -141,7 +157,7 @@
     const epoch = authEpoch;
     checkingTimer = setTimeout(async () => {
       checkingTimer = null;
-      if (!activeView(epoch) || document.hidden || expireIdle() || S.connection?.state !== 'checking' || Date.now() >= checkingDeadline) return;
+      if (!activeView(epoch) || document.hidden || expireIdle() || !permissionRetryNeeded() || Date.now() >= checkingDeadline) return;
       if (autoReadsPaused || resumeCheck || activeLoad || monthRequest || S.busy || S.syncing) {scheduleCheckingRefresh(); return;}
       checkingAttempts++; checkingRefresh = true;
       try {await load({background:true, checkingRetry:true, mutationVersion:mutationRevision});}
@@ -152,7 +168,7 @@
   function scheduleIngestionRefresh() {
     clearTimeout(ingestionTimer); ingestionTimer = null;
     const pending = S.connection?.ingestion_pending === true;
-    if (!S.me || document.hidden || autoReadsPaused || S.connection?.state === 'checking') return;
+    if (!S.me || document.hidden || autoReadsPaused || S.teamsUnverified || permissionRetryNeeded()) return;
     if (!pending && !ingestionFinalNeeded) {
       if (!ingestionRefresh) {ingestionAttempts = 0; ingestionDeadline = 0;}
       return;
@@ -164,14 +180,14 @@
       ingestionTimer = null;
       if (!activeView(epoch) || document.hidden || expireIdle()) return;
       if (Date.now() >= ingestionDeadline) {updateRefreshStatus(); return;}
-      if (S.connection?.state === 'checking') {scheduleCheckingRefresh(); return;}
+      if (S.teamsUnverified || permissionRetryNeeded()) {scheduleCheckingRefresh(); return;}
       if (autoReadsPaused || resumeCheck || activeLoad || monthRequest || S.busy || S.syncing || checkingRefresh) {scheduleIngestionRefresh(); return;}
       ingestionAttempts++; ingestionRefresh = true;
       const finalPass = ingestionFinalNeeded && S.connection?.ingestion_pending !== true;
       try {
         const applied = await load({background:true, ingestionRetry:true, mutationVersion:mutationRevision});
         if (finalPass && applied && S.connection?.ingestion_pending !== true) ingestionFinalNeeded = false;
-        if (activeView(epoch) && ingestionFinalNeeded && S.connection?.ingestion_pending !== true && S.connection?.state !== 'checking' && !document.hidden && !S.busy && !S.syncing && !activeLoad && ingestionAttempts < 60 && Date.now() < ingestionDeadline) {
+        if (activeView(epoch) && !S.teamsUnverified && ingestionFinalNeeded && S.connection?.ingestion_pending !== true && S.connection?.state !== 'checking' && !document.hidden && !S.busy && !S.syncing && !activeLoad && ingestionAttempts < 60 && Date.now() < ingestionDeadline) {
           ingestionAttempts++;
           const finalized = await load({background:true, ingestionRetry:true, mutationVersion:mutationRevision});
           if (finalized && S.connection?.ingestion_pending !== true) ingestionFinalNeeded = false;
@@ -193,8 +209,8 @@
     activeLoad?.abort();
     const controller = new AbortController(); activeLoad = controller;
     const timer = setTimeout(() => controller.abort(), 100000), errors = [], applied = new Set();
-    let teamsRejected = false;
-    const permittedItems = items => teamsRejected ? items.filter(item => item.source === 'personal') : items;
+    let teamsRejected = false; const accessRevision = teamsAccessRevision;
+    const permittedItems = items => teamsRejected || accessRevision !== teamsAccessRevision ? items.filter(item => item.source === 'personal') : items;
     const current = () => epoch === S.epoch && activeView(sessionEpoch) && revision === mutationRevision;
     const publishable = () => current() && !((checkingRetry || ingestionRetry) && (autoReadsPaused || resumeCheck || document.hidden)) && !((afterSync || checkingRetry || ingestionRetry) && (S.busy || mutationVersion !== mutationRevision));
     S.loading = !S.today; S.loadError = false; S.refreshing = background; S.refreshError = ''; S.partErrors = {}; updateRefreshStatus();
@@ -216,6 +232,7 @@
         if ([401,403].includes(error.status)) {failure(error); return;}
         if (name === 'personal' && applied.has('today')) return;
         S.partErrors[name] = error.code === 'permission_check_pending' ? 'Teams 접근 권한을 확인하고 있어요.' : '불러오지 못했어요. 새로고침으로 다시 확인해 주세요.';
+        if (error.teamsAccessUnverified) teamsRejected = true;
         if (presentPermissionPending(error)) {if (S.today) render(); return;}
         errors.push({name,error});
         if (S.today) render();
@@ -236,7 +253,9 @@
           render(); return false;
         }
         S.ready.personal = true; delete S.partErrors.personal;
-        Object.assign(S, {today:value, day:value.date, month:S.month || value.date.slice(0,7), selected:S.selected || value.date, loading:false, refreshing:true, permissionPending:false});
+        if (accessRevision === teamsAccessRevision && !teamsRejected) {S.permissionPending = false; S.teamsUnverified = false;}
+        else {teamsRejected = true; value = {...value,teams:[]};}
+        Object.assign(S, {today:value, day:value.date, month:S.month || value.date.slice(0,7), selected:S.selected || value.date, loading:false, refreshing:true});
       });
       if (!today || !publishable()) {
         // A personal-only response may still make the screen useful.
@@ -245,25 +264,21 @@
         const jobs = [
           part('calendar', `/api/calendar?start=${grid.start}&end=${grid.end}`, value => {if (calendarEpoch !== monthEpoch) return false; S.items = permittedItems(value.items);}),
           part('upcoming', `/api/calendar?start=${today.date}&end=${C.addDays(today.date,7)}`, value => {S.upcoming = permittedItems(value.items);}),
-          part('channels', '/api/channels', value => {S.channels = teamsRejected ? [] : value;}),
+          part('channels', '/api/channels', value => {S.channels = teamsRejected || accessRevision !== teamsAccessRevision ? [] : value;}),
           part('settings', '/api/settings', value => {
             const wasPending = S.connection?.ingestion_pending === true;
             S.prefs = value.preferences;
-            S.connection = S.permissionPending ? {...value.connection,state:'checking'} : value.connection;
+            if (accessRevision === teamsAccessRevision) {
+              S.connection = S.permissionPending ? {...value.connection,state:S.connection?.state || 'checking',...(S.connection?.teams_verified === false ? {teams_verified:false,retryable:S.connection.retryable} : {})} : value.connection;
+              if (value.connection?.teams_verified === false) {S.permissionPending = value.connection.retryable === true; teamsRejected = true; redactTeams();}
+            } else teamsRejected = true;
             // Data may predate the final worker commit even when this is our first pending=false response.
             if ((wasPending || (!ingestionRetry && S.service?.shared_channel_ingestion)) && value.connection?.ingestion_pending === false) ingestionFinalNeeded = true;
-            if (connectionRejectsTeams()) {
-              teamsRejected = true; S.today = {...S.today, teams:[]};
-              S.items = permittedItems(S.items); S.upcoming = permittedItems(S.upcoming); S.channels = []; reviewItems = [];
-              dialogRequestId++;
-              hiddenItems = hiddenItems.filter(item => item.source === 'personal'); reviewDialogItems.clear();
-              if (dialogContainsTeams && modal.open) {dialogEpoch++; modal.close(); modal.replaceChildren();}
-              if (detailItem?.source === 'teams') detailItem = null;
-            }
+            if (connectionRejectsTeams()) {teamsRejected = true; if (!S.teamsUnverified) redactTeams(false);}
             if (checkingRetry && S.connection?.state === 'connected') S.syncUncertain = false;
           })
         ];
-        if (testServer()) jobs.push(part('changes', '/api/changes', value => {reviewItems = teamsRejected ? [] : value.items;}));
+        if (testServer()) jobs.push(part('changes', '/api/changes', value => {reviewItems = teamsRejected || accessRevision !== teamsAccessRevision ? [] : value.items;}));
         else S.ready.changes = true;
         await Promise.allSettled(jobs);
       }
@@ -274,7 +289,9 @@
         S.refreshError = S.today ? '일부 최신 정보를 불러오지 못했어요. 마지막으로 확인한 일정은 유지했어요. 새로고침으로 다시 확인해 주세요.' : '일정을 불러오지 못했어요. 다시 불러오기를 눌러 주세요.';
         const error = new Error(S.refreshError); error.loadPresented = !S.today; throw error;
       }
-      return publishable() && !S.permissionPending && ['today','calendar','upcoming','settings'].every(name => applied.has(name));
+      const loaded = publishable() && !S.permissionPending && !S.teamsUnverified && ['today','calendar','upcoming','settings'].every(name => applied.has(name));
+      if (loaded && S.permissionMonth && !S.syncing && !document.hidden && !autoReadsPaused && !resumeCheck) await loadMonth(S.permissionMonth,S.permissionMonthSelected);
+      return loaded && !S.teamsUnverified;
     } finally {
       clearTimeout(timer);
       if (activeLoad === controller) {
@@ -392,9 +409,13 @@
       applyConfirmedState({...result,source:'personal'},{},result);
     });
   }
-  function connectionRejectsTeams() {return ['not_connected','source_not_configured','source_unavailable','verification_failed','reauth_required','account_not_allowed'].includes(S.connection?.state);}
+  function connectionRejectsTeams() {return S.connection?.teams_verified === false || ['not_connected','source_not_configured','source_unavailable','verification_failed','reauth_required','account_not_allowed'].includes(S.connection?.state);}
   function connectionNotice() {
     if (S.service?.mode === 'preview') return '<div class="beta-banner" role="status"><strong>예시 화면</strong><span>실제 학교 계정이나 공지와 연결되지 않은 미리보기예요.</span></div>';
+    if (S.teamsUnverified) {
+      const retry = permissionRetryNeeded(), signIn = ['not_connected','reauth_required','account_not_allowed'].includes(S.connection?.state);
+      return `<div class="beta-banner" role="status" data-teams-unverified><strong>Teams 일정 ${retry ? '권한 재확인 중' : '연결 확인 필요'}</strong><span>권한을 확인하는 동안 Teams 일정을 잠시 숨겼어요. 이 확인 과정에서 일정을 삭제하지 않아요. 개인 할 일은 계속 사용할 수 있어요.</span>${signIn ? '<a href="/auth/login">다시 로그인</a>' : retry ? '<button data-action="refresh">다시 확인</button>' : '<button data-action="security">연결 및 보안</button>'}</div>`;
+    }
     if (!S.ready.settings) return '';
     const state = S.connection?.state || 'not_connected';
     if (['connected', 'checking', 'refresh_busy'].includes(state)) return '';
@@ -430,7 +451,7 @@
   function render() {
     rememberQuickDraft();
     if (S.me && listControls?.isComposing()) return;
-    const key = JSON.stringify([S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,plannerStatus,!!draftUi?.available,undoTrash?.id]);
+    const key = JSON.stringify([S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.teamsUnverified,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,plannerStatus,!!draftUi?.available,undoTrash?.id]);
     if (key === lastRenderKey) {updateRefreshStatus(); updateSyncStatus(); return;}
     const searchFocus = listControls?.captureFocus();
     const input = $('#quick-form')?.elements?.title;
@@ -449,9 +470,9 @@
     const all = [...S.today.teams, ...S.today.personal].filter(e => !e.cancelled), done = all.filter(e => e.completed).length;
     const teams = shownItems(S.today.teams), personal = shownItems(S.today.personal);
     const upcoming = shownItems(S.upcoming.filter(e => e.end_date > S.day && !e.completed && !e.cancelled)).sort((a, b) => a.end_date.localeCompare(b.end_date) || (a.time || '').localeCompare(b.time || '')).slice(0, 5);
-    const teamsPending = !S.ready.today || (SCHOOL && S.service?.mode !== 'preview' && (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state !== 'connected'));
+    const teamsPending = S.teamsUnverified || !S.ready.today || (SCHOOL && S.service?.mode !== 'preview' && (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state !== 'connected'));
     const teamsCount = teamsPending && !S.today.teams.length ? (!S.ready.today || !S.ready.settings || S.connection?.ingestion_pending || S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : teams.length;
-    const teamsEmpty = !S.ready.today ? (S.partErrors.today || 'Teams 일정을 확인하는 대로 표시해요.') : teamsPending ? (S.connection?.ingestion_pending || !S.ready.settings ? 'Teams 일정을 확인하는 대로 표시해요.' : connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
+    const teamsEmpty = S.teamsUnverified ? '권한을 다시 확인하는 동안 Teams 일정을 잠시 숨겼어요. 확인되면 다시 표시돼요.' : !S.ready.today ? (S.partErrors.today || 'Teams 일정을 확인하는 대로 표시해요.') : teamsPending ? (S.connection?.ingestion_pending || !S.ready.settings ? 'Teams 일정을 확인하는 대로 표시해요.' : connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
     root.innerHTML = intro('오늘 할 일', pretty(S.day)) + plannerTools() + listTools('today',[...S.today.teams,...S.today.personal,...S.upcoming]) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${!S.ready.today && !S.today.teams.length ? `<div class="empty" role="${S.partErrors.today && !S.permissionPending ? 'alert' : 'status'}">${esc(teamsEmpty)}</div>` : list(teams, filteredEmpty(teamsEmpty,S.today.teams.length))}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${personal.length}</span></h2></div><div class="list">${list(personal, filteredEmpty('오늘 할 일을 가볍게 적어보세요.',S.today.personal.length))}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">${S.ready.today ? '완료한 항목은 원래 위치에 남아요.' : '먼저 확인된 개인 할 일 기준이에요. Teams 일정은 확인 중이에요.'}</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : `<div class="empty">${esc(filteredEmpty('일주일 안에 다가오는 마감이 없어요.',S.upcoming.length))}</div>`}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
   }
   function renderCalendar() {
@@ -467,16 +488,16 @@
     }).join('');
     const selected = visibleItems.filter(e => e.start_date <= S.selected && e.end_date >= S.selected);
     const monthLabel = `${S.month.slice(0, 4)}년 ${Number(S.month.slice(5))}월`;
-    root.innerHTML = intro('캘린더', '기간이 있는 일정은 시작일부터 마감일까지 이어져요.') + plannerTools() + listTools('calendar',S.items) + `<section class="card calendar-card"><div class="calendar-toolbar"><h2>${monthLabel}</h2><span role="status" aria-live="polite">${S.pendingMonth ? esc(S.pendingMonth + ' 일정을 불러오는 중…') : ''}</span><div class="month-actions"><button class="secondary small" data-action="hidden">숨긴 일정</button><button class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button><button class="secondary small" data-action="this-month">이번 달</button><button class="icon-button" aria-label="다음 달" data-action="next-month">›</button></div></div><div class="calendar-legend"><span><i class="dot"></i>${SCHOOL ? 'Teams' : 'Teams 예시'}</span><span><i class="dot personal"></i>개인 할 일</span><span class="muted">날짜를 누르면 아래에 상세 목록이 보여요.</span></div><div class="calendar-grid"><div class="weekdays">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="weekday">${d}</div>`).join('')}</div>${gridHtml}</div></section><section class="card" style="margin-top:20px"><div class="card-head selected-heading"><h2>${esc(pretty(S.selected))}</h2><span class="muted fine">기간 전체 기준 · 오늘 표시는 선택한 날짜를 따릅니다</span></div><div class="date-detail">${list(selected, filteredEmpty('이 날짜에는 표시할 일정이 없어요.',S.items.filter(e => e.start_date <= S.selected && e.end_date >= S.selected).length))}</div></section>`;
+    root.innerHTML = intro('캘린더', '기간이 있는 일정은 시작일부터 마감일까지 이어져요.') + plannerTools() + listTools('calendar',S.items) + `<section class="card calendar-card"><div class="calendar-toolbar"><h2>${monthLabel}</h2><span role="status" aria-live="polite">${S.pendingMonth ? esc(S.pendingMonth + ' 일정을 불러오는 중…') : ''}</span><div class="month-actions"><button class="secondary small" data-action="hidden">숨긴 일정</button><button class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button><button class="secondary small" data-action="this-month">이번 달</button><button class="icon-button" aria-label="다음 달" data-action="next-month">›</button></div></div><div class="calendar-legend"><span><i class="dot"></i>${SCHOOL ? 'Teams' : 'Teams 예시'}</span><span><i class="dot personal"></i>개인 할 일</span><span class="muted">날짜를 누르면 아래에 상세 목록이 보여요.</span></div><div class="calendar-grid"><div class="weekdays">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="weekday">${d}</div>`).join('')}</div>${gridHtml}</div></section><section class="card" style="margin-top:20px"><div class="card-head selected-heading"><h2>${esc(pretty(S.selected))}</h2><span class="muted fine">기간 전체 기준 · 오늘 표시는 선택한 날짜를 따릅니다</span></div><div class="date-detail">${list(selected, S.teamsUnverified ? 'Teams 일정은 권한을 다시 확인한 뒤 표시돼요. 현재 확인된 개인 할 일은 없어요.' : filteredEmpty('이 날짜에는 표시할 일정이 없어요.',S.items.filter(e => e.start_date <= S.selected && e.end_date >= S.selected).length))}</div></section>`;
   }
   async function changeMonth(action) {
-    const date = new Date((S.pendingMonth || S.month) + '-01T00:00:00Z');
+    const date = new Date((S.pendingMonth || S.permissionMonth || S.month) + '-01T00:00:00Z');
     if (action !== 'this-month') date.setUTCMonth(date.getUTCMonth() + (action === 'next-month' ? 1 : -1));
     const month = action === 'this-month' ? S.day.slice(0, 7) : date.toISOString().slice(0, 7);
     return loadMonth(month, action === 'this-month' ? S.day : month + '-01');
   }
   async function loadMonth(month, selected) {
-    const epoch = ++monthEpoch, sessionEpoch = authEpoch;
+    const epoch = ++monthEpoch, sessionEpoch = authEpoch, accessRevision = teamsAccessRevision;
     monthRequest?.abort();
     S.pendingMonth = month; S.pendingMonthSelected = selected; render();
     if (S.syncing) return;
@@ -486,9 +507,10 @@
       if (epoch !== monthEpoch || !activeView(sessionEpoch)) return;
       const grid = C.monthGrid(month), result = await api(`/api/calendar?start=${grid.start}&end=${grid.end}`, {signal: controller.signal});
       if (epoch !== monthEpoch || !activeView(sessionEpoch)) return;
-      S.month = month; S.items = connectionRejectsTeams() ? result.items.filter(item => item.source === 'personal') : result.items; S.selected = selected; S.ready.calendar = true; delete S.partErrors.calendar;
+      S.month = month; S.items = connectionRejectsTeams() || accessRevision !== teamsAccessRevision ? result.items.filter(item => item.source === 'personal') : result.items; S.selected = selected; S.ready.calendar = true; delete S.partErrors.calendar;
+      if (!S.teamsUnverified) {S.permissionMonth = ''; S.permissionMonthSelected = '';}
     } catch (error) {
-      if (epoch === monthEpoch && activeView(sessionEpoch)) failure(error);
+      if (epoch === monthEpoch && activeView(sessionEpoch)) {if (error.teamsAccessUnverified) {S.permissionMonth = month; S.permissionMonthSelected = selected;} failure(error);}
     } finally {
       if (epoch === monthEpoch && activeView(sessionEpoch)) {monthRequest = null; S.pendingMonth = ''; render();}
     }

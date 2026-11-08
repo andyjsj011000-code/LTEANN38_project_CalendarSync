@@ -127,6 +127,12 @@ class DelegatedGraph:
             visited.add(url)
             data=self._read(client,token,url,deadline=deadline)
             if data is None:
+                # Failure to enumerate the account's teams is not evidence
+                # that it belongs to no teams. Individual denied team routes
+                # remain excluded without granting access to their channels.
+                if expected_path == '/v1.0/me/joinedTeams':
+                    _graph_log('joined_teams','listing_unavailable')
+                    raise GraphFailure()
                 return []
             values=data.get("value")
             if not isinstance(values,list) or len(items)+len(values)>500:

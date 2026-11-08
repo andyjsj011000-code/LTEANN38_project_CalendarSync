@@ -204,8 +204,70 @@ def test_collection_recovery_remains_fail_closed_when_fresh_permission_verificat
 
     assert s.db.sync_status(session['user_id'])['state'] == 'verification_failed'
     assert s.db.channels(session['user_id'], session['tenant_id']) == []
-    assert client.get('/api/today').json()['teams'] == []
+    personal_task(s, session['user_id'])
+    response = client.get('/api/today')
+    assert response.status_code == 503
+    assert response.json()['teams_access_unverified'] is True
+    assert response.json()['connection_state'] == 'verification_failed'
+    assert response.json()['retryable'] is True
+    assert 'Cached deadline' not in response.text
+    with s.db.connect() as connection:
+        assert connection.execute('SELECT count(*) FROM web_events').fetchone()[0] == 1
+    personal = client.get('/api/personal/today?day=2026-10-22')
+    assert personal.status_code == 200 and len(personal.json()['personal']) == 1
     assert s.db.device(device['id_hash'])['ingest_at'] == 0
+
+
+@pytest.mark.parametrize('failure', ['source_unavailable', 'verification_failed', 'refresh_unavailable', 'refresh_busy'])
+def test_temporary_refresh_failure_is_not_published_as_empty_calendar(access_server, monkeypatch, failure):
+    s = access_server
+    client, session, device = connected(s)
+    personal_task(s, session['user_id'])
+    original = s.graph.channels
+    def unavailable(*args):
+        raise GraphFailure(failure)
+    monkeypatch.setattr(s.graph, 'channels', unavailable)
+    s.now[0] += 1
+    s.integration.run_sync(device, force=True)
+
+    response = client.get('/api/calendar?start=2026-10-01&end=2026-10-31')
+
+    assert response.status_code == 503
+    assert response.json()['connection_state'] == failure
+    assert response.json()['retryable'] is True
+    assert response.json()['teams_access_unverified'] is True
+    assert 'Cached deadline' not in response.text
+    assert client.get('/api/personal/today?day=2026-10-22').status_code == 200
+    monkeypatch.setattr(s.graph, 'channels', original)
+    s.now[0] += s.settings.access_seconds
+    recovered = client.get('/api/calendar?start=2026-10-01&end=2026-10-31')
+    assert recovered.status_code == 200
+    assert any(event['title'] == 'Cached deadline' for event in recovered.json()['items'])
+
+
+@pytest.mark.parametrize('path', ['/api/today', '/api/calendar?start=2026-10-01&end=2026-10-31',
+                                  '/api/hidden?start=2026-10-01&end=2026-10-31', '/api/channels'])
+def test_read_response_crossing_original_proof_expiry_is_retryable(access_server, monkeypatch, path):
+    s = access_server
+    client, session, _ = connected(s)
+    checked = s.db.sync_status(session['user_id'])['checked_at']
+    original = s.integration.read_teams
+    def expires_after_body(current, operation):
+        def build():
+            result = operation()
+            s.now[0] += s.settings.access_seconds
+            return result
+        return original(current, build)
+    monkeypatch.setattr(s.integration, 'read_teams', expires_after_body)
+
+    response = client.get(path)
+
+    assert response.status_code == 503
+    assert response.json()['connection_state'] == 'connected'
+    assert response.json()['retryable'] is True
+    assert response.json()['teams_access_unverified'] is True
+    assert 'Cached deadline' not in response.text
+    assert s.db.sync_status(session['user_id'])['checked_at'] == checked
 
 
 def personal_task(s, user, day='2026-10-22'):

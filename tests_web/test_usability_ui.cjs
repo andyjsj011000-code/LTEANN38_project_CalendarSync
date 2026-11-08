@@ -16,6 +16,8 @@ function deferred() {
 }
 const personalTask = (values={}) => ({id:'personal-ready',source:'personal',title:'Personal first result',start_date:'2026-11-07',end_date:'2026-11-07',time:null,notes:'',kind:'personal',display_mode:'daily',selected_dates:[],completed:false,hidden:false,version:1,...values});
 const personalService = () => response({mode:'test-server',idle_seconds:1800,shared_channel_ingestion:true,personal_agenda:true});
+const accessSettings = (verified, retryable = !verified, state = verified ? 'connected' : 'source_unavailable') => response({preferences:{disabled_kinds:[]},connection:{state,teams_verified:verified,retryable}});
+const unverifiedAccess = (retryable = true, state = 'source_unavailable') => response({detail:'Teams access must be checked again',code:'permission_check_pending',teams_access_unverified:true,retryable,connection_state:state},503);
 const writes = h => h.requests.filter(r => ['POST','PUT','PATCH','DELETE'].includes(r.options.method));
 const calendarUrl = (h, month) => {const grid = h.context.window.BetaCalendar.monthGrid(month); return `/api/calendar?start=${grid.start}&end=${grid.end}`;};
 const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelectorAll(selector) {
@@ -1067,7 +1069,134 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     const before=h.requests.filter(r=>r.url==='/api/personal/today').length;await h.advance(30000);
     assert.equal(h.requests.filter(r=>r.url==='/api/personal/today').length,before);assert.match(h.elements['refresh-status'].textContent,/자동 갱신을 잠시 멈췄어요/);
   }
-  console.log('Usability UI: 104 synthetic scenarios passed (progressive independent responses, bounded ingestion polling, final-pass races, focus preservation and prior regressions).');
+  // A verified calendar becoming unverified is redacted, with a clear progress message and usable personal rows.
+  {
+    let verified=true;const task=personalTask({title:'Keep personal during access check'});
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({date:'2026-11-07',personal:[task]}),
+      '/api/settings':()=>accessSettings(verified)}});
+    h.today.personal=[task];h.overrides['/api/calendar']=()=>response({items:[h.item,task]});await settle();await h.click({action:'calendar'});
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);await h.click({detail:task.id,source:'personal'});const personalDialog=h.elements.modal.innerHTML;
+    verified=false;await h.click({action:'refresh'});await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);assert.match(h.elements.app.innerHTML,/Keep personal during access check/);
+    assert.match(h.elements.app.innerHTML,/권한/);assert.match(h.elements.app.innerHTML,/(일시|잠시)[^<]*(숨|표시)/);
+    assert.equal(h.elements.modal.open,true);assert.equal(h.elements.modal.innerHTML,personalDialog);assert.equal(writes(h).length,0);
+  }
+  // A late successful calendar response from before unverified metadata cannot reinsert private Teams titles.
+  {
+    let verified=true;const h=harness({ignoreAbort:new Set(),overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(verified)}});await settle();await h.click({action:'calendar'});
+    const late=deferred();h.overrides[calendarUrl(h,'2026-11')]=()=>late.promise;verified=false;
+    const refresh=h.click({action:'refresh'});await settle();assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);const start=h.history.length;
+    late.resolve(response({items:[{...h.item,title:'Late unverified private title'}]}));await refresh;await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/Late unverified private title/);
+    assert.ok(h.history.slice(start).filter(value=>value.id==='app').every(value=>!value.html.includes('Late unverified private title')));
+  }
+  // A retryable source failure recovers the current calendar by reading fresh data, then stops its own loop.
+  {
+    let verified=true;const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(verified)}});await settle();await h.click({action:'calendar'});
+    verified=false;await h.click({action:'refresh'});assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    const calendarBefore=h.requests.filter(value=>value.url===calendarUrl(h,'2026-11')).length;
+    verified=true;h.overrides['/api/calendar']=()=>response({items:[{...h.item,title:'Fresh verified calendar result'}]});
+    await h.advance(15000);await settle();assert.match(h.elements.app.innerHTML,/Fresh verified calendar result/);
+    assert.ok(h.requests.filter(value=>value.url===calendarUrl(h,'2026-11')).length>calendarBefore);
+    const completed=h.requests.length;await h.advance(60000);assert.equal(h.requests.length,completed);assert.equal(writes(h).length,0);
+  }
+  // An unverified month destination is remembered and retried automatically after permissions recover.
+  {
+    const task=personalTask();let verified=true;const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(verified)}});h.today.personal=[task];await settle();await h.click({action:'calendar'});
+    h.overrides[calendarUrl(h,'2026-12')]=()=>verified ? response({items:[{...h.item,title:'Recovered requested December',start_date:'2026-12-01',end_date:'2026-12-01'}]}) : unverifiedAccess();
+    verified=false;await h.click({action:'next-month'});assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);assert.match(h.elements.app.innerHTML,/(일시|잠시)[^<]*(숨|표시)/);
+    verified=true;await h.advance(15000);await settle();assert.match(h.elements.app.innerHTML,/2026년 12월/);assert.match(h.elements.app.innerHTML,/Recovered requested December/);
+    assert.equal(writes(h).length,0);
+  }
+  // A terminal authentication failure on initial Teams loading still offers personal tasks and a sign-in action.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/personal/today':()=>response({date:'2026-11-07',personal:[personalTask()]}),
+      '/api/today':()=>unverifiedAccess(false,'reauth_required')}});await settle();
+    assert.match(h.elements.app.innerHTML,/Personal first result/);assert.match(h.elements.app.innerHTML,/다시 로그인/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/school-signin|Fixture assignment/);
+    const stopped=h.requests.length;await h.advance(60000);assert.equal(h.requests.length,stopped);assert.equal(writes(h).length,0);
+  }
+  // A freshly verified empty channel set is a genuine empty calendar, without a permission retry banner.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(true),
+      '/api/today':()=>response({date:'2026-11-07',teams:[],personal:[]}),'/api/calendar':()=>response({items:[]})}});await settle();await h.click({action:'calendar'});
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment|(일시|잠시)[^<]*(숨|표시)/);
+    const stopped=h.requests.length;await h.advance(60000);assert.equal(h.requests.length,stopped);assert.equal(writes(h).length,0);
+  }
+  // Retryable metadata on a non-checking state shares the finite five-minute retry budget.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(false)}});await settle();await h.advance(315000);
+    const reads=h.requests.filter(value=>value.url==='/api/today').length;assert.ok(reads>1&&reads<=21);
+    assert.match(h.elements.app.innerHTML,/권한/);assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    const stopped=h.requests.length;await h.advance(60000);assert.equal(h.requests.length,stopped);assert.equal(writes(h).length,0);
+  }
+  // New readiness retries pause while hidden and after a failed identity check on resume.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(false)}});await settle();await h.visibility(true);
+    const hidden=h.requests.length;await h.advance(30000);assert.equal(h.requests.length,hidden);
+    h.overrides['/api/me']=()=>response({},503);await h.visibility(false);await settle();const paused=h.requests.length;
+    await h.advance(60000);assert.equal(h.requests.length,paused);assert.match(h.elements['refresh-status'].textContent,/자동 갱신을 잠시 멈췄어요/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+  }
+  // Logout fences a delayed readiness retry and does not allow its old response to restore private rows.
+  {
+    let verified=true;const h=harness({ignoreAbort:new Set(['/api/today']),overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(verified)}});await settle();
+    verified=false;await h.click({action:'refresh'});const late=deferred();h.overrides['/api/today']=()=>late.promise;
+    await h.advance(15000);await h.click({action:'logout'});const stopped=h.requests.length;
+    late.resolve(response({...h.today,teams:[{...h.item,title:'Old-account hidden Teams row'}]}));await settle();await h.advance(60000);
+    assert.match(h.elements.app.innerHTML,/school-signin/);assert.doesNotMatch(h.elements.app.innerHTML,/Old-account hidden Teams row|Fixture assignment/);assert.equal(h.requests.length,stopped);
+  }
+  // A second navigation during permission recovery supersedes the older deferred destination.
+  {
+    let verified=true;const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(verified)}});await settle();await h.click({action:'calendar'});
+    h.overrides[calendarUrl(h,'2026-12')]=()=>unverifiedAccess();verified=false;await h.click({action:'next-month'});
+    h.overrides[calendarUrl(h,'2027-01')]=()=>verified ? response({items:[{...h.item,title:'Latest requested January',start_date:'2027-01-01',end_date:'2027-01-01'}]}) : unverifiedAccess();
+    await h.click({action:'next-month'});verified=true;await h.advance(15000);await settle();
+    assert.match(h.elements.app.innerHTML,/2027년 1월/);assert.match(h.elements.app.innerHTML,/Latest requested January/);assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+  }
+  // Typed unverified metadata redacts an already-open Teams detail instead of leaving private text behind.
+  {
+    const h=harness({overrides:{'/api/service':personalService}});await settle();await h.click({detail:'fixture',source:'teams'});assert.match(h.elements.modal.innerHTML,/Fixture assignment/);
+    h.overrides['/api/events/fixture/state']=()=>unverifiedAccess();await h.click({action:'hide-detail'});
+    assert.equal(h.elements.modal.open,false);assert.doesNotMatch(h.elements.modal.innerHTML,/Fixture assignment/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);assert.match(h.elements.app.innerHTML,/(일시|잠시)[^<]*(숨|표시)/);assert.equal(writes(h).length,1);
+  }
+  // A verified connected account never starts a permission loop from an accidentally true retryable flag.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(true,true)}});await settle();
+    const before=h.requests.filter(value=>value.url==='/api/today').length;await h.advance(60000);
+    assert.equal(h.requests.filter(value=>value.url==='/api/today').length,before);assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+  }
+  // Verified connected state with retryable=true still runs the ordinary three-second ingestion loop once per tick.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>response({preferences:{disabled_kinds:[]},
+      connection:{state:'connected',teams_verified:true,retryable:true,ingestion_pending:true}})}});await settle();
+    const before=h.requests.filter(value=>value.url==='/api/today').length;await h.advance(2999);
+    assert.equal(h.requests.filter(value=>value.url==='/api/today').length,before);await h.advance(1);
+    assert.equal(h.requests.filter(value=>value.url==='/api/today').length,before+1);await h.advance(12000);
+    assert.equal(h.requests.filter(value=>value.url==='/api/today').length,before+5);assert.equal(writes(h).length,0);
+  }
+  // Connected without verified access does retry after fifteen seconds, then stops once proof is restored.
+  {
+    let verified=false;const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(verified,true,'connected')}});await settle();
+    const before=h.requests.filter(value=>value.url==='/api/today').length;await h.advance(14999);
+    assert.equal(h.requests.filter(value=>value.url==='/api/today').length,before);assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    verified=true;await h.advance(1);await settle();assert.equal(h.requests.filter(value=>value.url==='/api/today').length,before+1);
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);const recovered=h.requests.length;await h.advance(60000);assert.equal(h.requests.length,recovered);
+  }
+  // Readiness loss from another action fences late channel names and review contents from the current read pass.
+  {
+    const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>response({preferences:{disabled_kinds:[]},connection:{state:'connected',teams_verified:true,retryable:false,ingestion_pending:true}})}});await settle();await h.click({detail:'fixture',source:'teams'});
+    const channels=deferred(),changes=deferred(),settings=deferred();h.overrides['/api/channels']=()=>channels.promise;h.overrides['/api/changes']=()=>changes.promise;h.overrides['/api/settings']=()=>settings.promise;
+    const refreshing=h.click({action:'refresh'});await settle();h.overrides['/api/events/fixture/state']=()=>unverifiedAccess(false,'reauth_required');await h.click({action:'hide-detail'});
+    channels.resolve(response([{id:'late-private-channel',name:'Late private channel name',enabled:true}]));
+    changes.resolve(response({items:[{id:'late-private-review',before:{title:'Late private review body',start_date:'2026-11-07',end_date:'2026-11-07'},after:{title:'Changed private review',start_date:'2026-11-07',end_date:'2026-11-08'}}]}));
+    settings.resolve(accessSettings(true));await refreshing;await settle();assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);assert.match(h.elements.app.innerHTML,/다시 로그인/);
+    await h.click({action:'filters'});assert.doesNotMatch(h.elements.modal.innerHTML,/Late private channel name/);await h.click({action:'close'});
+    await h.click({action:'changes'});assert.doesNotMatch(h.elements.modal.innerHTML,/Late private review body|Changed private review/);assert.equal(writes(h).length,1);
+    const stopped=h.requests.length;await h.advance(60000);assert.equal(h.requests.length,stopped);
+  }
+  console.log('Usability UI: 119 synthetic scenarios passed (progressive independent responses, bounded ingestion and permission retries, redaction and recovery, final-pass races, focus preservation and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);

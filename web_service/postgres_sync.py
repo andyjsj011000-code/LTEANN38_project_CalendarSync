@@ -42,6 +42,22 @@ class PostgresSync:
         return (dict(zip(('checked_at', 'state', 'lease_until'), row)) if row else
                 {'checked_at': 0, 'state': 'not_connected', 'lease_until': 0})
 
+    def teams_read_proof(self, user_id, tenant_id):
+        """Read status and unexpired channel scope in one statement snapshot."""
+        now = int(self.clock())
+        with self.connect() as db:
+            rows = db.execute('''SELECT s.state,s.checked_at,a.channel_id
+                FROM web_users u
+                LEFT JOIN web_school_sync s ON s.user_id=u.id
+                LEFT JOIN web_channel_access a ON a.user_id=u.id AND a.valid_until>%s
+                    AND EXISTS (SELECT 1 FROM web_channels ch
+                        WHERE ch.id=a.channel_id AND ch.tenant_id=u.tenant_id)
+                WHERE u.id=%s AND u.tenant_id=%s AND u.active=1
+                ORDER BY a.channel_id''', (now, user_id, tenant_id)).fetchall()
+        return {'state': rows[0][0] or 'not_connected' if rows else 'not_connected',
+                'checked_at': rows[0][1] or 0 if rows else 0,
+                'channels': frozenset(row[2] for row in rows if row[2] is not None)}
+
     def begin_sync(self, user_id, ttl, *, preserve_access=False):
         self._seconds(ttl, allow_zero=True)
         if type(preserve_access) is not bool or (preserve_access and not getattr(self, 'shared_ingestion_enabled', False)):

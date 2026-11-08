@@ -63,6 +63,22 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
         return {'drafts_expired':self.prune_task_drafts(),
                 'trash_expired':self.prune_task_trash()}
 
+    def teams_read_proof(self,user_id,tenant_id):
+        """Read the original permission proof without changing its lifetime."""
+        now=int(self.clock())
+        with self.connect() as c:
+            rows=c.execute('''SELECT s.state,s.checked_at,a.channel_id
+                FROM web_users u
+                LEFT JOIN web_school_sync s ON s.user_id=u.id
+                LEFT JOIN web_channel_access a ON a.user_id=u.id AND a.valid_until>?
+                    AND EXISTS (SELECT 1 FROM web_channels ch
+                        WHERE ch.id=a.channel_id AND ch.tenant_id=u.tenant_id)
+                WHERE u.id=? AND u.tenant_id=? AND u.active=1
+                ORDER BY a.channel_id''',(now,user_id,tenant_id)).fetchall()
+        return {'state':rows[0][0] or 'not_connected' if rows else 'not_connected',
+                'checked_at':rows[0][1] or 0 if rows else 0,
+                'channels':frozenset(row[2] for row in rows if row[2] is not None)}
+
     def add_connection(self,raw_session,user_id,token,lifetime,cache='',background=False):
         raw=secrets.token_urlsafe(32); now=int(self.clock())
         expires=now+(30*86400 if background and cache else min(lifetime,3600))

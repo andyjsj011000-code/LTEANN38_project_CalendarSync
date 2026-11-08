@@ -88,6 +88,9 @@ class ServerIntegration(SchoolIntegration):
     def explicit_logout(self,session): self.db.revoke_device(self.db.session_device(session)['id_hash'],session['user_id'])
     def status(self,session):
         result=super().status(session)
+        readiness=self._teams_readiness(session) if self.shared_ingestion_enabled else None
+        if readiness is not None:
+            result.update(state=readiness['state'],teams_verified=readiness['verified'],retryable=readiness['retryable'])
         try: device=self.db.session_device(session)
         except Missing: return {**result,'connection_state':'reauth_required','background_enabled':False,'push_configured':self.sender.configured,'push_registered':False,'ingestion_pending':False}
         pending=self.db.ingestion_pending(device) if self.shared_ingestion_enabled else False
@@ -261,7 +264,33 @@ class ServerIntegration(SchoolIntegration):
             failure_progress(fail_current(error.state))
             end_tracking(error.state)
             if error.state in {'reauth_required','account_not_allowed'}: self.db.fail_connection(device['id_hash'])
-        except Exception:
+        except Exception as error:
+            # Never interpolate exception text or traceback locals: they can
+            # contain Graph bodies, SQL parameters, or credential material.
+            try:
+                safe_types={'Missing','PermissionPending','Conflict','ValueError','TypeError',
+                            'KeyError','IndexError','RuntimeError','TimeoutError','ConnectionError',
+                            'IntegrityError','OperationalError','InterfaceError','DataError',
+                            'SerializationFailure','DeadlockDetected','InvalidToken','AssertionError',
+                            'ProgrammingError','UndefinedColumn','UndefinedTable','UniqueViolation',
+                            'ForeignKeyViolation','CheckViolation','NotNullViolation','QueryCanceled',
+                            'AdminShutdown','ConnectionDoesNotExist','InFailedSqlTransaction'}
+                kind=type(error).__name__
+                kind=kind if kind in safe_types else 'OtherError'
+                internal='unknown'; line=0; trace=error.__traceback__
+                directory=Path(__file__).resolve().parent
+                while trace is not None:
+                    filename=Path(trace.tb_frame.f_code.co_filename)
+                    if filename.resolve().parent==directory and filename.suffix=='.py':
+                        internal=filename.name; line=trace.tb_lineno
+                    trace=trace.tb_next
+                sqlstate=getattr(error,'sqlstate',None)
+                if not (isinstance(sqlstate,str) and len(sqlstate)==5 and
+                        all('A'<=char<='Z' or '0'<=char<='9' for char in sqlstate)):
+                    sqlstate='none'
+                logger.info('CalendarSync sync exception_type=%s internal_file=%s internal_line=%d sqlstate=%s',kind,internal,line,sqlstate)
+            except Exception:
+                pass
             progress('sync','source_unavailable'); progress('failure','started')
             failure_progress(fail_current('source_unavailable')); self.db.audit('sync_failed',user)
             end_tracking('source_unavailable')
@@ -293,13 +322,48 @@ class ServerIntegration(SchoolIntegration):
         result=self.status(session)
         if ingestion is not None: result['ingestion']=ingestion
         return result
+    def _teams_readiness(self,session):
+        """Read the original proof without creating or extending access."""
+        if hasattr(self.db,'teams_read_proof'):
+            proof=self.db.teams_read_proof(session['user_id'],session['tenant_id'])
+            channel_ids=proof['channels']; coherent=True
+        else:
+            # Compatibility for small injected test adapters only. Production
+            # reads the state and its channel scope in one database snapshot.
+            before=self.db.sync_status(session['user_id'])
+            channels=self.db.channels(session['user_id'],session['tenant_id'])
+            proof=self.db.sync_status(session['user_id'])
+            channel_ids=frozenset(channel['id'] for channel in channels)
+            coherent=all(before.get(key)==proof.get(key) for key in ('state','checked_at'))
+        state=proof['state']
+        if state not in PermissionPending.STATES: state='verification_failed'
+        checked=proof.get('checked_at',0)
+        fresh=checked>0 and checked+self.settings.access_seconds>self.db.clock()
+        # A freshly verified zero-channel result is authoritative. A checking
+        # result needs at least one existing, still-unexpired channel proof.
+        verified=bool(coherent and fresh and (state=='connected' or (state=='checking' and channel_ids)))
+        return {'state':state,'verified':verified,
+                'retryable':(not verified or state=='checking') and state not in {'reauth_required','account_not_allowed','source_not_configured'},
+                'channels':frozenset(channel_ids)}
+
+    def _raise_unverified(self,readiness):
+        raise PermissionPending(state=readiness['state'],retryable=readiness['retryable'] or readiness['verified'])
+
     def require_permission_ready(self,session):
-        if (self.shared_ingestion_enabled and self.db.sync_status(session['user_id'])['state']=='checking'
-                and not self.db.channels(session['user_id'],session['tenant_id'])):
-            # Another request owns verification and the old permission proof
-            # is absent or expired. Do not turn that temporary state into an
-            # empty calendar or a misleading missing-item mutation error.
-            raise PermissionPending()
+        if not self.shared_ingestion_enabled: return
+        readiness=self._teams_readiness(session)
+        if not readiness['verified']: self._raise_unverified(readiness)
+
+    def read_teams(self,session,operation):
+        """Never publish a read that crossed proof expiry or a scope change."""
+        if not self.shared_ingestion_enabled: return operation()
+        before=self._teams_readiness(session)
+        if not before['verified']: self._raise_unverified(before)
+        result=operation()
+        after=self._teams_readiness(session)
+        if not after['verified'] or before['channels']!=after['channels']:
+            self._raise_unverified(after)
+        return result
     def check_request(self,session,request):
         checked=self.db.school_session(request.cookies.get(self.session_cookie),self.settings.idle_seconds)
         if not checked: raise HTTPException(401,'Viewing session expired; device notifications remain linked')
@@ -314,7 +378,10 @@ class ServerIntegration(SchoolIntegration):
                 # Polling can expose each completed post while collection is
                 # running. The stored ACL and its original expiry remain the
                 # only permission proof; a view never extends that proof.
-                self.db.materialize_cached_events(self.db.session_device(session))
+                try:
+                    self.db.materialize_cached_events(self.db.session_device(session))
+                except PermissionPending:
+                    self._raise_unverified(self._teams_readiness(session))
     def tick(self):
         owner=secrets.token_hex(16)
         if not self.db.worker_lock(owner): return
@@ -418,7 +485,8 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
         db.revoke_all(session['user_id']); response=Response(status_code=204)
         response.delete_cookie(integration.session_cookie,path='/',secure=settings.secure_cookies,httponly=True,samesite='lax'); integration.logout_response(response); return response
     @app.get('/api/changes')
-    def changes(session=Depends(require)): return {'items':db.changes(session['user_id'],session['tenant_id'])}
+    def changes(session=Depends(require)):
+        return integration.read_teams(session,lambda:{'items':db.changes(session['user_id'],session['tenant_id'])})
     @app.post('/api/changes/{change_id}')
     def decide(change_id:str,body:ChangeDecision,session=Depends(require)):
         db.resolve_change(session['user_id'],session['tenant_id'],change_id,body.accept); return {'saved':True}

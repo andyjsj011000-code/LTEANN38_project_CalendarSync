@@ -18,7 +18,14 @@ class Missing(Exception):
 
 class PermissionPending(Missing):
     """No mutation was committed because a school permission proof needs renewal."""
-    pass
+    STATES = frozenset({'connected', 'checking', 'not_connected', 'source_unavailable',
+                        'verification_failed', 'refresh_unavailable', 'refresh_busy',
+                        'reauth_required', 'account_not_allowed', 'source_not_configured'})
+
+    def __init__(self, *, state='checking', retryable=True):
+        self.connection_state = state if state in self.STATES else 'verification_failed'
+        self.retryable = retryable is True
+        super().__init__()
 
 
 class Conflict(Exception):
