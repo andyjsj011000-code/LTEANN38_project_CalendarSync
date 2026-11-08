@@ -17,10 +17,15 @@
   const root = $('#app'), modal = $('#modal'), topbar = $('#topbar');
   const C = window.BetaCalendar;
   const L = window.BetaListControls;
+  const A = window.BetaAssignments;
+  let assignmentRequest = null, assignmentSequence = 0;
+  const assignmentsEnabled = () => !!(S.service?.assignments_enabled && A);
+  const assignmentCalendar = () => assignmentsEnabled() ? (S.assignments?.items || []).filter(e => e.start_date && e.end_date) : [];
   let listControls = null, taskDrafts = null, draftUi = null;
   let plannerStatus = null, statusRequest = null, statusReadAt = 0, statusRevision = 0;
   let trashItems = [], undoTrash = null, draftRestoring = false, taskMissing = false, taskFormRevision = 0;
   const S = {me: null, view: 'today', day: '', month: '', selected: '', today: null, items: [], upcoming: [], channels: [], prefs: null, busy: false, loading: false, loadError: false, epoch: 0};
+  S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
   S.listFilters = L?.createState() || {query:'',unfinishedOnly:false};
   const plannerEnabled = () => !!S.service?.planner_enhancements;
   const shownItems = items => plannerEnabled() && L ? L.filter(items,S.listFilters) : items;
@@ -83,6 +88,8 @@
     }
   }
   function clearPrivate() {
+    assignmentRequest?.abort(); assignmentRequest = null; assignmentSequence++;
+    S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
     taskDrafts?.reset(); draftUi = null; plannerStatus = null; statusRequest?.abort(); statusRequest = null; statusReadAt = 0; statusRevision++;
     trashItems = []; undoTrash = null; draftRestoring = false; taskMissing = false; taskFormRevision++;
     S.listFilters = L?.createState() || {query:'',unfinishedOnly:false}; listControls?.reset();
@@ -109,6 +116,8 @@
   function renderLoadState(error = S.loadError) {
     lastRenderKey = null;
     if (!S.me) return;
+    if (assignmentsEnabled() && S.view === 'assignments') return renderContent();
+    if ($('#nav-assignments')) $('#nav-assignments').hidden = !assignmentsEnabled();
     const pending = !!S.permissionPending, failed = error && !pending;
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
     $('#nav-today').classList.toggle('active', S.view === 'today'); $('#nav-calendar').classList.toggle('active', S.view === 'calendar');
@@ -199,6 +208,7 @@
   async function load({background = false, afterSync = false, checkingRetry = false, ingestionRetry = false, mutationVersion} = {}) {
     if (!S.me) return;
     if (S.syncing && !afterSync) {if (!S.busy) toast('Teams 공지를 가져온 뒤 화면을 갱신해요. 현재 일정은 계속 볼 수 있어요.'); return;}
+    if (assignmentsEnabled()) void loadAssignments();
     const initialSession = authEpoch;
     if (!checkingRetry) await ensureCollectionReady();
     if (!activeView(initialSession) || ((checkingRetry || ingestionRetry) && (autoReadsPaused || resumeCheck))) return;
@@ -300,7 +310,32 @@
       }
     }
   }
+  async function loadAssignments(force = false) {
+    if (!S.me || !assignmentsEnabled() || assignmentRequest) return;
+    const epoch = authEpoch, sequence = ++assignmentSequence;
+    const controller = new AbortController(); assignmentRequest = controller;
+    S.assignments = {...S.assignments,loading:true}; render();
+    try {
+      const value = await api('/api/assignments' + (force ? '?refresh=true' : ''), {signal:controller.signal,timeout:95000});
+      if (!activeView(epoch) || sequence !== assignmentSequence) return;
+      S.assignments = {...value,loading:false};
+      if (detailItem?.source === 'assignment' && !value.items.some(e => e.id === detailItem.id)) {detailItem = null; if (modal.open) closeDialog();}
+    } catch (error) {
+      if (!activeView(epoch) || sequence !== assignmentSequence || error.name === 'AbortError') return;
+      if ([401,403].includes(error.status)) {failure(error); return;}
+      S.assignments = {items:[],state:'unavailable',loading:false};
+    } finally {
+      if (assignmentRequest === controller) assignmentRequest = null;
+      if (activeView(epoch) && sequence === assignmentSequence) render();
+    }
+  }
+  function assignmentToday() {
+    if (!assignmentsEnabled()) return '';
+    const items = assignmentCalendar().filter(e => e.end_date === S.day);
+    return '<section class="card"><div class="card-head"><h2>오늘 마감 과제 <span class="count">'+items.length+'</span></h2><button class="text-button" data-action="assignments">과제 전체 보기 →</button></div><div class="list">'+(items.length ? items.map(A.row).join('') : '<div class="empty">'+(S.assignments.loading ? '과제를 확인하고 있어요.' : S.assignments.state === 'connected' ? '오늘 마감인 과제가 없어요.' : '과제 탭에서 연결 상태를 확인해 주세요.')+'</div>')+'</div></section>';
+  }
   function row(e) {
+    if (e.source === 'assignment' && A) return A.row(e);
     return `<div class="task-row ${e.source === 'personal' ? 'personal' : ''} ${e.completed ? 'done' : ''} ${e.cancelled ? 'cancelled' : ''}"><input aria-label="${esc(e.title)} 완료" type="checkbox" data-complete="${esc(e.id)}" data-source="${e.source}" ${e.completed ? 'checked' : ''} ${e.cancelled ? 'disabled' : ''}><button class="task-main" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="task-title">${esc(e.title)} ${e.cancelled ? '<span class="badge">취소</span>' : ''}</span><span class="task-meta">${esc(e.channel || '개인 할 일')} · ${esc(e.start_date !== e.end_date ? period(e) : kindName[e.kind] || e.kind)}</span></button><span class="task-time">${esc(e.time || '종일')}</span></div>`;
   }
   function list(items, empty = '표시할 할 일이 없어요.') {return items.length ? items.map(row).join('') : `<div class="empty">${empty}</div>`;}
@@ -451,7 +486,7 @@
   function render() {
     rememberQuickDraft();
     if (S.me && listControls?.isComposing()) return;
-    const key = JSON.stringify([S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.teamsUnverified,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,plannerStatus,!!draftUi?.available,undoTrash?.id]);
+    const key = JSON.stringify([S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.teamsUnverified,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,S.assignments,S.assignmentFilter,plannerStatus,!!draftUi?.available,undoTrash?.id]);
     if (key === lastRenderKey) {updateRefreshStatus(); updateSyncStatus(); return;}
     const searchFocus = listControls?.captureFocus();
     const input = $('#quick-form')?.elements?.title;
@@ -463,6 +498,13 @@
   }
   function renderContent() {
     if (!S.me) return;
+    if ($('#nav-assignments')) {$('#nav-assignments').hidden = !assignmentsEnabled(); $('#nav-assignments').classList.toggle('active',S.view === 'assignments');}
+    if (assignmentsEnabled() && S.view === 'assignments') {
+      topbar.hidden = false; $('#account-name').textContent = S.me.name;
+      $('#nav-today').classList.toggle('active',false); $('#nav-calendar').classList.toggle('active',false);
+      const connect = '/auth/login?assignments=1' + (S.connection?.background_enabled === true ? '&background=1' : '');
+      root.innerHTML = A.render(S.assignments,S.assignmentFilter,connect); return;
+    }
     if (!S.today) return renderLoadState();
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
     $('#nav-today').classList.toggle('active', S.view === 'today'); $('#nav-calendar').classList.toggle('active', S.view === 'calendar');
@@ -473,14 +515,14 @@
     const teamsPending = S.teamsUnverified || !S.ready.today || (SCHOOL && S.service?.mode !== 'preview' && (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state !== 'connected'));
     const teamsCount = teamsPending && !S.today.teams.length ? (!S.ready.today || !S.ready.settings || S.connection?.ingestion_pending || S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : teams.length;
     const teamsEmpty = S.teamsUnverified ? '권한을 다시 확인하는 동안 Teams 일정을 잠시 숨겼어요. 확인되면 다시 표시돼요.' : !S.ready.today ? (S.partErrors.today || 'Teams 일정을 확인하는 대로 표시해요.') : teamsPending ? (S.connection?.ingestion_pending || !S.ready.settings ? 'Teams 일정을 확인하는 대로 표시해요.' : connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
-    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + plannerTools() + listTools('today',[...S.today.teams,...S.today.personal,...S.upcoming]) + `<div class="today-layout"><div class="stack"><section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${!S.ready.today && !S.today.teams.length ? `<div class="empty" role="${S.partErrors.today && !S.permissionPending ? 'alert' : 'status'}">${esc(teamsEmpty)}</div>` : list(teams, filteredEmpty(teamsEmpty,S.today.teams.length))}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${personal.length}</span></h2></div><div class="list">${list(personal, filteredEmpty('오늘 할 일을 가볍게 적어보세요.',S.today.personal.length))}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">${S.ready.today ? '완료한 항목은 원래 위치에 남아요.' : '먼저 확인된 개인 할 일 기준이에요. Teams 일정은 확인 중이에요.'}</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : `<div class="empty">${esc(filteredEmpty('일주일 안에 다가오는 마감이 없어요.',S.upcoming.length))}</div>`}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
+    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + plannerTools() + listTools('today',[...S.today.teams,...S.today.personal,...S.upcoming]) + `<div class="today-layout"><div class="stack">${assignmentToday()}<section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${!S.ready.today && !S.today.teams.length ? `<div class="empty" role="${S.partErrors.today && !S.permissionPending ? 'alert' : 'status'}">${esc(teamsEmpty)}</div>` : list(teams, filteredEmpty(teamsEmpty,S.today.teams.length))}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${personal.length}</span></h2></div><div class="list">${list(personal, filteredEmpty('오늘 할 일을 가볍게 적어보세요.',S.today.personal.length))}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">${S.ready.today ? '완료한 항목은 원래 위치에 남아요.' : '먼저 확인된 개인 할 일 기준이에요. Teams 일정은 확인 중이에요.'}</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : `<div class="empty">${esc(filteredEmpty('일주일 안에 다가오는 마감이 없어요.',S.upcoming.length))}</div>`}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
   }
   function renderCalendar() {
     if (!S.ready.calendar) {
       root.innerHTML = intro('캘린더', '확인된 일정부터 표시해요.') + `<section class="card"><div class="card-head"><h2>${esc(S.month)}</h2></div><div class="empty" role="status">${esc(S.partErrors.calendar || '달력 일정을 불러오고 있어요.')}</div></section>`;
       return;
     }
-    const visibleItems = shownItems(S.items);
+    const visibleItems = shownItems([...S.items,...assignmentCalendar()]);
     const weeks = C.layoutRanges(visibleItems, S.month);
     const gridHtml = weeks.map(week => {
       const rows = week.lanes + 2;
@@ -534,10 +576,14 @@
     }
   }
   document.addEventListener('cancel', async event => {if (event.target !== modal) return; if (plannerEnabled() && personalForm()) {event.preventDefault(); if (!S.busy && await leaveTaskForm()) closeDialog();} else {dialogEpoch++; dialogRequestId++;}}, true);
-  function find(id, source) {return [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming].find(e => e.id === id && e.source === source);}
+  function find(id, source) {return [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming, ...(S.assignments?.items || [])].find(e => e.id === id && e.source === source);}
   let detailItem = null;
   function detail(e) {
     detailItem = e;
+    if (e.source === 'assignment' && A) {
+      openDialog(e.title, '<p class="detail-meta">'+esc(e.channel)+' · Teams 과제</p><p>'+esc(e.end_date ? period(e)+' '+(e.time || '') : '기한 없음')+'</p><p>'+esc(A.status(e))+'</p><p class="muted fine">제출 상태는 Teams에서 읽어 와요. 제출과 수정은 Teams에서 진행해 주세요.</p>'+sourceLink(e.source_url)+'<div class="detail-notes">'+esc(e.notes || '자세한 안내는 Teams 과제에서 확인해 주세요.')+'</div>', '<button class="secondary" data-action="close">닫기</button>');
+      return;
+    }
     openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + sourceLink(e.source_url) : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : (testServer() ? '<button class="secondary" data-action="override-detail">나만 수정</button>' : '')}${testServer() ? '<button class="secondary" data-action="reminders">예약 알림</button>' : ''}`, e.source === 'teams');
   }
   function taskForm(e = null, draft = null) {
@@ -673,11 +719,11 @@
     const button = event.target.closest('button'); if (!button || button.disabled) return;
     const action = button.dataset.action;
     if (S.busy && !['logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
-    if (!S.today && !['today', 'calendar', 'refresh', 'retry-boot', 'logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
+    if (!S.today && !['today', 'calendar', 'assignments', 'refresh-assignments', 'refresh', 'retry-boot', 'logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
     const sessionEpoch = authEpoch, ownerDialog = dialogEpoch;
     try {
-      const leavesForm = button.dataset.detail || ['close','today','calendar','new','filters','hidden','feedback','changes','notifications','security','task-trash'].includes(action);
-      if (leavesForm && personalForm()) {if (!await leaveTaskForm() || !activeView(sessionEpoch) || ownerDialog !== dialogEpoch) return; if (['today','calendar'].includes(action)) closeDialog();}
+      const leavesForm = button.dataset.detail || ['close','today','calendar','assignments','new','filters','hidden','feedback','changes','notifications','security','task-trash'].includes(action);
+      if (leavesForm && personalForm()) {if (!await leaveTaskForm() || !activeView(sessionEpoch) || ownerDialog !== dialogEpoch) return; if (['today','calendar','assignments'].includes(action)) closeDialog();}
       if (plannerEnabled() && action === 'task-trash') return await openTrash();
       if (plannerEnabled() && action === 'restore-trash') {if (trashItems.some(item => item.id === button.dataset.trashId)) return await restoreTrash(button.dataset.trashId); return;}
       if (plannerEnabled() && action === 'undo-trash') return await restoreTrash(undoTrash?.id);
@@ -687,12 +733,14 @@
       if (plannerEnabled() && action === 'draft-replace') {const result = await taskDrafts?.replace(); if (result?.ok) toast('현재 내용을 임시저장했어요.'); return;}
       if (plannerEnabled() && action === 'draft-discard') {if (confirm('서버의 임시저장을 지울까요? 현재 입력은 유지돼요.')) {const result = await taskDrafts?.discard(); if (result?.ok) toast('서버의 임시저장을 지웠어요.');} return;}
       if (button.dataset.changeDecision !== undefined) {const item = reviewDialogItems.get(button.dataset.changeId); if (!item) return; return mutate(() => api('/api/changes/'+encodeURIComponent(item.id),{method:'POST',body:{accept:button.dataset.changeDecision==='accept'}}),'변경사항을 처리했어요.');}
+      if (button.dataset.assignmentFilter && assignmentsEnabled()) {S.assignmentFilter = ['upcoming','overdue','completed','all'].includes(button.dataset.assignmentFilter) ? button.dataset.assignmentFilter : 'upcoming'; render(); return;}
+      if (action === 'refresh-assignments' && assignmentsEnabled()) return await loadAssignments(true);
       if (button.dataset.detail) {const e = find(button.dataset.detail, button.dataset.source); if (e) detail(e); return;}
       if (button.dataset.day) {S.selected = button.dataset.day; render(); return;}
       if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); draftInputChanged(); return;}
       if (button.dataset.restore !== undefined) {const e = hiddenItems[Number(button.dataset.restore)]; return mutateState(e, {hidden: false}, '일정을 복원했어요.');}
       if (action === 'close') {closeDialog(); return;}
-      if (action === 'today' || action === 'calendar') {S.view = action; if (S.me) render(); return;}
+      if (action === 'today' || action === 'calendar' || (action === 'assignments' && assignmentsEnabled())) {S.view = action; if (S.me) render(); return;}
       if (action === 'refresh') {if (!S.refreshing) return await load(); return;}
       if (action === 'retry-boot') return await boot();
       if (action === 'new') return taskForm();
@@ -932,3 +980,4 @@
   }
   boot();
 })();
+

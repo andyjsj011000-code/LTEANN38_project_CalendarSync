@@ -1,0 +1,85 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const dir = path.resolve(__dirname,'../web_service/static');
+const listeners = {}, requests = [];
+const elements = Object.fromEntries(['app','modal','topbar','account-name','nav-today','nav-calendar','nav-assignments','toast','login-error'].map(id => [id,{innerHTML:'',textContent:'',hidden:true,classList:{toggle(){}},replaceChildren(){this.innerHTML='';}}]));
+elements.modal.close = function(){this.open=false;};
+elements.modal.showModal = function(){this.open=true;};
+let signedIn = true, resolveAssignments, result = null;
+const now = Date.parse('2026-11-08T05:00:00Z');
+class Clock extends Date {constructor(...a){super(...(a.length ? a : [now]));} static now(){return now;}}
+const item = (id,day,extra={}) => ({id,source:'assignment',kind:'assignment',title:id,channel:'물리실험',start_date:day,end_date:day,time:'23:59',due_at:day+'T14:59:00Z',completed:false,submission_status:'working',source_url:'https://teams.microsoft.com/l/entity/test',...extra});
+const context = {
+ window:{},location:{protocol:'https:',search:''},console,Intl,Date:Clock,Set,Map,AbortController,DOMException,URL,
+ setTimeout(){return 1;},clearTimeout(){},
+ document:{documentElement:{dataset:{mode:'school'}},hidden:false,querySelector(s){return elements[s.slice(1)] || null;},querySelectorAll(){return [];},addEventListener(t,h){listeners[t]=h;}},
+ async fetch(url,options){
+  requests.push(url);
+  let status=200,data;
+  if(url==='/api/service') data={mode:'test-server',school_login:true,assignments_enabled:true,personal_agenda:true};
+  else if(url==='/api/me'){status=signedIn?200:401;data={id:'student',name:'학생',csrf_token:'csrf'};}
+  else if(url.startsWith('/api/assignments')) data=result || await new Promise(r=>{resolveAssignments=r;});
+  else if(url==='/api/today') data={date:'2026-11-08',teams:[],personal:[]};
+  else if(url==='/api/personal/today') data={date:'2026-11-08',personal:[]};
+  else if(url.startsWith('/api/calendar')) data={items:[]};
+  else if(url==='/api/channels') data=[];
+  else if(url==='/api/settings') data={preferences:{disabled_kinds:[]},connection:{state:'connected',background_enabled:true}};
+  else if(url==='/api/changes') data={items:[]};
+  else if(url==='/auth/logout'){signedIn=false;status=204;}
+  else throw new Error('Unexpected '+url);
+  return {status,ok:status<400,async json(){return data;}};
+ }
+};
+vm.createContext(context);
+for(const name of ['beta-calendar.js','beta-assignments.js','beta.js']) vm.runInContext(fs.readFileSync(path.join(dir,name),'utf8'),context);
+const tick=()=>new Promise(r=>setImmediate(r));
+const flush=async()=>{for(let i=0;i<12;i++) await tick();};
+const click=dataset=>listeners.click({target:{closest(){return {dataset};}}});
+(async()=>{
+ await flush();
+ assert.match(elements.app.innerHTML,/오늘 할 일/); // assignments must not block the agenda
+ await click({action:'assignments'});
+ assert.match(elements.app.innerHTML,/불러오는 중/);
+ resolveAssignments({items:[],state:'permission_required',checked_at:0});
+ await flush();
+ assert.match(elements.app.innerHTML,/Teams 과제 연결하기/);
+ assert.match(elements.app.innerHTML,/assignments=1&amp;background=1/);
+ result={state:'connected',checked_at:now/1000,items:[
+  item('upcoming','2026-11-12',{title:'<img src=x onerror=alert(1)>'}),
+  item('today','2026-11-08'), item('overdue','2026-11-07'),
+  item('done','2026-11-09',{completed:true,submission_status:'submitted'}),
+  item('undated',null,{due_at:null,time:null})
+ ]};
+ await click({action:'refresh-assignments'});
+ assert.match(elements.app.innerHTML,/&lt;img/);
+ assert.ok(!elements.app.innerHTML.includes('<img'));
+ assert.ok(!elements.app.innerHTML.includes('data-complete'));
+ assert.match(elements.app.innerHTML,/기한 없음/);
+ await click({assignmentFilter:'completed'});
+ assert.match(elements.app.innerHTML,/제출됨/);
+ assert.ok(!elements.app.innerHTML.includes('data-detail="overdue"'));
+ await click({assignmentFilter:'overdue'});
+ assert.match(elements.app.innerHTML,/data-detail="overdue"/);
+ await click({action:'calendar'});
+ assert.match(elements.app.innerHTML,/data-detail="upcoming"/);
+ await click({detail:'upcoming',source:'assignment'});
+ assert.match(elements.modal.innerHTML,/제출과 수정은 Teams에서/);
+ assert.ok(!elements.modal.innerHTML.includes('hide-detail'));
+ await click({action:'today'});
+ assert.match(elements.app.innerHTML,/오늘 마감 과제/);
+ assert.match(elements.app.innerHTML,/data-detail="today"/);
+ result=null;
+ const pending=click({action:'refresh-assignments'});
+ await flush();
+ const late=resolveAssignments;
+ await click({action:'logout'});
+ late({items:[item('private-late','2026-11-12')],state:'connected'});
+ await pending; await flush();
+ assert.match(elements.app.innerHTML,/Microsoft 로그인/);
+ assert.ok(!elements.app.innerHTML.includes('private-late'));
+ console.log('Assignments UI: independent loading, consent, status tabs, escaping, calendar, details and logout race passed.');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+

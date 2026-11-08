@@ -18,3 +18,10 @@
 .trash-row > button {flex-shrink:0;}
 #task-draft-actions {margin-bottom:14px;}
 @media(max-width:600px) {.planner-tools,.planner-sync {align-items:flex-start;}.planner-sync {width:100%;}.list-controls .dialog-body {padding:16px;}.trash-row {align-items:flex-start;}}
+:root { --assignment-color: #7050b4; }
+.assignment-tabs { display:flex; flex-wrap:wrap; gap:8px; margin:20px 0 12px; }
+.assignment-tabs .active { background:var(--assignment-color); color:white; border-color:var(--assignment-color); }
+.assignment-mark { color:var(--assignment-color); font-size:12px; font-weight:700; padding:5px; }
+.assignment-group { margin:16px 0; }
+.assignment .task-time { min-width:48px; }
+.single-event.assignment { color:#65409c; background:#f1eafa; }

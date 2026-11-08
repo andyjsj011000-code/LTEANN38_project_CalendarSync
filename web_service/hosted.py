@@ -27,6 +27,7 @@ class HostedConfig:
     bootstrap_new_schema: bool=False
     shared_ingestion: bool=False
     planner_enhancements: bool=False
+    assignments: bool=False
 
     def describe(self):
         return {'storage_backend':'postgresql-experimental','callback_url':self.settings.callback_url,
@@ -34,6 +35,7 @@ class HostedConfig:
                 'ingestion_mode':'direct','automatic_schema_changes':self.bootstrap_new_schema,
                 'shared_channel_ingestion':self.shared_ingestion,
                 'planner_enhancements':self.planner_enhancements,
+                'assignments_enabled':self.assignments,
                 'connection':self.connection.describe()}
 
 
@@ -68,10 +70,13 @@ def configuration(environ=None):
         raise ValueError('Invalid shared channel ingestion setting')
     if env.get('WEB_PLANNER_ENHANCEMENTS','0') not in {'0','1'}:
         raise ValueError('Invalid planner enhancement setting')
+    if env.get('WEB_ASSIGNMENTS_ENABLED','0') not in {'0','1'}:
+        raise ValueError('Invalid assignment ingestion setting')
     return HostedConfig(settings,factory,ai_key,env.get('WEB_LLM_MODEL','gpt-4o-mini'),
                         env.get('WEB_AI_IMAGES_ENABLED','1')=='1',env.get('WEB_BOOTSTRAP_NEW_SCHEMA','0')=='1',
                         env.get('WEB_SHARED_CHANNEL_INGESTION','0')=='1',
-                        env.get('WEB_PLANNER_ENHANCEMENTS','0')=='1')
+                        env.get('WEB_PLANNER_ENHANCEMENTS','0')=='1',
+                        env.get('WEB_ASSIGNMENTS_ENABLED','0')=='1')
 
 
 def create_hosted_app(environ=None,*,identity=None,graph=None,source=None,sender=None,worker=True):
@@ -96,7 +101,8 @@ def create_hosted_app(environ=None,*,identity=None,graph=None,source=None,sender
     database=PostgresDatabase(config.connection,config.settings.data_key,config.settings.tenant_id,
                              shared_ingestion_enabled=config.shared_ingestion,
                              planner_enhancements_enabled=config.planner_enhancements)
-    return create_test_server(config.settings,database,identity,graph,source,sender,worker=worker)
+    options={'assignments_enabled':True} if config.assignments else {}
+    return create_test_server(config.settings,database,identity,graph,source,sender,worker=worker,**options)
 
 
 def main():

@@ -54,12 +54,18 @@ class ServerIntegration(SchoolIntegration):
     @property
     def shared_ingestion_enabled(self):
         return bool(getattr(self.db,'shared_ingestion_enabled',False) and hasattr(self.source,'collect'))
-    def begin_login(self,provider,request): return provider.begin(background=request.query_params.get('background')=='1')
+    def begin_login(self,provider,request):
+        options={'background':request.query_params.get('background')=='1'}
+        if request.query_params.get('assignments')=='1':
+            if not getattr(self,'assignments_enabled',False): raise ValueError('Assignments unavailable')
+            options['assignments']=True
+        return provider.begin(**options)
     def complete_sign_in(self,raw,user,claims,request):
         old=request.cookies.get(self.device_cookie)
         if old: self.db.revoke_device(digest(old))
         proof=claims['_graph']; link=claims.get('_connection',{})
-        device,age=self.db.add_connection(raw,user,proof['token'],int(proof['expires_in']),link.get('cache',''),bool(link.get('background')))
+        extra={'assignment_access':True} if link.get('assignment_access') else {}
+        device,age=self.db.add_connection(raw,user,proof['token'],int(proof['expires_in']),link.get('cache',''),bool(link.get('background')),**extra)
         self._cookie_responses[digest(raw)]=(device,age)
         self.db.audit('connected',user)
     def login_response(self,response,raw):
@@ -397,7 +403,7 @@ class ServerIntegration(SchoolIntegration):
                 if current and current['state']!='reauth_required': self.notifications.dispatch(current)
         finally: self.db.worker_unlock(owner)
 
-def create_test_server(settings=None,database=None,identity=None,graph=None,source=None,sender=None,worker=True,preview=False,notification_runtime=None):
+def create_test_server(settings=None,database=None,identity=None,graph=None,source=None,sender=None,worker=True,preview=False,notification_runtime=None,assignments_enabled=False):
     if database is None:
         from .render_guard import ensure_hosted_storage_supported
         ensure_hosted_storage_supported()
@@ -427,12 +433,24 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     static=Path(__file__).with_name('static')
     app=create_app(settings,db,provider,frontend_directory=static,integration=integration,frontend_entry='school.html')
     app.state.integration=integration
+    integration.assignments_enabled=bool(assignments_enabled and not preview)
+    if integration.assignments_enabled:
+        from .assignments import AssignmentService,AssignmentGraph
+        assignment_graph=AssignmentGraph(client_factory=getattr(graph,'client_factory',None))
+        app.state.assignments=AssignmentService(db,integration.tokens,assignment_graph)
+        app.state.assignments.initialize()
     if notification_runtime is not None:
         # Explicit injection only: the default entry point is not ready for deployment.
         from .notification_webhook import create_notification_router
         app.include_router(create_notification_router(notification_runtime.inbox))
     app.add_middleware(SecurityBoundary,settings=settings)
     require=app.state.require_session
+
+    @app.get('/api/assignments')
+    def assignments(refresh:bool=False,session=Depends(require)):
+        if not integration.assignments_enabled: raise HTTPException(404,'Assignments unavailable')
+        if refresh and not db.allow('assignment-sync:'+session['user_id'],2): raise HTTPException(429,'Wait before syncing again')
+        return app.state.assignments.read(session,force=refresh)
 
     @app.exception_handler(RequestValidationError)
     async def invalid(request,error): return JSONResponse({'detail':'Check the input and dates'},status_code=422)
@@ -465,7 +483,7 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
     app.router.lifespan_context=lifespan
 
     @app.get('/api/service')
-    def info(): return {'mode':'preview' if preview else 'test-server','school_login':not preview,'synthetic_data_only':preview,'idle_seconds':settings.idle_seconds,'shared_channel_ingestion':integration.shared_ingestion_enabled,'personal_agenda':True,'planner_enhancements':bool(getattr(db,'planner_enhancements_enabled',False))}
+    def info(): return {'mode':'preview' if preview else 'test-server','school_login':not preview,'synthetic_data_only':preview,'idle_seconds':settings.idle_seconds,'shared_channel_ingestion':integration.shared_ingestion_enabled,'personal_agenda':True,'assignments_enabled':integration.assignments_enabled,'planner_enhancements':bool(getattr(db,'planner_enhancements_enabled',False))}
     @app.get('/service-worker.js')
     def service_worker(): return FileResponse(static/'service-worker.js',media_type='text/javascript',headers={'Service-Worker-Allowed':'/','Cache-Control':'no-store'})
     @app.get('/manifest.webmanifest')
@@ -546,3 +564,4 @@ def create_test_server(settings=None,database=None,identity=None,graph=None,sour
         outcomes=[integration.sender.send(s['subscription'],{'title':'CalendarSync','body':'테스트 알림이 도착했어요.','url':'/','tag':'calendarsync-test'}) for s in subscriptions]
         return {'accepted':outcomes.count('sent'),'failed':len(outcomes)-outcomes.count('sent')}
     return app
+

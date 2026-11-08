@@ -79,11 +79,11 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
                 'checked_at':rows[0][1] or 0 if rows else 0,
                 'channels':frozenset(row[2] for row in rows if row[2] is not None)}
 
-    def add_connection(self,raw_session,user_id,token,lifetime,cache='',background=False):
+    def add_connection(self,raw_session,user_id,token,lifetime,cache='',background=False,*,assignment_access=False):
         raw=secrets.token_urlsafe(32); now=int(self.clock())
         expires=now+(30*86400 if background and cache else min(lifetime,3600))
         with self.connect() as c:
-            c.execute('INSERT INTO web_connections(id_hash,user_id,credential_blob,token_expires,expires_at,background) VALUES(?,?,?,?,?,?)',(digest(raw),user_id,self.seal({'token':token,'cache':cache}),now+lifetime,expires,int(background and bool(cache))))
+            c.execute('INSERT INTO web_connections(id_hash,user_id,credential_blob,token_expires,expires_at,background) VALUES(?,?,?,?,?,?)',(digest(raw),user_id,self.seal({'token':token,'cache':cache,**({'assignment_access':True} if assignment_access else {})}),now+lifetime,expires,int(background and bool(cache))))
             c.execute('INSERT INTO web_session_links VALUES(?,?,?)',(digest(raw_session),digest(raw),now))
         return raw,expires-now
 
@@ -118,7 +118,10 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
 
     def save_refresh(self,device_hash,lease,token,lifetime,cache):
         with self.connect() as c:
-            changed=c.execute("UPDATE web_connections SET credential_blob=?,token_expires=?,refresh_lease=NULL,refresh_until=0,version=version+1,state='connected' WHERE id_hash=? AND refresh_lease=? AND active=1 AND expires_at>?",(self.seal({'token':token,'cache':cache}),int(self.clock())+lifetime,device_hash,lease,int(self.clock()))).rowcount
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT credential_blob FROM web_connections WHERE id_hash=?',(device_hash,)).fetchone()
+            extra={'assignment_access':True} if row and self.unseal(row[0]).get('assignment_access') else {}
+            changed=c.execute("UPDATE web_connections SET credential_blob=?,token_expires=?,refresh_lease=NULL,refresh_until=0,version=version+1,state='connected' WHERE id_hash=? AND refresh_lease=? AND active=1 AND expires_at>?",(self.seal({'token':token,'cache':cache,**extra}),int(self.clock())+lifetime,device_hash,lease,int(self.clock()))).rowcount
         return bool(changed)
 
     def fail_connection(self,device_hash,lease=None):
@@ -433,3 +436,4 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             c.execute('DELETE FROM web_auth_flows WHERE expires_at<=?',(now,))
             c.execute('DELETE FROM web_security_audit WHERE at<?',(now-7*86400,))
             c.execute('DELETE FROM web_source_cache WHERE updated_at<?',(now-90*86400,))
+

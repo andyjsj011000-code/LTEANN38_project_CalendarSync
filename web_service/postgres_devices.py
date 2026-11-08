@@ -42,7 +42,7 @@ class PostgresDevices:
         return ({**dict(zip(self._DEVICE_FIELDS, row)), 'user_active': bool(user[0])}
                 if row else None)
 
-    def add_connection(self, raw_session, user_id, token, lifetime, cache='', background=False):
+    def add_connection(self, raw_session, user_id, token, lifetime, cache='', background=False, *, assignment_access=False):
         self._lifetime(lifetime)
         raw = secrets.token_urlsafe(32)
         with self.connect() as db:
@@ -57,7 +57,7 @@ class PostgresDevices:
             db.execute('''INSERT INTO web_connections
                 (id_hash,user_id,credential_blob,token_expires,expires_at,background)
                 VALUES(%s,%s,%s,%s,%s,%s)''',
-                (digest(raw), user_id, self.seal({'token': token, 'cache': cache}),
+                (digest(raw), user_id, self.seal({'token': token, 'cache': cache, **({'assignment_access':True} if assignment_access else {})}),
                  now + lifetime, expires, int(persistent)))
             db.execute('INSERT INTO web_session_links VALUES(%s,%s,%s)',
                        (digest(raw_session), digest(raw), now))
@@ -154,7 +154,8 @@ class PostgresDevices:
                 return False
             db.execute('''UPDATE web_connections SET credential_blob=%s,token_expires=%s,
                 refresh_lease=NULL,refresh_until=0,version=version+1,state='connected'
-                WHERE id_hash=%s''', (self.seal({'token': token, 'cache': cache}), now + lifetime, device_hash))
+                WHERE id_hash=%s''', (self.seal({'token': token, 'cache': cache,
+                    **({'assignment_access':True} if self.unseal(device['credential_blob']).get('assignment_access') else {})}), now + lifetime, device_hash))
         return True
 
     def fail_connection(self, device_hash, lease=None):

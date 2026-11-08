@@ -65,7 +65,7 @@ class DelegatedGraph:
         return not self._retry_wait(delay,stopped)
 
     def _read(self, client, token, url, *, forbidden_missing=True, deadline=None,
-              stopped=None, retry_gate=None):
+              stopped=None, retry_gate=None, forbidden_state=None):
         parsed = urlsplit(url)
         stage=_graph_stage(parsed)
         if parsed.scheme != "https" or parsed.netloc != "graph.microsoft.com" or not parsed.path.startswith("/v1.0/") or parsed.fragment:
@@ -86,6 +86,7 @@ class DelegatedGraph:
                         pass
                     elif status!=200:
                         _graph_log(stage,'http_failure',status,attempt)
+                        if status==403 and forbidden_state: raise GraphFailure(forbidden_state)
                         if status==403 and forbidden_missing: return None
                         if status==404: return None
                         if status==401: raise GraphFailure('reauth_required')
@@ -266,3 +267,4 @@ class DelegatedGraph:
                     candidates.setdefault(channel_id,[]).append((len(routes),candidate))
                     routes.add(route)
         return self._permitted_channels(token,list(candidates.values()),deadline)
+
