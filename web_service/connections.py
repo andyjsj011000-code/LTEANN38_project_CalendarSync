@@ -1,12 +1,18 @@
 """MSAL caches belong to a device connection, independently of a viewing session."""
 
+from __future__ import annotations
+
 from requests.exceptions import ConnectionError, RequestException, Timeout
 
+from .collection_types import DeviceSnapshot
+from .ports import ConnectionStore, TokenProvider, TokenRefresher
 from .school import SchoolIdentity
 from .school_graph import SCOPES, GraphFailure
 
 
-def acquire_snapshot(tokens, device, db):
+def acquire_snapshot(
+    tokens: TokenProvider, device: DeviceSnapshot, db: ConnectionStore
+) -> tuple[str, DeviceSnapshot]:
     """Use the current credential generation after a possible token refresh."""
     token = tokens.acquire(device)
     current = db.device(device["id_hash"])
@@ -82,7 +88,9 @@ class PersistentIdentity(SchoolIdentity):
             },
         }
 
-    def refresh(self, serialized, oid, tenant, *, assignments=False):
+    def refresh(
+        self, serialized: str, oid: str, tenant: str, *, assignments: bool = False
+    ) -> tuple[str, int, str]:
         from msal import SerializableTokenCache
 
         cache = SerializableTokenCache()
@@ -120,17 +128,19 @@ class PersistentIdentity(SchoolIdentity):
 
 
 class ConnectionTokens:
-    def __init__(self, db, identity):
+    def __init__(self, db: ConnectionStore, identity: TokenRefresher) -> None:
         self.db, self.identity = db, identity
 
-    def acquire(self, device):
+    def acquire(self, device: DeviceSnapshot) -> str:
         current = self.db.device(device["id_hash"])
         if not current:
             raise GraphFailure("reauth_required")
         payload = self.db.unseal(current["credential_blob"])
-        if current["token_expires"] > self.db.clock() + 60 and payload.get("token"):
-            return payload["token"]
-        if not current["background"] or not payload.get("cache"):
+        token = payload.get("token")
+        if current["token_expires"] > self.db.clock() + 60 and token:
+            return token
+        cache = payload.get("cache")
+        if not current["background"] or not cache:
             self.db.fail_connection(current["id_hash"])
             raise GraphFailure("reauth_required")
         lease = self.db.lock_refresh(current["id_hash"])
@@ -139,7 +149,7 @@ class ConnectionTokens:
         try:
             options = {"assignments": True} if payload.get("assignment_access") else {}
             token, lifetime, cache = self.identity.refresh(
-                payload["cache"], current["object_id"], current["tenant_id"], **options
+                cache, current["object_id"], current["tenant_id"], **options
             )
             if lifetime < 60 or not self.db.save_refresh(
                 current["id_hash"], lease, token, lifetime, cache

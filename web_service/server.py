@@ -1,5 +1,7 @@
 """Test-server entry point: persistent delegated ingestion, reviews and Web Push."""
 
+from __future__ import annotations
+
 import asyncio
 import hmac
 import logging
@@ -10,6 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
+from typing import cast
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
@@ -17,6 +20,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field, model_validator
 
 from .api import create_app
+from .collection_types import (
+    DeviceIdentity,
+    DeviceSnapshot,
+    PermissionReadiness,
+    PermissionSnapshot,
+    PreparedCollection,
+)
 from .config import Settings
 from .connections import ConnectionTokens, PersistentIdentity, acquire_snapshot
 from .direct_source import TeamsGraph, direct_source_from_env
@@ -69,7 +79,7 @@ class ServerIntegration(SchoolIntegration):
         self.sender = sender
         self.notifications = Notifications(db, sender)
         self._cookie_responses = {}
-        self._collection_proofs = {}
+        self._collection_proofs: dict[str, PreparedCollection] = {}
         self.notification_runtime = None
         self.device_cookie = (
             "__Host-calendarsync_device" if settings.secure_cookies else "calendarsync_device"
@@ -85,14 +95,14 @@ class ServerIntegration(SchoolIntegration):
             getattr(self.db, "shared_ingestion_enabled", False) and hasattr(self.source, "collect")
         )
 
-    def collection_proof(self, device):
+    def collection_proof(self, device: DeviceSnapshot) -> PreparedCollection | None:
         """Reuse verified routes only within the original permission lifetime."""
         prepared = self._collection_proofs.get(device["id_hash"])
         if not prepared or prepared["valid_until"] <= self.db.clock():
             return None
         if any(prepared["device"][key] != device[key] for key in prepared["device"]):
             return None
-        proof = self.db.teams_read_proof(device["user_id"], device["tenant_id"])
+        proof: PermissionSnapshot = self.db.teams_read_proof(device["user_id"], device["tenant_id"])
         if (
             proof["state"] not in {"connected", "checking"}
             or proof["checked_at"] + self.settings.access_seconds <= self.db.clock()
@@ -414,15 +424,21 @@ class ServerIntegration(SchoolIntegration):
             if self.shared_ingestion_enabled and not ingest:
                 # Internal-only handoff. It contains no token and never enters
                 # the API response; queued work revalidates the live device.
-                identity = {
-                    key: device[key]
-                    for key in ("id_hash", "user_id", "tenant_id", "object_id", "version")
+                identity: DeviceIdentity = {
+                    "id_hash": device["id_hash"],
+                    "user_id": device["user_id"],
+                    "tenant_id": device["tenant_id"],
+                    "object_id": device["object_id"],
+                    "version": device["version"],
                 }
-                prepared = {
-                    "device": identity,
-                    "channels": [dict(ch) for ch in channels],
-                    "valid_until": verified_at + self.settings.access_seconds,
-                }
+                prepared = cast(
+                    PreparedCollection,
+                    {
+                        "device": identity,
+                        "channels": [dict(ch) for ch in channels],
+                        "valid_until": verified_at + self.settings.access_seconds,
+                    },
+                )
                 # Bounded in-memory route hints; the database proof is checked on
                 # every reuse. Restart, logout, expiry and scope changes invalidate it.
                 if len(self._collection_proofs) >= 128:
@@ -557,7 +573,7 @@ class ServerIntegration(SchoolIntegration):
             result["ingestion"] = ingestion
         return result
 
-    def _teams_readiness(self, session):
+    def _teams_readiness(self, session) -> PermissionReadiness:
         """Read the original proof without creating or extending access."""
         if hasattr(self.db, "teams_read_proof"):
             proof = self.db.teams_read_proof(session["user_id"], session["tenant_id"])
@@ -589,7 +605,7 @@ class ServerIntegration(SchoolIntegration):
             "channels": frozenset(channel_ids),
         }
 
-    def _raise_unverified(self, readiness):
+    def _raise_unverified(self, readiness: PermissionReadiness):
         raise PermissionPending(
             state=readiness["state"],
             retryable=readiness["retryable"] or readiness["verified"],

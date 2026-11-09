@@ -3,7 +3,9 @@
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
+from .collection_types import CachedAnalysis, DeviceSnapshot
 from .planner_drafts import SQLiteTaskDrafts
 from .planner_trash import SQLiteTaskTrash
 from .school_storage import SchoolDatabase
@@ -150,15 +152,15 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             )
         return raw, expires - now
 
-    def device(self, device_hash):
+    def device(self, device_hash: str) -> DeviceSnapshot | None:
         with self.connect() as c:
             row = c.execute(
                 "SELECT d.*,u.tenant_id,u.object_id FROM web_connections d JOIN web_users u ON u.id=d.user_id WHERE d.id_hash=? AND d.active=1 AND d.expires_at>? AND u.active=1",
                 (device_hash, int(self.clock())),
             ).fetchone()
-        return dict(row) if row else None
+        return cast(DeviceSnapshot, dict(row)) if row else None
 
-    def session_device(self, session):
+    def session_device(self, session) -> DeviceSnapshot:
         with self.connect() as c:
             row = c.execute(
                 "SELECT device_hash FROM web_session_links WHERE session_hash=?",
@@ -796,7 +798,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             )
         return selected
 
-    def cached_messages(self, channel):
+    def cached_messages(self, channel: str) -> dict[str, CachedAnalysis]:
         with self.connect() as c:
             rows = c.execute(
                 "SELECT message_id,version,payload_blob FROM web_source_cache WHERE channel_id=? ORDER BY updated_at ASC",
