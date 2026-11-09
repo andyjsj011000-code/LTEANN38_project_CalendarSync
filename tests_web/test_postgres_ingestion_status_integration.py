@@ -1,4 +1,4 @@
-"""Durable collection status shares the real PostgreSQL snapshot transaction."""
+"""Durable PostgreSQL collection status is independent of permission snapshots."""
 
 import pytest
 from test_ingestion_status import CatalogSource, seed_catalog, session_device
@@ -51,7 +51,9 @@ def test_permission_refresh_queue_and_collection_have_distinct_success_times(tra
     assert s.db.ingestion_status(device)["last_success_at"] == success
 
 
-def test_partial_and_failed_final_verification_preserve_last_success(tracked, monkeypatch):
+def test_partial_collection_and_independent_verification_preserve_last_success(
+    tracked, monkeypatch
+):
     s, _, _, device = tracked
     s.integration.run_sync(device, ingest=True)
     success = s.db.ingestion_status(device)["last_success_at"]
@@ -74,25 +76,29 @@ def test_partial_and_failed_final_verification_preserve_last_success(tracked, mo
 
     monkeypatch.setattr(s.integration.source, "collect", collect)
     s.integration.run_sync(device, ingest=True)
-    failed = s.db.ingestion_status(device)
-    assert failed["state"] == "error" and failed["error_code"] == "verification_failed"
-    assert failed["last_success_at"] == success
+    partial = s.db.ingestion_status(device)
+    assert partial["state"] == "partial" and partial["last_success_at"] == success
+    s.integration.run_sync(device, force=True)
+    assert s.db.sync_status(device["user_id"])["state"] == "verification_failed"
+    assert s.db.channels(device["user_id"], device["tenant_id"]) == []
+    assert s.db.ingestion_status(device) == partial
 
 
-def test_failed_final_commit_never_marks_collection_success(tracked, monkeypatch):
+def test_failed_collection_transaction_rolls_back_success_and_schedule(tracked, monkeypatch):
     s, _, _, device = tracked
-    original_commit = s.db.commit_snapshot
+    original_finish = s.db.finish_ingestion_snapshot_in
 
     def fail_final(*args, **kwargs):
-        if kwargs.get("ingestion") is not None:
-            raise Missing()
-        return original_commit(*args, **kwargs)
+        original_finish(*args, **kwargs)
+        raise Missing()  # Fail after the terminal writes, inside their transaction.
 
-    monkeypatch.setattr(s.db, "commit_snapshot", fail_final)
+    monkeypatch.setattr(s.db, "finish_ingestion_snapshot_in", fail_final)
     s.integration.run_sync(device, ingest=True)
     result = s.db.ingestion_status(device)
     assert result["state"] == "error" and result["last_success_at"] is None
     assert s.db.device(device["id_hash"])["ingest_at"] == 0
+    assert s.db.sync_status(device["user_id"])["state"] == "connected"
+    assert s.db.channels(device["user_id"], device["tenant_id"])
 
 
 def test_terminal_status_and_schedule_roll_back_with_expired_snapshot(tracked, monkeypatch):
@@ -188,7 +194,7 @@ def test_attempt_expiring_after_terminal_write_rolls_back_on_postgres(tracked, m
     assert s.db.device(device["id_hash"])["ingest_at"] == 0
 
 
-def test_new_final_channel_keeps_collection_partial_and_status_content_free(tracked, monkeypatch):
+def test_new_permission_scope_does_not_rewrite_finished_collection_counts(tracked, monkeypatch):
     s, client, _, device = tracked
     collect = s.integration.source.collect
 
@@ -196,6 +202,7 @@ def test_new_final_channel_keeps_collection_partial_and_status_content_free(trac
         result = collect(*args)
         result.checked_channels = frozenset({"class"})
         result.scanned_channels = frozenset({"class"})
+        result.report["channels_checked"] = 1
         monkeypatch.setattr(
             s.graph,
             "channels",
@@ -207,10 +214,16 @@ def test_new_final_channel_keeps_collection_partial_and_status_content_free(trac
         return result
 
     monkeypatch.setattr(s.integration.source, "collect", collected)
-    assert s.integration.run_sync(device, ingest=True)["state"] == "partial"
+    assert s.integration.run_sync(device, ingest=True)["state"] == "completed"
     response = client.get("/api/teams/ingestion-status")
     status = response.json()
-    assert status["state"] == "partial" and status["last_success_at"] is None
-    assert status["counts"]["channels_total"] == 2 and status["counts"]["channels_checked"] == 1
+    assert status["state"] == "completed" and status["last_success_at"] == s.now[0]
+    assert status["counts"]["channels_total"] == 1 and status["counts"]["channels_checked"] == 1
     assert '"class"' not in response.text and '"other"' not in response.text
-    assert s.db.device(device["id_hash"])["ingest_at"] == 0
+    assert s.db.device(device["id_hash"])["ingest_at"] == s.now[0] + 300
+    s.integration.run_sync(device, force=True)
+    assert {ch["id"] for ch in s.db.channels(device["user_id"], device["tenant_id"])} == {
+        "class",
+        "other",
+    }
+    assert client.get("/api/teams/ingestion-status").json() == status
