@@ -1,5 +1,6 @@
 import pytest
-from test_server import server, subscription
+from test_server import server as server
+from test_server import subscription
 
 
 def device_for(server, client):

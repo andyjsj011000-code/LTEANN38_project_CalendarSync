@@ -1,10 +1,10 @@
 """Durable collection status shares the real PostgreSQL snapshot transaction."""
 
 import pytest
-
 from test_ingestion_status import CatalogSource, seed_catalog, session_device
-from test_postgres_server_integration import postgres_server
+from test_postgres_server_integration import postgres_server as postgres_server
 from test_shared_ingestion_server import DeferredTasks
+
 from web_service.planner_schema import enable_planner_schema
 from web_service.postgres_shared_schema import enable_shared_channel_schema
 from web_service.school_graph import GraphFailure

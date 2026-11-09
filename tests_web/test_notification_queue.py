@@ -1,5 +1,7 @@
 import sqlite3
+
 import pytest
+
 from web_service.notification_queue import NotificationQueue
 
 

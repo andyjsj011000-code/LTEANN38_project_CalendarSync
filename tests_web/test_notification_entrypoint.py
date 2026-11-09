@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
-from test_server import server
+from test_server import server as server
+
 from web_service.notification_queue import NotificationQueue
 from web_service.server import create_test_server
 

@@ -8,16 +8,15 @@ All identity, Teams and delivery implementations are deterministic test doubles.
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+from conftest import ALICE, BOB, CLIENT, TENANT
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
-import pytest
-
-from conftest import ALICE, BOB, CLIENT, TENANT
 from test_server import Graph, Identity, Sender, Source
+
 from web_service.config import Settings
 from web_service.server import create_test_server
 from web_service.test_storage import TestDatabase
-
 
 READ_ROUTES = ("/api/task-draft", "/api/task-trash", "/api/teams/ingestion-status")
 PRIVATE_MARKER = "planner-private-sentinel"

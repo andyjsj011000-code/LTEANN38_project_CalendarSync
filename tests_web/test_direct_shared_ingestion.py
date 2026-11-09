@@ -4,12 +4,12 @@ import json
 import threading
 
 import pytest
+from test_direct_ingestion_progress import Cache, Extractor, Graph, channels, message
 
 import web_service.direct_source as module
 from web_service.direct_source import DirectSource
 from web_service.school_graph import GraphFailure
 from web_service.storage import digest
-from test_direct_ingestion_progress import Cache, Extractor, Graph, channels, event, message
 
 
 class SharedCache(Cache):

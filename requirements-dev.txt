@@ -1,0 +1,2 @@
+# Development tools only; install the appropriate runtime requirements separately.
+ruff==0.17.4

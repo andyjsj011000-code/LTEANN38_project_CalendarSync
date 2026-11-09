@@ -12,18 +12,18 @@ import time
 
 from cryptography.fernet import Fernet
 
-from .postgres_auth_store import PostgresAuthStore
-from .postgres_devices import PostgresDevices
-from .postgres_events import PostgresEvents
-from .postgres_operations import PostgresOperations
-from .postgres_push import PostgresPush
-from .postgres_source_cache import PostgresSourceCache
-from .postgres_sync import PostgresSync
-from .postgres_channel_ingestion import PostgresChannelIngestion
-from .postgres_retention import PostgresRetention
 from .planner_drafts import PostgresTaskDrafts
 from .planner_trash import PostgresTaskTrash
+from .postgres_auth_store import PostgresAuthStore
+from .postgres_channel_ingestion import PostgresChannelIngestion
+from .postgres_devices import PostgresDevices
+from .postgres_events import PostgresEvents
 from .postgres_ingestion_status import PostgresIngestionStatus
+from .postgres_operations import PostgresOperations
+from .postgres_push import PostgresPush
+from .postgres_retention import PostgresRetention
+from .postgres_source_cache import PostgresSourceCache
+from .postgres_sync import PostgresSync
 
 
 class PostgresDatabase(

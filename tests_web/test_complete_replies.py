@@ -7,7 +7,6 @@ import web_service.direct_source as module
 from web_service.direct_source import DirectSource, TeamsGraph
 from web_service.school_graph import BASE, GraphFailure
 
-
 CHANNEL = {"id": "channel", "team_id": "team"}
 ROOT = "/v1.0/teams/team/channels/channel/messages/root"
 REPLIES = ROOT + "/replies"

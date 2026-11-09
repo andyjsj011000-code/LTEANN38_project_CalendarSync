@@ -2,11 +2,11 @@
 
 import httpx
 import pytest
+from test_direct_ingestion_progress import Extractor, channels, message
+from test_direct_shared_ingestion import SharedCache
 
 from web_service.direct_source import DirectSource, TeamsGraph
 from web_service.school_graph import BASE, GraphFailure
-from test_direct_ingestion_progress import Extractor, channels, message
-from test_direct_shared_ingestion import SharedCache
 
 
 class ImageBytes(httpx.SyncByteStream):

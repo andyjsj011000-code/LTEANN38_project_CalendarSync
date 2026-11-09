@@ -4,10 +4,10 @@ import asyncio
 from threading import Event
 from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
+from test_server import server as server
 
-from test_server import server
 import web_service.server as server_module
 
 

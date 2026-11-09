@@ -1,12 +1,12 @@
 """A missing permission proof is not a successful empty calendar response."""
 
-from datetime import date
 import json
 import logging
+from datetime import date
 
 import pytest
+from test_ingestion_status_orchestration import tracked_server as tracked_server
 
-from test_ingestion_status_orchestration import tracked_server
 from web_service.api import create_app
 from web_service.school_graph import GraphFailure
 from web_service.storage import PermissionPending

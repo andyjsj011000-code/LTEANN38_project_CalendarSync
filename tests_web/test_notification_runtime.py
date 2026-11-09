@@ -1,7 +1,9 @@
 import sqlite3
 from contextlib import contextmanager
 from types import SimpleNamespace
+
 from cryptography.fernet import Fernet
+
 from web_service.notification_queue import NotificationQueue
 from web_service.notification_runtime import NotificationRuntime
 from web_service.school_graph import GraphFailure

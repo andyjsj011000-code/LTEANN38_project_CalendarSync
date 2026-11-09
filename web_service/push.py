@@ -1,13 +1,15 @@
 """Web Push with endpoint validation, encrypted subscriptions and private payloads."""
 
 import base64
-from datetime import datetime, timedelta, timezone
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
+
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from pydantic import Field, model_validator
+
 from .schemas import Input
 from .storage import digest
 
@@ -89,8 +91,8 @@ class PushSender:
         return bool(self.public)
 
     def send(self, subscription, payload):
-        from pywebpush import webpush, WebPushException
         import requests
+        from pywebpush import WebPushException, webpush
 
         validated = Subscription.model_validate(subscription).model_dump()
 

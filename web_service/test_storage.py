@@ -1,14 +1,14 @@
 """SQLite persistence for the single-instance test server. Credentials are encrypted."""
 
-import hashlib
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
-from .school_storage import SchoolDatabase
-from .storage import Missing, Conflict, PermissionPending, digest
+
 from .planner_drafts import SQLiteTaskDrafts
 from .planner_trash import SQLiteTaskTrash
+from .school_storage import SchoolDatabase
 from .sqlite_ingestion_status import SQLiteIngestionStatus
+from .storage import Conflict, Missing, PermissionPending, digest
 
 EXTRA_SCHEMA = """
 CREATE TABLE IF NOT EXISTS web_connections (

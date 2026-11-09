@@ -10,7 +10,6 @@ from web_service import school_graph
 from web_service.direct_source import TeamsGraph
 from web_service.school_graph import BASE, DelegatedGraph, GraphFailure
 
-
 USER = "33333333-3333-4333-8333-333333333333"
 TEAM = "22222222-2222-4222-8222-222222222222"
 TENANT = "11111111-1111-4111-8111-111111111111"

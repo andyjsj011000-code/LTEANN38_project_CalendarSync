@@ -1,8 +1,9 @@
 """MSAL caches belong to a device connection, independently of a viewing session."""
 
-from requests.exceptions import RequestException, Timeout, ConnectionError
-from .school_graph import GraphFailure, SCOPES
+from requests.exceptions import ConnectionError, RequestException, Timeout
+
 from .school import SchoolIdentity
+from .school_graph import SCOPES, GraphFailure
 
 
 def acquire_snapshot(tokens, device, db):

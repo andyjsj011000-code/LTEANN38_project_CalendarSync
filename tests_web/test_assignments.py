@@ -1,21 +1,17 @@
 """Assignment reads, isolation, missing consent and timestamp boundaries."""
 
-from datetime import datetime, timezone
 from types import SimpleNamespace
-import json
-import sys
 
 import httpx
 import pytest
+from conftest import ALICE, BOB, CLIENT
+from test_postgres_server_integration import postgres_server as postgres_server
+from test_server import server as server
 
-from conftest import TENANT, CLIENT, ALICE, BOB
-from test_server import server
-from test_postgres_server_integration import postgres_server
 from web_service.assignments import AssignmentGraph, AssignmentService, normalize_assignment
 from web_service.connections import PersistentIdentity
 from web_service.school_graph import GraphFailure
 from web_service.server import create_test_server
-from web_service.storage import digest
 
 
 def assignment(**changes):

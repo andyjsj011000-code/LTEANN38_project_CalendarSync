@@ -8,9 +8,9 @@ schema; neither path migrates or overwrites existing tables or rows.
 """
 
 import argparse
-from dataclasses import dataclass, field
 import json
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Settings
@@ -104,13 +104,13 @@ def create_hosted_app(
 ):
     config = configuration(environ)
     if config.bootstrap_new_schema:
-        from .postgres_bootstrap import schema_exists, apply_bootstrap
+        from .postgres_bootstrap import apply_bootstrap, schema_exists
 
         # Explicit opt-in for the confirmed new beta DB. Existing namespaces
         # are validated below and never migrated or overwritten here.
         if not schema_exists(config.connection):
             apply_bootstrap(config.connection)
-    from .direct_source import TeamsGraph, DirectSource, AIExtractor
+    from .direct_source import AIExtractor, DirectSource, TeamsGraph
     from .server import create_test_server
 
     graph = graph if graph is not None else TeamsGraph()

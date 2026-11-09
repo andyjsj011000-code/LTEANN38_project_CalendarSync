@@ -1,8 +1,10 @@
 """Local, fake-Graph end-to-end check; no real service is contacted."""
 
 import sqlite3
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
 from web_service.direct_source import DirectSource
 from web_service.notification_queue import NotificationQueue
 from web_service.notification_webhook import create_notification_router

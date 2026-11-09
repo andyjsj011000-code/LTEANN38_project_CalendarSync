@@ -2,17 +2,16 @@
 
 import ast
 import hashlib
-from html.parser import HTMLParser
 import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import zipfile
+from html.parser import HTMLParser
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
-
 
 spec = importlib.util.spec_from_file_location(
     "web_release_build", Path(__file__).parents[1] / "tools" / "build_web_release.py"

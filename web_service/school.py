@@ -1,16 +1,18 @@
 """School web entry point. Start with uvicorn web_service.school:create_school_app --factory."""
 
 from pathlib import Path
-from fastapi import Depends, HTTPException, Request, Response
+
+from fastapi import Depends, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, FileResponse
-from .api import create_app, SESSION_COOKIE
+from fastapi.responses import FileResponse, JSONResponse
+
+from .api import SESSION_COOKIE, create_app
 from .config import Settings
-from .identity import MicrosoftIdentity, validate_identity
+from .identity import MicrosoftIdentity
 from .oracle_source import source_from_env
-from .school_graph import DelegatedGraph, GraphFailure, SCOPES
-from .school_storage import SchoolDatabase
+from .school_graph import SCOPES, DelegatedGraph, GraphFailure
 from .school_security import SecurityBoundary
+from .school_storage import SchoolDatabase
 
 
 class SchoolIdentity(MicrosoftIdentity):

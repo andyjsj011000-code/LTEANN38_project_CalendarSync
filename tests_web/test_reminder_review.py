@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
-from test_server import server
+
+from test_server import server as server
 
 
 def test_expired_saved_custom_reminder_does_not_block_offset_changes(server):

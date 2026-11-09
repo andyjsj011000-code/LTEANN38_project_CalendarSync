@@ -3,13 +3,13 @@
 from datetime import datetime, timezone
 
 import pytest
-
 from conftest import CLIENT
-from test_server import server
-from test_postgres_server_integration import postgres_server
 from test_ingestion_status import CatalogSource, seed_catalog, session_device
-from web_service.school_graph import GraphFailure
+from test_postgres_server_integration import postgres_server as postgres_server
+from test_server import server as server
+
 from web_service.postgres_shared_schema import enable_shared_channel_schema
+from web_service.school_graph import GraphFailure
 
 
 @pytest.fixture(params=["server", "postgres_server"])

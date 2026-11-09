@@ -1,0 +1,30 @@
+name: Python quality checks
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned development tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: Check Python lint rules
+        run: python -m ruff check --output-format=github .
+      - name: Check Python formatting
+        run: python -m ruff format --check .

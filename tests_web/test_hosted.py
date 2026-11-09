@@ -2,12 +2,11 @@
 
 import builtins
 import json
-from types import SimpleNamespace
 
-from cryptography.fernet import Fernet
 import pytest
+from conftest import CLIENT, TENANT
+from cryptography.fernet import Fernet
 
-from conftest import TENANT, CLIENT
 from web_service import hosted
 
 

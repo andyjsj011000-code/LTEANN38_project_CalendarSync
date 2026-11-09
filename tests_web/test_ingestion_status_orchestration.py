@@ -1,15 +1,15 @@
 """Direct server orchestration on SQLite, without TestClient or external I/O."""
 
-from types import SimpleNamespace
 import json
+from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
-
 from test_ingestion_status import CatalogSource, seed_catalog
+
 from web_service.config import Settings
-from web_service.server import ServerIntegration
 from web_service.school_graph import GraphFailure
+from web_service.server import ServerIntegration
 from web_service.storage import digest
 from web_service.test_storage import TestDatabase
 

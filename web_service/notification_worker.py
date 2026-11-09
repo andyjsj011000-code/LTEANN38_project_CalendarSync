@@ -4,8 +4,8 @@ The caller selects a currently authorised connection and schedules retry/backoff
 This worker does not select subscribers or provision/renew Graph subscriptions.
 """
 
-from .school_graph import GraphFailure
 from .connections import acquire_snapshot
+from .school_graph import GraphFailure
 
 
 def process_claimed(job, device, db, tokens, graph, source, access_seconds):

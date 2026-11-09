@@ -1,12 +1,13 @@
 """Delegated Graph reads only; never uses application-wide Graph credentials."""
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Empty, Queue
 from threading import Event, Lock
 from time import monotonic
 from urllib.parse import parse_qs, quote, urlsplit
 from uuid import UUID
+
 import httpx
 
 SCOPES = ["User.Read", "Team.ReadBasic.All", "Channel.ReadBasic.All", "ChannelMessage.Read.All"]

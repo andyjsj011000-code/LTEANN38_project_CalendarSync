@@ -5,14 +5,13 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import pytest
+from test_postgres_database_integration import postgres_database as postgres_database
 
-from test_postgres_database_integration import postgres_database
 from web_service.direct_source import DirectSource
 from web_service.postgres_connection import PostgresConnectionFactory
 from web_service.postgres_retention import PostgresRetention, decode_cache_payload
 from web_service.postgres_shared_schema import enable_shared_channel_schema
 from web_service.storage import digest
-
 
 CHANNELS = [{"id": "class", "team_id": "team", "name": "Class"}]
 

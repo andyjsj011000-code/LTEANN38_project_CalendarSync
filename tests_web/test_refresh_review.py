@@ -1,9 +1,11 @@
-from types import SimpleNamespace
 import sys
+from types import SimpleNamespace
+
 import pytest
-from requests.exceptions import Timeout, ConnectionError, HTTPError
 from conftest import ALICE, TENANT
-from test_server import server
+from requests.exceptions import ConnectionError, HTTPError, Timeout
+from test_server import server as server
+
 from web_service.connections import PersistentIdentity
 from web_service.school_graph import GraphFailure
 

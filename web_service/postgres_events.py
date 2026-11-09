@@ -17,7 +17,6 @@ from .postgres_personal_tasks import PostgresPersonalTasks
 from .schemas import Preferences
 from .storage import Missing, PermissionPending
 
-
 _EDITABLE_FIELDS = frozenset(
     {"title", "notes", "time", "source_url", "start_date", "end_date", "kind", "cancelled"}
 )

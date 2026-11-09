@@ -203,6 +203,7 @@ def test_failed_subscription_recheck_releases_claim_without_send():
 
 def test_real_unsubscribe_after_claim_cannot_use_the_stale_subscription(tmp_path, monkeypatch):
     from cryptography.fernet import Fernet
+
     from web_service.storage import digest
     from web_service.test_storage import TestDatabase
 

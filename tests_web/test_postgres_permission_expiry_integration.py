@@ -1,10 +1,9 @@
 """Actual PostgreSQL expiry boundaries for Teams actions and refresh readiness."""
 
 import pytest
+from test_postgres_database_integration import postgres_database as postgres_database
 
-from test_postgres_database_integration import postgres_database
 from web_service.storage import Missing, PermissionPending
-
 
 CHANNELS = [{"id": "class", "team_id": "team", "name": "Class"}]
 EVENT = {

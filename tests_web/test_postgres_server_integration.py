@@ -8,11 +8,11 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
+import test_server as contract
+from conftest import ALICE, CLIENT, TENANT
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from conftest import TENANT, CLIENT, ALICE
-import test_server as contract
 from web_service.config import Settings
 from web_service.direct_source import DirectSource
 from web_service.postgres_connection import PostgresConnectionFactory

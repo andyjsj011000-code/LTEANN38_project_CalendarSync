@@ -3,11 +3,11 @@
 from copy import deepcopy
 
 import pytest
-
 from test_direct_ingestion_progress import channels, message
 from test_direct_input_completeness import InputGraph, Recorder, legacy_version, seed
 from test_direct_shared_ingestion import SharedCache
-from test_ingestion_status_orchestration import tracked_server
+from test_ingestion_status_orchestration import tracked_server as tracked_server
+
 from web_service.direct_source import DirectSource
 from web_service.school_graph import GraphFailure
 

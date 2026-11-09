@@ -10,11 +10,10 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 
 from .postgres_connection import PostgresConnectionFactory
-
 
 _DRAFT = Path(__file__).with_name("postgresql_schema_draft.sql")
 _SCHEMA = re.compile(r"[a-z_][a-z0-9_]{0,62}", re.ASCII)

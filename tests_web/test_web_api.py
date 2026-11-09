@@ -1,4 +1,4 @@
-from web_service.api import SESSION_COOKIE, create_app
+from web_service.api import SESSION_COOKIE
 from web_service.storage import Database
 
 
@@ -98,7 +98,7 @@ def test_default_today_uses_korean_date(env):
 
 def test_completion_keeps_original_order(env):
     c = env.client(env.alice)
-    first, second = create_task(c), create_task(c, title="다른 할 일")
+    first, _second = create_task(c), create_task(c, title="다른 할 일")
     before = [e["id"] for e in calendar(c).json()["items"]]
     r = c.patch(f"/api/tasks/{first['id']}/state", json={"version": 1, "completed": True})
     assert r.status_code == 200 and r.json()["completed"] is True

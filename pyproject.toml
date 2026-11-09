@@ -1,0 +1,25 @@
+# Tool configuration only. Runtime dependencies stay in requirements*.txt.
+[tool.ruff]
+required-version = "==0.17.4"
+target-version = "py311"
+line-length = 100
+# The separately operated legacy Oracle bot needs its own validation before
+# adopting these rules. Web code, tests, launchers and tools are checked now.
+extend-exclude = ["app"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Small callable test doubles are clearer as lambdas than named functions.
+"tests_web/**/*.py" = ["E731"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.pytest.ini_options]
+minversion = "8.3"
+testpaths = ["tests_web"]
+python_files = ["test_*.py"]

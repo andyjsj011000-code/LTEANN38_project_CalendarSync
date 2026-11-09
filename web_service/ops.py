@@ -1,7 +1,9 @@
 """Local operator commands. No public administrator endpoint is exposed."""
 
-import argparse, json
+import argparse
+import json
 from pathlib import Path
+
 from .__main__ import load_env
 from .config import Settings
 from .test_storage import TestDatabase

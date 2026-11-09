@@ -12,8 +12,8 @@ multi-tenant support requires tenant-scoped cache keys/schema first.
 
 import time
 
-from .storage import digest
 from .postgres_retention import decode_cache_payload
+from .storage import digest
 
 
 class PostgresSourceCache:

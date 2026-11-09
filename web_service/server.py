@@ -3,27 +3,29 @@
 import asyncio
 import hmac
 import logging
+import os
+import secrets
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime, timezone, timedelta
-import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import secrets
 from time import monotonic
-from fastapi import BackgroundTasks, Depends, HTTPException, Request, Response
+
+from fastapi import BackgroundTasks, Depends, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field, model_validator
+
 from .api import create_app
 from .config import Settings
-from .connections import PersistentIdentity, ConnectionTokens, acquire_snapshot
+from .connections import ConnectionTokens, PersistentIdentity, acquire_snapshot
 from .direct_source import TeamsGraph, direct_source_from_env
-from .oracle_source import source_from_env, OracleSource
-from .push import sender_from_env, Subscription, Notifications
+from .oracle_source import OracleSource, source_from_env
+from .push import Notifications, Subscription, sender_from_env
+from .schemas import Input, TaskInput
 from .school import SchoolIntegration
 from .school_graph import GraphFailure
 from .school_security import SecurityBoundary
-from .schemas import Input, TaskInput
 from .storage import Missing, PermissionPending, digest
 from .test_storage import TestDatabase
 
@@ -761,7 +763,7 @@ def create_test_server(
     app.state.integration = integration
     integration.assignments_enabled = bool(assignments_enabled and not preview)
     if integration.assignments_enabled:
-        from .assignments import AssignmentService, AssignmentGraph
+        from .assignments import AssignmentGraph, AssignmentService
 
         assignment_graph = AssignmentGraph(client_factory=getattr(graph, "client_factory", None))
         app.state.assignments = AssignmentService(db, integration.tokens, assignment_graph)

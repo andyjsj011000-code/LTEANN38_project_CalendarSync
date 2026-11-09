@@ -1,9 +1,9 @@
 """Private, delegated Teams assignments. No channel catalog or AI extraction."""
 
-from datetime import datetime, timedelta, timezone
 import json
+from datetime import datetime, timedelta, timezone
 from time import monotonic
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from .connections import acquire_snapshot
 from .oracle_source import plain

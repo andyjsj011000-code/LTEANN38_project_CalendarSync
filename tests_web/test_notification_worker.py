@@ -1,4 +1,5 @@
 import sqlite3
+
 from web_service.notification_queue import NotificationQueue
 from web_service.notification_worker import process_notification
 

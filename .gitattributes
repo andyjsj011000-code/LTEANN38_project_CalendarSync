@@ -1,0 +1,5 @@
+# Match Ruff output on Windows and Linux without changing runtime encodings.
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

@@ -1,8 +1,8 @@
 """Manual-ingestion reports must describe committed, authorized snapshots."""
 
 import pytest
+from test_server import server as server
 
-from test_server import server
 from web_service.direct_source import CollectionResult
 from web_service.school_graph import GraphFailure
 from web_service.storage import Missing, digest

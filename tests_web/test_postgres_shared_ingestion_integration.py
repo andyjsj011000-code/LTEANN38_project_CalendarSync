@@ -5,9 +5,9 @@ from contextlib import contextmanager
 from threading import Event
 
 import pytest
-
-from test_postgres_server_integration import postgres_server
 from test_ingestion_status import CatalogSource, seed_catalog, session_device
+from test_postgres_server_integration import postgres_server as postgres_server
+
 from web_service.postgres_shared_schema import enable_shared_channel_schema
 from web_service.storage import Missing, PermissionPending, digest
 

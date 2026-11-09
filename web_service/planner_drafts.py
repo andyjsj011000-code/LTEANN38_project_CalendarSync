@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .storage import Conflict, Missing
 
-
 DRAFT_RETENTION_SECONDS = 7 * 86400
 DRAFT_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS web_task_drafts (

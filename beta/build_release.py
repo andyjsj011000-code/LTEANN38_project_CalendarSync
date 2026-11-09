@@ -1,8 +1,8 @@
 """Build a deterministic, source-only beta ZIP without runtime secrets or data."""
 
+import zipfile
 from hashlib import sha256
 from pathlib import Path
-import zipfile
 
 
 def build(release_directory=None):

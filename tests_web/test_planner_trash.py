@@ -7,15 +7,14 @@ import pytest
 from cryptography.fernet import Fernet
 
 from web_service.planner_trash import (
-    PostgresTaskTrash,
-    SQLiteTaskTrash,
     TRASH_SCHEMA,
     TRASH_SECONDS,
+    PostgresTaskTrash,
+    SQLiteTaskTrash,
 )
 from web_service.push import Notifications
 from web_service.storage import Conflict, Missing, digest
 from web_service.test_storage import TestDatabase
-
 
 PAYLOAD = {
     "title": "Fixture personal deadline",

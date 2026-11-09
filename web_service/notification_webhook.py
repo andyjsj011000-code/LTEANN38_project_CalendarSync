@@ -1,8 +1,10 @@
 """Opt-in Graph webhook router; subscription provisioning is not implemented."""
 
 import json
+
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, Response
+
 from .notification_queue import UnknownSubscription
 
 

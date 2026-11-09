@@ -4,10 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from types import SimpleNamespace
 
-from cryptography.fernet import Fernet
 import pytest
+from cryptography.fernet import Fernet
+from test_hosted import config_env as config_env
 
-from test_hosted import config_env
 from web_service import hosted, planner_schema
 from web_service.postgres_connection import PostgresConnectionFactory
 from web_service.postgres_database import PostgresDatabase

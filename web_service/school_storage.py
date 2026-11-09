@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+
 from .storage import Database, Missing, digest
 
 SCHOOL_SCHEMA = """

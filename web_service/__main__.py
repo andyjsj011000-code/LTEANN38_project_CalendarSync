@@ -1,13 +1,12 @@
 """Visible local preview and explicit school test-server launcher."""
 
 import argparse
-import json
 import os
-from pathlib import Path
-import webbrowser
-import threading
 import socket
+import threading
 import time
+import webbrowser
+from pathlib import Path
 
 
 def load_env(path):
@@ -54,6 +53,7 @@ def main():
         from cryptography.fernet import Fernet
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import ec
+
         from .push import b64
 
         key = ec.generate_private_key(ec.SECP256R1())

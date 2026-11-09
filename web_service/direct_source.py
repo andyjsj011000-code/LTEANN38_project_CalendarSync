@@ -1,15 +1,17 @@
 """Delegated Teams ingestion and bounded structured AI extraction, independent of Oracle."""
 
 import base64
-from datetime import date, datetime, timedelta, timezone
 import json
 import os
+from datetime import date, datetime, timedelta, timezone
 from time import monotonic
-from urllib.parse import quote, urlsplit, urlencode, unquote
+from urllib.parse import quote, unquote, urlencode, urlsplit
+
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from .oracle_source import plain, PlainText
-from .school_graph import DelegatedGraph, GraphFailure, BASE, _graph_log
+
+from .oracle_source import PlainText
+from .school_graph import BASE, DelegatedGraph, GraphFailure, _graph_log
 from .storage import digest
 
 

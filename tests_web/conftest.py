@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
-import pytest
 
 from web_service.api import SESSION_COOKIE, create_app
 from web_service.config import Settings

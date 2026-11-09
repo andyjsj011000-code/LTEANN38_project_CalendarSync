@@ -7,7 +7,6 @@ import pytest
 from web_service.direct_source import DirectSource
 from web_service.school_graph import GraphFailure
 
-
 CHANNEL = {"id": "channel", "team_id": "team", "name": "Verified channel"}
 
 

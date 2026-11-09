@@ -1,13 +1,12 @@
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
-import pytest
 
 from web_service.beta import (
-    BETA_TENANT,
     BetaDatabase,
     create_beta_app,
     prepare_beta,

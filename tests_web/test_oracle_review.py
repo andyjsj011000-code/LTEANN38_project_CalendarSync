@@ -2,11 +2,13 @@
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+
 import pytest
+from conftest import CLIENT, TENANT
 from cryptography.fernet import Fernet
-from conftest import TENANT, CLIENT
-from test_server import server
-from web_service.oracle_source import OracleSource, OracleConfig, KST
+from test_server import server as server
+
+from web_service.oracle_source import KST, OracleConfig, OracleSource
 
 
 def make_oracle():
@@ -126,7 +128,7 @@ def test_oracle_deleted_event_enters_user_review_and_unauthorized_channel_is_ski
     state.listed.add("deadline")
     server.integration.source = source
     client = server.client()
-    initial = client.get("/api/today").json()["teams"][0]
+    _initial = client.get("/api/today").json()["teams"][0]
     state.rows.clear()
     state.listed.clear()
     server.now[0] += 61

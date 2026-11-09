@@ -1,6 +1,5 @@
 """Whole-app candidate contract through a SQLite SQL shim, never a live PG DB."""
 
-import json
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -9,15 +8,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import test_server as server_contract
+from conftest import ALICE, BOB, CLIENT, TENANT
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from conftest import TENANT, CLIENT, ALICE, BOB
-import test_server as server_contract
 from web_service.config import Settings
 from web_service.postgres_database import PostgresDatabase
 from web_service.server import create_test_server
-from web_service.storage import digest
 
 
 @pytest.fixture

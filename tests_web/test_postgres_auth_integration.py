@@ -3,11 +3,12 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 
-from cryptography.fernet import Fernet
 import pytest
+from cryptography.fernet import Fernet
+from test_postgres_database_integration import CHANNELS, source
+from test_postgres_database_integration import postgres_database as postgres_database
+from test_postgres_personal_tasks_integration import postgres_tasks as postgres_tasks
 
-from test_postgres_personal_tasks_integration import postgres_tasks
-from test_postgres_database_integration import postgres_database, CHANNELS, source
 from web_service.postgres_auth_store import PostgresAuthStore
 from web_service.storage import Missing, digest
 

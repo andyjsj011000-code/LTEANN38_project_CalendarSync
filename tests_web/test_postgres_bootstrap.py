@@ -1,10 +1,10 @@
 """Offline and mocked transaction checks; no live connection or subprocesses."""
 
 import builtins
-from contextlib import contextmanager
 import hashlib
 import json
 import sys
+from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 
 import pytest

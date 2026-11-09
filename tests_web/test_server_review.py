@@ -1,10 +1,13 @@
 import json
 from types import SimpleNamespace
+
 import pytest
 from conftest import TENANT
-from test_server import server, subscription
-from web_service.push import Notifications
+from test_server import server as server
+from test_server import subscription
+
 from web_service.direct_source import DirectSource
+from web_service.push import Notifications
 from web_service.storage import Missing, digest
 
 

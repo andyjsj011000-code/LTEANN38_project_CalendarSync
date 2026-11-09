@@ -12,7 +12,6 @@ from datetime import date, datetime, timedelta, timezone
 
 from .storage import digest
 
-
 _MARKER_FIELDS = frozenset({"id", "key", "source_version", "source_hash", "end_date"})
 _SOURCE_FIELDS = (
     "title",

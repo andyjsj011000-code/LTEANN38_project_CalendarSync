@@ -11,12 +11,11 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
 import re
 import stat
 import tempfile
 import zipfile
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_NAME = "WEB_RELEASE_MANIFEST.json"

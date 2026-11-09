@@ -1,7 +1,7 @@
 """Personal Today reads stay independent of Teams; PostgreSQL uses a SQL shim."""
 
-from contextlib import contextmanager
 import re
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +9,6 @@ from cryptography.fernet import Fernet
 
 from web_service.postgres_personal_tasks import PostgresPersonalTasks
 from web_service.storage import Database
-
 
 DAY = "2026-11-07"
 

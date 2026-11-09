@@ -5,11 +5,11 @@ from contextlib import contextmanager
 from threading import Barrier, Event
 
 import pytest
+from test_postgres_database_integration import CHANNELS, source
+from test_postgres_database_integration import postgres_database as postgres_database
 
-from test_postgres_database_integration import CHANNELS, postgres_database, source
 from web_service.planner_trash import TRASH_SCHEMA, TRASH_SECONDS
 from web_service.storage import Conflict, Missing, PermissionPending
-
 
 RULES = {"offsets": [-30], "custom_times": []}
 

@@ -1,14 +1,15 @@
 """Do not acknowledge or cancel schedules after dropping source content."""
 
 import json
+
 import httpx
 import pytest
+from test_direct_ingestion_progress import Graph, channels, event, message
+from test_direct_shared_ingestion import SharedCache
 
 from web_service.direct_source import DirectSource, TeamsGraph
 from web_service.school_graph import BASE, GraphFailure
 from web_service.storage import digest
-from test_direct_ingestion_progress import Graph, channels, event, message
-from test_direct_shared_ingestion import SharedCache
 
 
 class InputGraph(Graph):

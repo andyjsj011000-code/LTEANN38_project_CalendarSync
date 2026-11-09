@@ -1,15 +1,14 @@
 """Draft revisions, expiration and account boundaries; no real school traffic."""
 
-from contextlib import contextmanager
-import json
 import re
+from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
 from cryptography.fernet import Fernet
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-import pytest
 from pydantic import ValidationError
 
 from web_service.api import create_app

@@ -1,10 +1,9 @@
 """Opt-in, content-free ingestion progress for one authenticated device."""
 
-from contextlib import contextmanager
 import secrets
+from contextlib import contextmanager
 
 from .storage import Missing
-
 
 STATUS_SCHEMA_SQL = """CREATE TABLE IF NOT EXISTS web_ingestion_status (
     device_hash TEXT PRIMARY KEY REFERENCES web_connections(id_hash) ON DELETE CASCADE,

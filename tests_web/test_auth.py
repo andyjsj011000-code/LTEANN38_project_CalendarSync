@@ -1,14 +1,13 @@
-from dataclasses import replace
 import sys
+from dataclasses import replace
 from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
 import pytest
+from conftest import TENANT
+from fastapi.testclient import TestClient
 
 from web_service.api import FLOW_COOKIE, SESSION_COOKIE, create_app
-from web_service.config import Settings
 from web_service.identity import MicrosoftIdentity
-from conftest import TENANT, CLIENT
 
 
 def finish_login(c, **params):

@@ -1,19 +1,19 @@
 """Opt-in bootstrap checks on an explicitly disposable PostgreSQL database."""
 
-from contextlib import contextmanager
 import os
+import uuid
+from contextlib import contextmanager
 from types import SimpleNamespace
 from urllib.parse import urlsplit
-import uuid
 
 import pytest
 from cryptography.fernet import Fernet
 
 from web_service.postgres_bootstrap import (
+    BootstrapRejected,
     apply_bootstrap,
     bootstrap_plan,
     schema_exists,
-    BootstrapRejected,
 )
 from web_service.postgres_connection import PostgresConnectionFactory
 from web_service.postgres_database import PostgresDatabase
@@ -113,8 +113,9 @@ def test_middle_ddl_error_rolls_back_the_namespace_itself(bootstrap_database):
 
 
 def test_hosted_first_start_creates_schema_and_restart_preserves_existing_data(bootstrap_database):
-    from conftest import TENANT, CLIENT
     import test_server as contract
+    from conftest import CLIENT, TENANT
+
     from web_service.hosted import create_hosted_app
 
     p = bootstrap_database
@@ -157,6 +158,7 @@ def test_planner_additive_install_preserves_existing_data_and_sidecars_on_parall
     bootstrap_database,
 ):
     from concurrent.futures import ThreadPoolExecutor
+
     from web_service.planner_schema import enable_planner_schema
 
     p = bootstrap_database
@@ -212,7 +214,7 @@ def test_planner_additive_install_preserves_existing_data_and_sidecars_on_parall
 def test_planner_install_rejects_another_school_without_creating_sidecars(
     bootstrap_database, foreign_table
 ):
-    from web_service.planner_schema import enable_planner_schema, PLANNER_COLUMNS
+    from web_service.planner_schema import PLANNER_COLUMNS, enable_planner_schema
 
     p = bootstrap_database
     apply_bootstrap(p.factory)

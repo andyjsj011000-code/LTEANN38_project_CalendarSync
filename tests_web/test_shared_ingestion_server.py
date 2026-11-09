@@ -1,9 +1,9 @@
 """Shared ingestion serves verified cache before deferred source processing."""
 
 import pytest
-
-from test_server import server
 from test_ingestion_status import CatalogSource, seed_catalog, session_device
+from test_server import server as server
+
 from web_service.school_graph import GraphFailure
 from web_service.storage import Missing, digest
 

@@ -9,7 +9,6 @@ from cryptography.fernet import Fernet
 from web_service.postgres_sync import PostgresSync
 from web_service.test_storage import TestDatabase
 
-
 EMPTY = {"state": "not_connected", "checked_at": 0, "channels": frozenset()}
 
 

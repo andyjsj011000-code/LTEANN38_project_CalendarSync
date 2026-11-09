@@ -13,7 +13,6 @@ from pydantic import Field
 from .schemas import Input, TaskInput
 from .storage import Conflict, Missing
 
-
 TRASH_SECONDS = 7 * 24 * 60 * 60
 TRASH_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS web_task_trash (

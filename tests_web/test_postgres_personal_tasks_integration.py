@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 
-from web_service.postgres_personal_tasks import PostgresPersonalTasks
 from web_service.planner_drafts import DRAFT_RETENTION_SECONDS, DRAFT_SCHEMA_SQL, PostgresTaskDrafts
+from web_service.postgres_personal_tasks import PostgresPersonalTasks
 from web_service.storage import Conflict, Missing
 
 

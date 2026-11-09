@@ -1,6 +1,7 @@
 """ASGI boundary: canonical host, bounded input, generic errors and browser headers."""
 
 from urllib.parse import urlsplit
+
 from starlette.responses import JSONResponse
 
 

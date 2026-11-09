@@ -8,6 +8,17 @@ on:
       - tests_web/**
       - requirements-web.txt
       - requirements-postgres-experimental.txt
+      - pyproject.toml
+      - tools/**
+      - .github/workflows/postgres-beta.yml
+  pull_request:
+    branches: [oracle]
+    paths:
+      - web_service/**
+      - tests_web/**
+      - requirements-web.txt
+      - requirements-postgres-experimental.txt
+      - pyproject.toml
       - tools/**
       - .github/workflows/postgres-beta.yml
   workflow_dispatch:

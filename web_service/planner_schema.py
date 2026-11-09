@@ -11,7 +11,6 @@ from .planner_trash import TRASH_SCHEMA
 from .postgres_connection import PostgresConnectionFactory
 from .postgres_ingestion_status import STATUS_SCHEMA_SQL
 
-
 PLANNER_COLUMNS = {
     "web_task_drafts": "user_id,payload_blob,version,updated_at,expires_at",
     "web_task_trash": "id,user_id,task_id,payload_blob,deleted_at,expires_at",

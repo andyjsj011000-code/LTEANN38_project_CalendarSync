@@ -10,11 +10,10 @@ module never retries with weaker TLS. Actual provider certificates, CA paths,
 driver installation and server connectivity still need integration verification.
 """
 
-from contextlib import contextmanager
 import ipaddress
 import re
+from contextlib import contextmanager
 from urllib.parse import parse_qsl, unquote, urlsplit
-
 
 _SCHEMA = re.compile(r"[a-z_][a-z0-9_]{0,62}", re.ASCII)
 _DATABASE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}", re.ASCII)

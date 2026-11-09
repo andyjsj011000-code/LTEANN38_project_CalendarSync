@@ -1,15 +1,14 @@
 """Configuration and mocked-driver contract only; no sockets or PostgreSQL."""
 
 import builtins
-from contextlib import contextmanager
 import json
 import sys
+from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from web_service.postgres_connection import PostgresConnectionFactory
-
 
 URI = "postgresql://private-user:private%40password@private-db.example.test:5433/private_database"
 

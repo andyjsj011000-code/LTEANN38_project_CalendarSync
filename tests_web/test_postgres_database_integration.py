@@ -6,8 +6,8 @@ never target a student, shared, or production database. Local shim results do
 not substitute for running these cases on PostgreSQL.
 """
 
-import os
 import ipaddress
+import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -20,8 +20,8 @@ from urllib.parse import urlsplit
 import pytest
 from cryptography.fernet import Fernet
 
-from web_service.postgres_database import PostgresDatabase
 from web_service.postgres_connection import PostgresConnectionFactory
+from web_service.postgres_database import PostgresDatabase
 from web_service.storage import Missing, digest
 
 

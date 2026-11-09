@@ -1,9 +1,10 @@
 """Regression checks for recurring source revisions and incomplete image reads."""
 
-import pytest
 import httpx
-from conftest import TENANT, CLIENT
-from test_server import server
+import pytest
+from conftest import CLIENT, TENANT
+from test_server import server as server
+
 from web_service.direct_source import DirectSource, TeamsGraph
 from web_service.school_graph import GraphFailure
 

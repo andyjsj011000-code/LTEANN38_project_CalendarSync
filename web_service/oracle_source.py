@@ -1,11 +1,12 @@
 """Read-only bridge to legacy master_calendars; no legacy app imports or jobs."""
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
-import os
 from time import monotonic
 from urllib.parse import quote, urlencode
+
 from cryptography.fernet import Fernet
 
 KST = timezone(timedelta(hours=9))

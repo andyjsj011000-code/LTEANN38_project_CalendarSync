@@ -1,17 +1,18 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
+
 import httpx
 import pytest
+from conftest import ALICE, BOB, CLIENT, TENANT
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
 
-from conftest import TENANT, CLIENT, ALICE, BOB
 from web_service.config import Settings
-from web_service.school import create_school_app, SchoolIdentity
+from web_service.oracle_source import NoSource, OracleConfig, OracleSource
+from web_service.school import SchoolIdentity, create_school_app
+from web_service.school_graph import SCOPES, DelegatedGraph, GraphFailure
 from web_service.school_storage import SchoolDatabase
-from web_service.school_graph import DelegatedGraph, GraphFailure, SCOPES
-from web_service.oracle_source import OracleSource, OracleConfig, NoSource
 from web_service.storage import Missing, digest
 
 

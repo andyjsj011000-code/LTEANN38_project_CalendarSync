@@ -1,23 +1,23 @@
-from datetime import datetime, timezone, timedelta
-from types import SimpleNamespace
-import base64
 import json
 import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import httpx
+import pytest
+from conftest import ALICE, BOB, CLIENT, TENANT
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
-import httpx
-import pytest
-from conftest import TENANT, CLIENT, ALICE, BOB
+
 from web_service.config import Settings
+from web_service.connections import PersistentIdentity
+from web_service.direct_source import DirectSource, TeamsGraph
+from web_service.push import Notifications, PushSender, b64
+from web_service.school_graph import GraphFailure
 from web_service.server import create_test_server
 from web_service.test_storage import TestDatabase
-from web_service.push import Subscription, Notifications, PushSender, b64
-from web_service.connections import PersistentIdentity, ConnectionTokens
-from web_service.direct_source import TeamsGraph, AIExtractor, DirectSource
-from web_service.storage import digest, Missing, Conflict
-from web_service.school_graph import GraphFailure
 
 
 class Identity:
@@ -252,7 +252,7 @@ def test_all_device_logout_and_account_switch_invalidate_subscriptions(server):
 
 def test_changes_require_each_users_decision_and_current_access(server):
     a = server.client()
-    initial = a.get("/api/today").json()["teams"][0]
+    _initial = a.get("/api/today").json()["teams"][0]
     server.source.time = "19:00"
     server.now[0] += 61
     assert a.post("/api/teams/sync").status_code == 200
@@ -584,7 +584,6 @@ def test_expired_connections_are_scrubbed_not_just_disabled(server):
 
 @pytest.mark.parametrize("status", [403, 404])
 def test_single_message_permission_denial_is_not_a_deletion(status):
-    import httpx
     from web_service.school_graph import GraphFailure
 
     graph = TeamsGraph(
@@ -619,7 +618,6 @@ def test_ancient_personal_task_cannot_break_reminder_worker(server):
 
 
 def test_single_message_uses_supported_separate_reply_endpoint():
-    import httpx
 
     seen = []
 

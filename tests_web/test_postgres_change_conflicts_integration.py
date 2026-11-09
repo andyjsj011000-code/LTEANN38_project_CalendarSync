@@ -3,7 +3,7 @@
 from urllib.parse import quote
 
 from conftest import BOB
-from test_postgres_server_integration import postgres_server
+from test_postgres_server_integration import postgres_server as postgres_server
 
 
 def test_stale_review_http_conflict_preserves_latest_change_and_account_isolation(postgres_server):

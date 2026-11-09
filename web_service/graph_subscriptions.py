@@ -1,7 +1,7 @@
 """Graph subscription API client. It does not own credentials or schedule work."""
 
-from datetime import datetime, timedelta, timezone
 import json
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 from uuid import UUID
 

@@ -1,7 +1,7 @@
 """Broad ingestion fairness and truthful progress, with no external service calls."""
 
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest

@@ -3,11 +3,11 @@
 import argparse
 import importlib.util
 import os
-from pathlib import Path
 import subprocess
 import sys
 import threading
 import webbrowser
+from pathlib import Path
 
 
 def main():

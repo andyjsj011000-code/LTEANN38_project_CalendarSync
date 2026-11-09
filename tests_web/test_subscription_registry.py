@@ -1,6 +1,8 @@
-from datetime import datetime, timezone
 import sqlite3
+from datetime import datetime, timezone
+
 from cryptography.fernet import Fernet
+
 from web_service.graph_subscriptions import SubscriptionFailure
 from web_service.notification_queue import NotificationQueue
 from web_service.subscription_registry import SubscriptionRegistry

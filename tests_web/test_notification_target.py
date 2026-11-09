@@ -2,7 +2,6 @@ import pytest
 
 from web_service.notification_target import parse_notification_target
 
-
 TEAM = "team"
 CHANNEL = "19:abc@thread.tacv2"
 

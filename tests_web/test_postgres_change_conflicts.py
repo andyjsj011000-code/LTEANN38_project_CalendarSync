@@ -1,8 +1,9 @@
 """Stale review identities via the existing SQLite repository shim."""
 
 import pytest
+from test_postgres_events import events as events
+from test_postgres_events import source
 
-from test_postgres_events import events, source
 from web_service.storage import Conflict, Missing
 
 
