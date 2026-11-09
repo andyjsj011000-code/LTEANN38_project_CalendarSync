@@ -42,6 +42,17 @@ def complete_plain(value):
     return text
 
 
+def _message_html(message):
+    # Missing active source content is not an empty message. Keep its previous
+    # analysis pending instead of silently cancelling deadlines from that text.
+    if not isinstance(message,dict):
+        raise GraphFailure('source_unavailable')
+    body=message.get('body')
+    if not isinstance(body,dict) or not isinstance(body.get('content'),str):
+        raise GraphFailure('source_unavailable')
+    return body['content']
+
+
 def _hosted_image_target(channel,message_id,url):
     prefix=(BASE+f"/teams/{quote(channel['team_id'],safe='')}/channels/{quote(channel['id'],safe='')}/messages/"
             +quote(message_id,safe='')+'/hostedContents/')
@@ -58,15 +69,23 @@ def _message_context(message,channel,message_id,images,reply_limit):
     # truncated analysis is not proof that the current input is complete.
     if message.get('replies@odata.nextLink') is not None:
         raise GraphFailure('source_unavailable')
-    html=(message.get('body') or {}).get('content','')
+    html=_message_html(message)
     replies=message.get('replies') or []
-    if len(replies)>reply_limit:
+    if not isinstance(replies,list) or len(replies)>reply_limit:
         raise GraphFailure('source_unavailable')
     body=complete_plain(html)
     changed_processing=len(body)>10000
     text='작성일: '+message.get('createdDateTime','')+'\n제목: '+str(message.get('subject') or '')+'\n본문: '+body
+    deleted_reply=False
     for reply in replies:
-        reply_html=(reply.get('body') or {}).get('content','')
+        if not isinstance(reply,dict):
+            raise GraphFailure('source_unavailable')
+        if reply.get('deletedDateTime'):
+            if not isinstance(reply['deletedDateTime'],str):
+                raise GraphFailure('source_unavailable')
+            deleted_reply=True
+            continue
+        reply_html=_message_html(reply)
         if images and '<img' in reply_html.lower():
             raise GraphFailure('source_unavailable')
         reply_text=complete_plain(reply_html)
@@ -88,7 +107,11 @@ def _message_context(message,channel,message_id,images,reply_limit):
                 _graph_log('hosted_image','invalid_target')
                 raise GraphFailure('source_unavailable')
         changed_processing=changed_processing or (bool(links) and '<img' not in html)
-    return text,links,changed_processing
+    # A cached revision may have included a deleted reply's old text. Reanalyze
+    # only affected threads once, including ones already using complete-input-v1.
+    processing_version=('deleted-replies-v1' if deleted_reply else
+                        'complete-input-v1' if changed_processing else None)
+    return text,links,processing_version
 
 
 class TeamsGraph(DelegatedGraph):
@@ -348,7 +371,7 @@ class DirectSource:
                     old=known.get(mid)
                     if not message.get('deletedDateTime'):
                         try:
-                            text,image_links,changed_processing=_message_context(
+                            text,image_links,processing_version=_message_context(
                                 message,channel,mid,self.images,500 if targeted is not None else 30)
                         except (ValueError,GraphFailure) as error:
                             if not broad or (isinstance(error,GraphFailure) and error.state!='source_unavailable'):
@@ -356,10 +379,10 @@ class DirectSource:
                             channel_failed=True; report['messages_failed']+=1; report['partial']=True
                             emit_progress()
                             continue
-                        if changed_processing:
+                        if processing_version:
                             # Only posts whose valid input changed under these
                             # fixes need one new analysis, not the whole catalog.
-                            version=digest(version+'|complete-input-v1')
+                            version=digest(version+'|'+processing_version)
                     if old and old['version']==version:
                         touched=db.touch_analysis(key,**({'ingestion_lease':lease} if shared else {}))
                         if shared and touched is False:
