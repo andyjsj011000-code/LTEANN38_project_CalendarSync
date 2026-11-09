@@ -20,7 +20,9 @@ from web_service.ports import (
     TokenRefresher,
 )
 from web_service.postgres_database import PostgresDatabase
+from web_service.server import ServerIntegration
 from web_service.storage import Database
+from web_service.sync_ports import SyncContext
 from web_service.test_storage import TestDatabase
 
 
@@ -61,3 +63,7 @@ def planner_stores(
     sqlite: TestDatabase, postgres: PostgresDatabase
 ) -> tuple[TaskTrashStore, TaskTrashStore]:
     return sqlite, postgres
+
+
+def synchronization(integration: ServerIntegration) -> SyncContext:
+    return integration

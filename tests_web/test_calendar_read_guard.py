@@ -182,7 +182,7 @@ def test_sync_exception_diagnostic_omits_messages_sql_and_credentials(
     ]
     assert len(diagnostics) == 1
     assert "exception_type=OperationalError" in diagnostics[0]
-    assert "internal_file=server.py" in diagnostics[0]
+    assert "internal_file=sync_workflow.py" in diagnostics[0]
     assert "internal_line=0" not in diagnostics[0]
     assert ("sqlstate=40001" if sqlstate == "40001" else "sqlstate=none") in diagnostics[0]
     assert all(
