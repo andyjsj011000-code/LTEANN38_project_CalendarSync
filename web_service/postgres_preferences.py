@@ -9,11 +9,18 @@ logout keeps the user active. The caller must revalidate the session/device
 proof to reject already-started requests that outlive logout.
 """
 
+from collections.abc import Callable
+from typing import cast
+
+from .personal_types import PreferenceSnapshot, PreferenceValues
 from .schemas import Preferences
 from .storage import Missing, PermissionPending
 
 
 class PostgresPreferences:
+    # The full event facade supplies the clock and permission-lock callback.
+    clock: Callable[[], float]
+
     def __init__(self, connect, seal, unseal):
         self.connect, self.seal, self.unseal = connect, seal, unseal
 
@@ -25,15 +32,15 @@ class PostgresPreferences:
         if not user or not user[0]:
             raise Missing()
 
-    def preferences(self, user_id):
+    def preferences(self, user_id: str) -> PreferenceSnapshot:
         with self.connect() as db:
             self._preference_lock_user(db, user_id)
             row = db.execute(
                 "SELECT payload_blob FROM web_preferences WHERE user_id=%s", (user_id,)
             ).fetchone()
-        return self.unseal(row[0]) if row else Preferences().model_dump()
+        return self.unseal(row[0]) if row else {**Preferences().to_values()}
 
-    def save_preferences(self, user_id, values):
+    def save_preferences(self, user_id: str, values: PreferenceValues) -> PreferenceValues:
         blob = self.seal(values)
         with self.connect() as db:
             self._preference_lock_user(db, user_id)
@@ -76,7 +83,7 @@ class PostgresPreferences:
                 tenant = getattr(self, "tenant_id", None)
                 if not callable(lock_access) or not tenant:
                     raise ValueError("Teams reminders require an authenticated event repository")
-                expiry = lock_access(db, user_id, tenant, item_id)
+                expiry = cast(float, lock_access(db, user_id, tenant, item_id))
             db.execute(
                 """INSERT INTO web_reminder_rules(user_id,item_id,source,payload_blob)
                 VALUES(%s,%s,%s,%s) ON CONFLICT(user_id,item_id,source)

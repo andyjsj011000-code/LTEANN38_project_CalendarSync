@@ -5,12 +5,22 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 from cryptography.fernet import Fernet
 
 from .calendar_rules import agenda_result, calendar_result
 from .calendar_rules import personal_agenda_result as personal_agenda_result
+from .personal_types import (
+    PersonalAgenda,
+    PersonalTask,
+    PreferenceSnapshot,
+    PreferenceValues,
+    TaskChanges,
+    TaskContent,
+    TaskPayload,
+)
 from .schemas import Preferences
 
 
@@ -158,14 +168,14 @@ class Database:
             raise Missing()
         return self.unseal(row["flow_blob"])
 
-    def preferences(self, user_id):
+    def preferences(self, user_id: str) -> PreferenceSnapshot:
         with self.connect() as c:
             row = c.execute(
                 "SELECT payload_blob FROM web_preferences WHERE user_id=?", (user_id,)
             ).fetchone()
-            return self.unseal(row[0]) if row else Preferences().model_dump()
+            return self.unseal(row[0]) if row else {**Preferences().to_values()}
 
-    def save_preferences(self, user_id, values):
+    def save_preferences(self, user_id: str, values: PreferenceValues) -> PreferenceValues:
         with self.connect() as c:
             c.execute(
                 "INSERT INTO web_preferences VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET payload_blob=excluded.payload_blob",
@@ -188,7 +198,9 @@ class Database:
                 for r in rows
             ]
 
-    def channel_preference(self, user_id, tenant_id, channel_id, enabled):
+    def channel_preference(
+        self, user_id: str, tenant_id: str, channel_id: str, enabled: bool
+    ) -> None:
         if channel_id not in {ch["id"] for ch in self.channels(user_id, tenant_id)}:
             raise Missing()
         with self.connect() as c:
@@ -197,7 +209,7 @@ class Database:
                 (user_id, channel_id, int(enabled)),
             )
 
-    def add_task(self, user_id, payload):
+    def add_task(self, user_id: str, payload: TaskPayload) -> PersonalTask:
         item_id = str(uuid4())
         with self.connect() as c:
             c.execute(
@@ -206,9 +218,11 @@ class Database:
             )
         return self.task(user_id, item_id)
 
-    def _task_value(self, row):
+    def _task_value(self, row) -> PersonalTask:
+        # Keep legacy/extra payload fields rather than validating a response model.
+        payload = cast(TaskContent, self.unseal(row["payload_blob"]))
         return {
-            **self.unseal(row["payload_blob"]),
+            **payload,
             "id": row["id"],
             "source": "personal",
             "kind": "personal",
@@ -218,7 +232,7 @@ class Database:
             "cancelled": False,
         }
 
-    def task(self, user_id, item_id):
+    def task(self, user_id: str, item_id: str) -> PersonalTask:
         with self.connect() as c:
             row = c.execute(
                 "SELECT * FROM web_personal_tasks WHERE user_id=? AND id=?", (user_id, item_id)
@@ -227,7 +241,7 @@ class Database:
                 raise Missing()
             return self._task_value(row)
 
-    def personal_agenda(self, user_id, tenant_id, day):
+    def personal_agenda(self, user_id: str, tenant_id: str, day: str) -> PersonalAgenda:
         # This path intentionally reads only personal rows. A pending Teams
         # proof must not hide the signed-in user's own tasks.
         with self.connect() as c:
@@ -240,7 +254,9 @@ class Database:
             ).fetchall()
         return personal_agenda_result([self._task_value(row) for row in rows], day)
 
-    def update_task(self, user_id, item_id, payload, version):
+    def update_task(
+        self, user_id: str, item_id: str, payload: TaskPayload, version: int
+    ) -> PersonalTask:
         self.task(user_id, item_id)
         with self.connect() as c:
             cursor = c.execute(
@@ -258,7 +274,9 @@ class Database:
                 raise Conflict()
         return self.task(user_id, item_id)
 
-    def task_state(self, user_id, item_id, values, version):
+    def task_state(
+        self, user_id: str, item_id: str, values: TaskChanges, version: int
+    ) -> PersonalTask:
         self.task(user_id, item_id)
         updates = {
             k: int(v) for k, v in values.items() if k in {"hidden", "completed"} and v is not None
@@ -273,7 +291,7 @@ class Database:
                 raise Conflict()
         return self.task(user_id, item_id)
 
-    def delete_task(self, user_id, item_id, version):
+    def delete_task(self, user_id: str, item_id: str, version: int) -> None:
         self.task(user_id, item_id)
         with self.connect() as c:
             cursor = c.execute(

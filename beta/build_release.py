@@ -17,6 +17,8 @@ def build(release_directory=None):
         "config.py",
         "identity.py",
         "personal_routes.py",
+        "personal_types.py",
+        "personal_ports.py",
         "request_dependencies.py",
         "settings_routes.py",
         "schemas.py",
