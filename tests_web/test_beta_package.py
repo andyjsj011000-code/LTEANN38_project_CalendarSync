@@ -21,8 +21,11 @@ def test_release_is_clean_and_extracted_launcher_reopens_persistent_data(tmp_pat
     assert module.build(tmp_path / "releases").read_bytes() == original_bytes
     extracted = tmp_path / "extracted"
     with zipfile.ZipFile(archive) as package:
-        assert len(package.namelist()) == 18
+        assert len(package.namelist()) == 21
         assert "web_service/calendar_rules.py" in package.namelist()
+        assert "web_service/personal_routes.py" in package.namelist()
+        assert "web_service/request_dependencies.py" in package.namelist()
+        assert "web_service/settings_routes.py" in package.namelist()
         assert not any(
             "var/" in p or p.endswith((".sqlite3", "config.json", "invitations.json"))
             for p in package.namelist()

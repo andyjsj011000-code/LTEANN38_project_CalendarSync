@@ -1,18 +1,20 @@
-import hmac
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from .calendar_rules import KST
 from .config import Settings
 from .identity import MicrosoftIdentity, Unavailable, validate_identity
-from .schemas import ChannelPreference, EventState, Preferences, TaskInput, TaskState, TaskUpdate
+from .personal_routes import install_personal_routes
+from .request_dependencies import create_session_dependency
+from .schemas import EventState
+from .settings_routes import install_settings_routes
 from .storage import Conflict, Database, Missing, PermissionPending
 
 SESSION_COOKIE = "calendarsync_session"
 FLOW_COOKIE = "calendarsync_login"
-KST = timezone(timedelta(hours=9))
 
 
 def create_app(
@@ -80,23 +82,7 @@ def create_app(
             headers={"Retry-After": "2"},
         )
 
-    def current_session(request: Request):
-        session = db.session(request.cookies.get(session_cookie))
-        if not session or (settings.tenant_id and session["tenant_id"] != settings.tenant_id):
-            raise HTTPException(401, "Sign in with your school account")
-        if request.method not in {"GET", "HEAD", "OPTIONS"}:
-            origin = request.headers.get("origin")
-            if origin is not None and origin != settings.origin:
-                raise HTTPException(403, "Invalid request origin")
-            supplied = request.headers.get("x-csrf-token", "")
-            if not hmac.compare_digest(
-                supplied.encode("utf-8"), session["csrf_token"].encode("ascii")
-            ):
-                raise HTTPException(403, "A valid CSRF token is required")
-        if integration:
-            integration.check_request(session, request)
-        return session
-
+    current_session = create_session_dependency(settings, db, session_cookie, integration)
     app.state.require_session = current_session
 
     def teams_read(session, operation):
@@ -237,58 +223,8 @@ def create_app(
     def channels(session=Depends(current_session)):
         return teams_read(session, lambda: db.channels(session["user_id"], session["tenant_id"]))
 
-    @app.put("/api/channels/{channel_id}/preference")
-    def channel_preference(
-        channel_id: str, body: ChannelPreference, session=Depends(current_session)
-    ):
-        db.channel_preference(session["user_id"], session["tenant_id"], channel_id, body.enabled)
-        return {"id": channel_id, "enabled": body.enabled}
-
-    @app.get("/api/settings")
-    def preferences(session=Depends(current_session)):
-        return {
-            "preferences": db.preferences(session["user_id"]),
-            "capabilities": {
-                "push_delivery": bool(integration and getattr(integration, "push_enabled", False)),
-                "teams_chat_delivery": False,
-                "calendar_export": False,
-                "live_teams_ingestion": bool(integration and integration.source.configured),
-            },
-            "connection": integration.status(session) if integration else None,
-        }
-
-    @app.put("/api/settings")
-    def save_preferences(body: Preferences, session=Depends(current_session)):
-        if body.calendar_sync_enabled or body.teams_chat_enabled:
-            raise HTTPException(409, "Delivery integrations are not connected in this foundation")
-        return db.save_preferences(session["user_id"], body.model_dump())
-
-    @app.post("/api/tasks", status_code=201)
-    def create_task(body: TaskInput, session=Depends(current_session)):
-        return db.add_task(session["user_id"], body.model_dump(mode="json"))
-
-    @app.get("/api/tasks/{task_id}")
-    def task(task_id: str, session=Depends(current_session)):
-        return db.task(session["user_id"], task_id)
-
-    @app.put("/api/tasks/{task_id}")
-    def update_task(task_id: str, body: TaskUpdate, session=Depends(current_session)):
-        payload = body.model_dump(mode="json", exclude={"version"})
-        return db.update_task(session["user_id"], task_id, payload, body.version)
-
-    @app.patch("/api/tasks/{task_id}/state")
-    def task_state(task_id: str, body: TaskState, session=Depends(current_session)):
-        return db.task_state(
-            session["user_id"], task_id, body.model_dump(exclude={"version"}), body.version
-        )
-
-    @app.delete("/api/tasks/{task_id}", status_code=204)
-    def delete_task(task_id: str, version: int = Query(ge=1), session=Depends(current_session)):
-        if getattr(db, "planner_enhancements_enabled", False):
-            db.trash_task(session["user_id"], task_id, version)
-        else:
-            db.delete_task(session["user_id"], task_id, version)
-        return Response(status_code=204)
+    install_settings_routes(app, db, current_session, integration)
+    install_personal_routes(app, db, current_session)
 
     @app.patch("/api/events/{event_id}/state")
     def event_state(event_id: str, body: EventState, session=Depends(current_session)):
@@ -328,17 +264,5 @@ def create_app(
             session,
             lambda: db.agenda(session["user_id"], session["tenant_id"], selected.isoformat()),
         )
-
-    @app.get("/api/personal/today")
-    def personal_today(day: date | None = None, session=Depends(current_session)):
-        selected = day or datetime.fromtimestamp(db.clock(), KST).date()
-        return db.personal_agenda(session["user_id"], session["tenant_id"], selected.isoformat())
-
-    if getattr(db, "planner_enhancements_enabled", False):
-        from .planner_drafts import install_draft_routes
-        from .planner_trash import install_trash_routes
-
-        install_draft_routes(app, db, current_session)
-        install_trash_routes(app, db, current_session)
 
     return app

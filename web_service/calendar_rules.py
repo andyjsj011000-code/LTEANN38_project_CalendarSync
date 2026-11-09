@@ -6,7 +6,10 @@ Every function returns the existing API shapes without mutating its inputs.
 """
 
 from collections.abc import Iterable, Mapping
+from datetime import timedelta, timezone
 from typing import Any
+
+KST = timezone(timedelta(hours=9))
 
 Item = Mapping[str, Any]
 
