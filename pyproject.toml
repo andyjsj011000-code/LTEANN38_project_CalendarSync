@@ -30,6 +30,10 @@ typeCheckingMode = "standard"
 pythonVersion = "3.11"
 extraPaths = ["tests_web"]
 include = [
+    "web_service/schema_catalog.py",
+    "web_service/schema_inspection.py",
+    "web_service/schema_history.py",
+    "web_service/schema_history_cli.py",
     "web_service/config.py",
     "web_service/composition.py",
     "web_service/collection_types.py",

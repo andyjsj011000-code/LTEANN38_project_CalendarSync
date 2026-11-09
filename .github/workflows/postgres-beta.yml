@@ -117,7 +117,8 @@ jobs:
             test_postgres_permission_expiry_integration \
             test_permission_readiness_server \
             test_postgres_personal_tasks_integration \
-            test_adapter_contracts
+            test_adapter_contracts \
+            test_schema_history_postgres_integration
           do
             if [ "$module" = test_permission_readiness_server ]; then
               python -m pytest "tests_web/${module}.py" -q -p no:cacheprovider -k postgres_server \
@@ -149,6 +150,7 @@ jobs:
               'test_permission_readiness_server',
               'test_postgres_personal_tasks_integration',
               'test_adapter_contracts',
+              'test_schema_history_postgres_integration',
           )
           total = 0
           for module in modules:
