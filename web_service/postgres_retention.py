@@ -6,24 +6,13 @@ shared snapshot writer must reread these rows while locked before publishing;
 otherwise an already-read catalog could resurrect an event after retirement.
 """
 
-import json
 import re
 from datetime import date, datetime, timedelta, timezone
 
+from .source_updates import source_event_fields, source_hash
 from .storage import digest
 
 _MARKER_FIELDS = frozenset({"id", "key", "source_version", "source_hash", "end_date"})
-_SOURCE_FIELDS = (
-    "title",
-    "notes",
-    "time",
-    "source_url",
-    "start_date",
-    "end_date",
-    "kind",
-    "cancelled",
-    "source_version",
-)
 
 
 def decode_cache_payload(payload, channel):
@@ -77,10 +66,9 @@ def decode_cache_payload(payload, channel):
 
 def retired_event_marker(event):
     """Keep stable extraction keys and canonical hashes, without source content."""
-    fields = {key: event.get(key) for key in _SOURCE_FIELDS}
-    fields["cancelled"] = bool(event.get("cancelled", False))
+    fields = source_event_fields(event)
     marker = {key: event.get(key) for key in ("id", "key", "source_version", "end_date")}
-    marker["source_hash"] = digest(json.dumps(fields, sort_keys=True, ensure_ascii=False))
+    marker["source_hash"] = source_hash(fields)
     # Use the same validation for generated and already stored markers.
     decode_cache_payload({"events": [], "retired": [marker]}, event.get("channel_id"))
     return marker

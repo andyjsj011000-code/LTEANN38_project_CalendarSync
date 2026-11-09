@@ -1,6 +1,5 @@
 """SQLite persistence for the single-instance test server. Credentials are encrypted."""
 
-import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import cast
@@ -9,7 +8,12 @@ from .collection_types import CachedAnalysis, DeviceSnapshot
 from .planner_drafts import SQLiteTaskDrafts
 from .planner_trash import SQLiteTaskTrash
 from .school_storage import SchoolDatabase
-from .source_updates import automatic_source_update
+from .source_updates import (
+    apply_personal_override,
+    automatic_source_update,
+    source_event_fields,
+    source_hash,
+)
 from .sqlite_ingestion_status import SQLiteIngestionStatus
 from .storage import Conflict, Missing, PermissionPending, digest
 
@@ -42,29 +46,6 @@ CREATE TABLE IF NOT EXISTS web_feedback (
 CREATE TABLE IF NOT EXISTS web_ingest_cursor (user_id TEXT PRIMARY KEY,cursor INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS web_worker_lock (id INTEGER PRIMARY KEY,owner TEXT NOT NULL,expires_at INTEGER NOT NULL);
 """
-
-
-def source_hash(e):
-    return digest(
-        json.dumps(
-            {
-                k: e.get(k)
-                for k in (
-                    "title",
-                    "notes",
-                    "time",
-                    "source_url",
-                    "start_date",
-                    "end_date",
-                    "kind",
-                    "cancelled",
-                    "source_version",
-                )
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-    )
 
 
 class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, SchoolDatabase):
@@ -339,20 +320,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             if e["channel_id"] not in allowed:
                 raise ValueError("Source channel mismatch")
             event_id = e["id"] if e["id"].startswith("direct:") else "oracle:" + e["id"]
-            fields = {
-                k: e.get(k)
-                for k in (
-                    "title",
-                    "notes",
-                    "time",
-                    "source_url",
-                    "start_date",
-                    "end_date",
-                    "kind",
-                    "source_version",
-                )
-            }
-            fields["cancelled"] = bool(e.get("cancelled", False))
+            fields = source_event_fields(e)
             version = source_hash(fields)
             old = c.execute("SELECT channel_id FROM web_events WHERE id=?", (event_id,)).fetchone()
             if old and old[0] != e["channel_id"]:
@@ -562,27 +530,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
                     (user_id,),
                 )
             }
-        return [
-            {
-                **e,
-                **{
-                    k: v
-                    for k, v in overrides.get(e["id"], {}).items()
-                    if k
-                    in {
-                        "title",
-                        "notes",
-                        "time",
-                        "source_url",
-                        "start_date",
-                        "end_date",
-                        "kind",
-                        "cancelled",
-                    }
-                },
-            }
-            for e in items
-        ]
+        return [apply_personal_override(e, overrides.get(e["id"], {})) for e in items]
 
     def known_oracle_events(self, user, tenant, channels):
         # Graph has just verified these channels; do not rely on expired cached ACLs.

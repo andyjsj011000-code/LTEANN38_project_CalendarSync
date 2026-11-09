@@ -12,30 +12,12 @@ Token refresh changes the device version: callers must obtain a fresh device
 snapshot after refreshing, before fetching a snapshot they intend to commit.
 """
 
-import json
 import secrets
 import time
-from datetime import date
 
-from .source_updates import automatic_source_update
+from .source_updates import automatic_source_update, source_event_fields, validate_source_snapshot
+from .source_updates import source_hash as _source_hash
 from .storage import Missing, PermissionPending, digest
-
-
-def _source_hash(fields):
-    keys = (
-        "title",
-        "notes",
-        "time",
-        "source_url",
-        "start_date",
-        "end_date",
-        "kind",
-        "cancelled",
-        "source_version",
-    )
-    return digest(
-        json.dumps({key: fields.get(key) for key in keys}, sort_keys=True, ensure_ascii=False)
-    )
 
 
 class PostgresSync:
@@ -152,36 +134,7 @@ class PostgresSync:
 
     @staticmethod
     def _snapshot(channels, events):
-        channels, events = list(channels), list(events)
-        channel_ids = set()
-        for channel in channels:
-            if (
-                not isinstance(channel.get("id"), str)
-                or not channel["id"]
-                or not isinstance(channel.get("name"), str)
-                or channel["id"] in channel_ids
-            ):
-                raise ValueError("Invalid or duplicate snapshot channel")
-            channel_ids.add(channel["id"])
-        event_ids = set()
-        result = []
-        for event in events:
-            if event.get("channel_id") not in channel_ids:
-                raise ValueError("Source channel mismatch")
-            if not isinstance(event.get("id"), str) or not event["id"]:
-                raise ValueError("Event identity is required")
-            event_id = event["id"] if event["id"].startswith("direct:") else "oracle:" + event["id"]
-            if event_id in event_ids:
-                raise ValueError("Duplicate snapshot event")
-            event_ids.add(event_id)
-            start, end = (
-                date.fromisoformat(event["start_date"]),
-                date.fromisoformat(event["end_date"]),
-            )
-            if start > end or not isinstance(event.get("kind"), str) or not event["kind"]:
-                raise ValueError("Invalid event dates or kind")
-            result.append((event_id, event))
-        return sorted(channels, key=lambda row: row["id"]), sorted(result, key=lambda row: row[0])
+        return validate_source_snapshot(channels, events)
 
     def ingestion_pending(self, device):
         """Content-free progress for the current device and authorized channels."""
@@ -387,20 +340,7 @@ class PostgresSync:
 
     def _publish_snapshot_events(self, db, user_id, events, now, *, skip_unchanged=False):
         for event_id, event in events:
-            fields = {
-                key: event.get(key)
-                for key in (
-                    "title",
-                    "notes",
-                    "time",
-                    "source_url",
-                    "start_date",
-                    "end_date",
-                    "kind",
-                    "source_version",
-                )
-            }
-            fields["cancelled"] = bool(event.get("cancelled", False))
+            fields = source_event_fields(event)
             version = _source_hash(fields)
             if skip_unchanged:
                 # Materialization owns the user and authoritative cache locks.
