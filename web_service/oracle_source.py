@@ -1,13 +1,13 @@
 """Read-only bridge to legacy master_calendars; no legacy app imports or jobs."""
 
-import os
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from time import monotonic
 from urllib.parse import quote, urlencode
 
 from cryptography.fernet import Fernet
+
+from .config import OracleConfig as OracleConfig
 
 KST = timezone(timedelta(hours=9))
 
@@ -29,16 +29,6 @@ def plain(value):
     parser = PlainText()
     parser.feed(value or "")
     return "".join(parser.parts).strip()[:10000]
-
-
-@dataclass(frozen=True)
-class OracleConfig:
-    user: str
-    password: str = field(repr=False)
-    dsn: str = field(repr=False)
-    data_key: str = field(repr=False)
-    wallet_dir: str = ""
-    wallet_password: str = field(default="", repr=False)
 
 
 class NoSource:
@@ -186,17 +176,9 @@ class OracleSource:
         return results
 
 
-def source_from_env():
-    names = ("WEB_ORACLE_USER", "WEB_ORACLE_PASSWORD", "WEB_ORACLE_DSN", "WEB_ORACLE_DATA_KEY")
-    values = [os.environ.get(name, "") for name in names]
-    if not any(values):
-        return NoSource()
-    if not all(values):
-        raise ValueError("Configure all WEB_ORACLE_* credentials")
-    return OracleSource(
-        OracleConfig(
-            *values,
-            wallet_dir=os.environ.get("WEB_ORACLE_WALLET_DIR", ""),
-            wallet_password=os.environ.get("WEB_ORACLE_WALLET_PASSWORD", ""),
-        )
-    )
+def source_from_config(config: OracleConfig | None) -> OracleSource | NoSource:
+    return OracleSource(config) if config is not None else NoSource()
+
+
+def source_from_env(environ=None):
+    return source_from_config(OracleConfig.from_env(environ))

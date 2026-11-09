@@ -5,10 +5,8 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
-import os
 import secrets
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -27,18 +25,16 @@ from .collection_types import (
     PermissionSnapshot,
     PreparedCollection,
 )
-from .config import Settings
-from .connections import ConnectionTokens, PersistentIdentity, acquire_snapshot
-from .direct_source import TeamsGraph, direct_source_from_env
-from .oracle_source import OracleSource, source_from_env
-from .push import Notifications, Subscription, sender_from_env
+from .composition import compose_server
+from .connections import ConnectionTokens, acquire_snapshot
+from .oracle_source import OracleSource
+from .push import Notifications, Subscription
 from .schemas import Input, TaskInput
 from .school import SchoolIntegration
 from .school_graph import GraphFailure
 from .school_security import SecurityBoundary
 from .shared_collection import collect_shared
 from .storage import Missing, PermissionPending, digest
-from .test_storage import TestDatabase
 
 
 class ChangeDecision(Input):
@@ -698,46 +694,28 @@ def create_test_server(
     preview=False,
     notification_runtime=None,
     assignments_enabled=False,
+    *,
+    environ=None,
 ):
-    if database is None:
-        from .render_guard import ensure_hosted_storage_supported
-
-        ensure_hosted_storage_supported()
-    if settings is None:
-        settings = Settings.from_env()
-        # Screen sessions and background device connections have independent lifetimes.
-        settings = replace(
-            settings,
-            session_seconds=int(os.environ.get("WEB_SESSION_SECONDS", "28800")),
-            idle_seconds=int(os.environ.get("WEB_IDLE_SECONDS", "1800")),
-        )
-    if not settings.auth_configured:
-        raise ValueError("Configure school Entra authentication")
-    if not settings.secure_cookies and not settings.allow_local_login:
-        raise ValueError("HTTPS required")
-    db = database or TestDatabase(settings.database_path, settings.data_key)
-    if not isinstance(db, TestDatabase):
-        # Local SQLite packages do not need to import optional PG candidates.
-        from .postgres_database import PostgresDatabase
-
-        if not isinstance(db, PostgresDatabase):
-            raise ValueError("Test server requires its separate storage")
-        if preview or db.tenant_id != settings.tenant_id:
-            raise ValueError(
-                "Experimental PostgreSQL storage requires its configured school tenant"
-            )
-        if notification_runtime is not None:
-            raise ValueError("PostgreSQL notification runtime integration is not implemented")
-    provider = identity or PersistentIdentity(settings)
-    graph = graph or TeamsGraph()
-    if source is None:
-        mode = os.environ.get("WEB_INGESTION_MODE", "direct")
-        if mode not in {"direct", "oracle"}:
-            raise ValueError("Invalid ingestion mode")
-        source = direct_source_from_env(graph) if mode == "direct" else source_from_env()
-    integration = ServerIntegration(
-        settings, db, provider, graph, source, sender if sender is not None else sender_from_env()
+    components = compose_server(
+        settings,
+        database,
+        identity,
+        graph,
+        source,
+        sender,
+        preview=preview,
+        notification_runtime=notification_runtime,
+        environ=environ,
     )
+    settings, db, provider, graph, source = (
+        components.settings,
+        components.database,
+        components.identity,
+        components.graph,
+        components.source,
+    )
+    integration = ServerIntegration(settings, db, provider, graph, source, components.sender)
     integration.notification_runtime = notification_runtime
     static = Path(__file__).with_name("static")
     app = create_app(

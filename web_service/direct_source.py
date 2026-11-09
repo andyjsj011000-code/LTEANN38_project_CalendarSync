@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime, timedelta, timezone
 from time import monotonic
@@ -21,6 +20,7 @@ from .collection_types import (
     RetiredEvent,
     SourceEvent,
 )
+from .config import DirectSourceConfig
 from .oracle_source import PlainText
 from .ports import AnalysisStore, EventExtractor, MessageGraph, SharedAnalysisStore
 from .school_graph import BASE, DelegatedGraph, GraphFailure, _graph_log
@@ -796,11 +796,10 @@ class DirectSource:
         return result
 
 
-def direct_source_from_env(graph):
-    return DirectSource(
-        graph,
-        AIExtractor(
-            os.environ.get("WEB_OPENAI_API_KEY", ""), os.environ.get("WEB_LLM_MODEL", "gpt-4o-mini")
-        ),
-        images=os.environ.get("WEB_AI_IMAGES_ENABLED", "1") == "1",
-    )
+def direct_source_from_config(graph: MessageGraph, config: DirectSourceConfig) -> DirectSource:
+    return DirectSource(graph, AIExtractor(config.api_key, config.model), images=config.images)
+
+
+def direct_source_from_env(graph, environ=None):
+    """Compatibility entry point; explicit environments never fall back to globals."""
+    return direct_source_from_config(graph, DirectSourceConfig.from_env(environ))

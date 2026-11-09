@@ -17,7 +17,7 @@ tests_web/test_beta_package.py -q`로 실행합니다.
 ## 타입 검사 범위
 
 `pyproject.toml`의 `tool.basedpyright.include`가 검사 경계를 정의합니다. 현재 범위는
-내부 데이터 타입, Protocol, 공통 업무 규칙, 공지 수집과 토큰 갱신 코드,
+설정 로더와 서버 객체 조립, 내부 데이터 타입, Protocol, 공통 업무 규칙, 공지 수집과 토큰 갱신 코드,
 공통 요청 의존성, 개인 일정·설정 타입과 라우트, 요청 모델과 PostgreSQL 개인 일정·설정 구현,
 공통 대역 및 실제 어댑터의 타입 계약입니다. 나머지 모듈은 이 경계에서 가져오는
 반환 타입과 메서드 규약을 확인하며, 명시적 타입을 정리할 때 검사 범위를 넓힙니다.
@@ -85,3 +85,34 @@ DB 트랜잭션이나 동시 잠금의 대체물이 아니므로 기존 PostgreS
 기본·베타·학교용 SQLite와 PostgreSQL 구현이 이 계약을 만족하는지 검사합니다.
 `storage.py` 등 큰 기존 저장소 전체는 아직 검사 대상이 아니며, 공개 메서드의 타입과
 별도 계약으로 이 경계를 확인합니다. SQL, 스키마, 잠금과 쓰기 트랜잭션은 유지합니다.
+
+## 설정 읽기와 서버 객체 조립
+
+`config.py`는 환경값을 설정 객체로 읽습니다. `Settings.from_env(environ)`와
+`Settings.from_server_env(environ)`에 문자열 매핑을 주입할 수 있으며, 생략하면
+기존처럼 프로세스 환경을 사용합니다. 빈 매핑은 빈 환경으로 취급합니다.
+
+| 설정 경로 | 세션 기본값 | 유휴 기본값 |
+| --- | --- | --- |
+| 직접 만든 `Settings` | 12시간 | 15분 |
+| 기본 웹 `Settings.from_env()` | 1시간 | 15분 |
+| 학교 테스트 서버 `Settings.from_server_env()` | 8시간 | 30분 |
+
+기존 `WEB_SESSION_SECONDS`와 `WEB_IDLE_SECONDS`가 지정되면 같은 검증을 거쳐
+기본값을 대체합니다. 이미 주입한 `Settings`는 다시 환경값으로 덮어쓰지 않습니다.
+
+`DirectSourceConfig`, `OracleConfig`, `PushConfig`는 기존 환경변수 이름과 기본값을
+보존합니다. 기존 `*_from_env()` 함수도 유지하며, `*_from_config()`는 설정 객체로
+어댑터를 만듭니다. `oracle_source.OracleConfig` 가져오기 경로도 유지합니다.
+이미 주입한 수집기·발송기가 있으면 사용하지 않는 해당 설정을 강제로 읽거나 검증하지 않습니다.
+
+`composition.compose_server()`는 환경을 한 번 복사하고 저장소 선택 가드, 서버 설정,
+DB·Identity·Graph·수집기·발송기를 순서대로 구성합니다. 기존 주입 대역은 그대로
+유지합니다. 이 단계에서는 DB를 초기화하거나 외부 서비스를 호출하지 않습니다.
+`server.create_test_server(..., environ=...)`는 이 결과로 기존 통합 서비스와 라우트,
+선택 기능과 worker를 연결합니다. DB 초기화와 worker 시작 시점은 기존과 같습니다.
+
+PostgreSQL은 여전히 명시적으로 주입한 저장소만 허용하고 테넌트·미리보기·알림 런타임
+조건을 검사합니다. 별도 `hosted.py`의 설정·스키마 초기화 선택 조건과 베타·미리보기
+진입점은 유지합니다. 객체 조립 단계의 기존 동적 주입은 남아 있으며, 각 서비스 경계의
+Protocol과 별도 타입 계약은 계속 검사합니다.
