@@ -244,7 +244,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             c.execute("DELETE FROM web_channel_access WHERE user_id=?", (row[0],))
             c.execute("UPDATE web_school_sync SET checked_at=0 WHERE user_id=?", (row[0],))
 
-    def delete_task(self, user_id, item_id, version):
+    def delete_task(self, user_id: str, item_id: str, version: int) -> None:
         self.task(user_id, item_id)
         with self.connect() as c:
             changed = c.execute(

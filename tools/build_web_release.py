@@ -39,6 +39,8 @@ REQUIRED_FILES = (
     "web_service/graph_subscriptions.py",
     "web_service/identity.py",
     "web_service/personal_routes.py",
+    "web_service/personal_types.py",
+    "web_service/personal_ports.py",
     "web_service/request_dependencies.py",
     "web_service/settings_routes.py",
     "web_service/notification_fanout.py",

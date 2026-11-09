@@ -9,6 +9,8 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta, timezone
 from typing import Any
 
+from .personal_types import PersonalAgenda, PersonalTask
+
 KST = timezone(timedelta(hours=9))
 
 Item = Mapping[str, Any]
@@ -70,7 +72,7 @@ def agenda_result(items: Iterable[Item], day: str) -> dict[str, Any]:
     }
 
 
-def personal_agenda_result(items: Iterable[Item], day: str) -> dict[str, Any]:
+def personal_agenda_result(items: Iterable[PersonalTask], day: str) -> PersonalAgenda:
     """Personal-only path: a pending Teams proof must not hide a user's tasks."""
     visible = [item for item in items if not item["hidden"] and personal_task_appears(item, day)]
     return {

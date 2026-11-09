@@ -5,14 +5,26 @@ opt-in planner routes use the same session, tenant, CSRF and integration checks.
 """
 
 import hmac
+from collections.abc import Callable
+from typing import TypedDict
 
 from fastapi import HTTPException, Request
 
 
-def create_session_dependency(settings, db, session_cookie, integration=None):
+class SessionIdentity(TypedDict):
+    """Only the identity fields consumed by these routes; the session has more."""
+
+    user_id: str
+    tenant_id: str
+
+
+SessionDependency = Callable[[Request], SessionIdentity]
+
+
+def create_session_dependency(settings, db, session_cookie, integration=None) -> SessionDependency:
     """Bind one application's collaborators without storing request state."""
 
-    def current_session(request: Request):
+    def current_session(request: Request) -> SessionIdentity:
         session = db.session(request.cookies.get(session_cookie))
         if not session or (settings.tenant_id and session["tenant_id"] != settings.tenant_id):
             raise HTTPException(401, "Sign in with your school account")

@@ -9,9 +9,11 @@ cannot be rejected solely through this user-level check; session/device proof
 must also be revalidated by the authenticated application boundary.
 """
 
+from typing import cast
 from uuid import uuid4
 
 from .calendar_rules import personal_agenda_result
+from .personal_types import PersonalAgenda, PersonalTask, TaskChanges, TaskContent, TaskPayload
 from .storage import Conflict, Missing
 
 
@@ -21,10 +23,12 @@ class PostgresPersonalTasks:
     def __init__(self, connect, seal, unseal):
         self.connect, self.seal, self.unseal = connect, seal, unseal
 
-    def _value(self, row):
+    def _value(self, row) -> PersonalTask:
         item_id, blob, completed, hidden, version = row
+        # The stored JSON keeps its original fields; only metadata is overlaid.
+        payload = cast(TaskContent, self.unseal(blob))
         return {
-            **self.unseal(blob),
+            **payload,
             "id": item_id,
             "source": "personal",
             "kind": "personal",
@@ -42,7 +46,7 @@ class PostgresPersonalTasks:
         if not user or not user[0]:
             raise Missing()
 
-    def add_task(self, user_id, payload):
+    def add_task(self, user_id: str, payload: TaskPayload) -> PersonalTask:
         item_id = str(uuid4())
         with self.connect() as db:
             self._task_lock_user(db, user_id)
@@ -54,7 +58,7 @@ class PostgresPersonalTasks:
             ).fetchone()
             return self._value(row)
 
-    def task(self, user_id, item_id):
+    def task(self, user_id: str, item_id: str) -> PersonalTask:
         with self.connect() as db:
             self._task_lock_user(db, user_id)
             row = db.execute(
@@ -66,7 +70,7 @@ class PostgresPersonalTasks:
                 raise Missing()
             return self._value(row)
 
-    def personal_agenda(self, user_id, tenant_id, day):
+    def personal_agenda(self, user_id: str, tenant_id: str, day: str) -> PersonalAgenda:
         columns = ",".join("t." + column for column in self._TASK_COLUMNS.split(","))
         with self.connect() as db:
             rows = db.execute(
@@ -87,7 +91,9 @@ class PostgresPersonalTasks:
             raise Missing()
         raise Conflict()
 
-    def update_task(self, user_id, item_id, payload, version):
+    def update_task(
+        self, user_id: str, item_id: str, payload: TaskPayload, version: int
+    ) -> PersonalTask:
         with self.connect() as db:
             self._task_lock_user(db, user_id)
             row = db.execute(
@@ -107,12 +113,14 @@ class PostgresPersonalTasks:
                 self._missing_or_conflict(db, user_id, item_id)
             return self._value(row)
 
-    def task_state(self, user_id, item_id, values, version):
-        updates = {
-            key: int(values[key])
-            for key in ("hidden", "completed")
-            if key in values and values[key] is not None
-        }
+    def task_state(
+        self, user_id: str, item_id: str, values: TaskChanges, version: int
+    ) -> PersonalTask:
+        updates = {}
+        for key in ("hidden", "completed"):
+            value = values.get(key)
+            if value is not None:
+                updates[key] = int(value)
         if not updates:
             raise ValueError("At least one state is required")
         assignments = ",".join(key + "=%s" for key in updates)
@@ -127,7 +135,7 @@ class PostgresPersonalTasks:
                 self._missing_or_conflict(db, user_id, item_id)
             return self._value(row)
 
-    def delete_task(self, user_id, item_id, version):
+    def delete_task(self, user_id: str, item_id: str, version: int) -> None:
         with self.connect() as db:
             self._task_lock_user(db, user_id)
             row = db.execute(

@@ -6,8 +6,10 @@ These functions are never called and do not construct providers or databases.
 
 from support.fakes import Cache, Extractor, Graph, Refresher, SharedCache
 
+from web_service.beta import BetaDatabase
 from web_service.connections import ConnectionTokens, PersistentIdentity
 from web_service.direct_source import AIExtractor, TeamsGraph
+from web_service.personal_ports import PersonalTaskStore, PreferenceStore, TaskTrashStore
 from web_service.ports import (
     AnalysisStore,
     ConnectionStore,
@@ -18,6 +20,7 @@ from web_service.ports import (
     TokenRefresher,
 )
 from web_service.postgres_database import PostgresDatabase
+from web_service.storage import Database
 from web_service.test_storage import TestDatabase
 
 
@@ -40,3 +43,21 @@ def doubles(
     graph: Graph, extractor: Extractor, cache: Cache, shared: SharedCache, refresher: Refresher
 ) -> tuple[MessageGraph, EventExtractor, AnalysisStore, SharedAnalysisStore, TokenRefresher]:
     return graph, extractor, cache, shared, refresher
+
+
+def personal_stores(
+    foundation: Database, beta: BetaDatabase, sqlite: TestDatabase, postgres: PostgresDatabase
+) -> tuple[PersonalTaskStore, PersonalTaskStore, PersonalTaskStore, PersonalTaskStore]:
+    return foundation, beta, sqlite, postgres
+
+
+def preference_stores(
+    foundation: Database, beta: BetaDatabase, sqlite: TestDatabase, postgres: PostgresDatabase
+) -> tuple[PreferenceStore, PreferenceStore, PreferenceStore, PreferenceStore]:
+    return foundation, beta, sqlite, postgres
+
+
+def planner_stores(
+    sqlite: TestDatabase, postgres: PostgresDatabase
+) -> tuple[TaskTrashStore, TaskTrashStore]:
+    return sqlite, postgres
