@@ -1,12 +1,24 @@
 """Collect into the shared catalog without owning or renewing permission proofs."""
 
-import logging
+from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
+from .collection_types import (
+    CollectionCounter,
+    CollectionReport,
+    DeviceSnapshot,
+    PreparedCollection,
+)
 from .connections import acquire_snapshot
 from .school_graph import GraphFailure
 from .storage import PermissionPending
 
-COUNTS = (
+if TYPE_CHECKING:
+    from .server import ServerIntegration
+
+COUNTS: tuple[CollectionCounter, ...] = (
     "channels_total",
     "channels_scanned",
     "messages_seen",
@@ -16,7 +28,13 @@ COUNTS = (
 )
 
 
-def collect_shared(integration, device, prepared=None, *, force=False):
+def collect_shared(
+    integration: ServerIntegration,
+    device: DeviceSnapshot,
+    prepared: PreparedCollection | None = None,
+    *,
+    force: bool = False,
+):
     db = integration.db
     attempt = None
     closed = False
@@ -50,7 +68,7 @@ def collect_shared(integration, device, prepared=None, *, force=False):
             return {"state": "busy"}
         channels = prepared["channels"]
 
-        def progress(report):
+        def progress(report: CollectionReport) -> None:
             if attempt:
                 db.update_ingestion(device, attempt, report)
 

@@ -8,7 +8,9 @@ This module neither initializes a schema nor connects to any live database.
 
 import secrets
 import time
+from typing import cast
 
+from .collection_types import DeviceSnapshot
 from .storage import Missing, digest
 
 
@@ -111,7 +113,7 @@ class PostgresDevices:
             )
         return raw, expires - now
 
-    def device(self, device_hash):
+    def device(self, device_hash: str) -> DeviceSnapshot | None:
         with self.connect() as db:
             row = db.execute(
                 f"""SELECT {self._DEVICE_COLUMNS},u.tenant_id,u.object_id
@@ -119,9 +121,13 @@ class PostgresDevices:
                 WHERE d.id_hash=%s AND d.active=1 AND d.expires_at>%s AND u.active=1""",
                 (device_hash, int(self.clock())),
             ).fetchone()
-        return dict(zip(self._DEVICE_FIELDS + ("tenant_id", "object_id"), row)) if row else None
+        return (
+            cast(DeviceSnapshot, dict(zip(self._DEVICE_FIELDS + ("tenant_id", "object_id"), row)))
+            if row
+            else None
+        )
 
-    def session_device(self, session):
+    def session_device(self, session) -> DeviceSnapshot:
         with self.connect() as db:
             row = db.execute(
                 f"""SELECT {self._DEVICE_COLUMNS},u.tenant_id,u.object_id
@@ -133,7 +139,9 @@ class PostgresDevices:
             ).fetchone()
         if row is None:
             raise Missing()
-        return dict(zip(self._DEVICE_FIELDS + ("tenant_id", "object_id"), row))
+        return cast(
+            DeviceSnapshot, dict(zip(self._DEVICE_FIELDS + ("tenant_id", "object_id"), row))
+        )
 
     def school_session(self, raw, idle_seconds):
         """Revalidate and touch a viewing session without extending its device.

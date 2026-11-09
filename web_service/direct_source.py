@@ -1,16 +1,28 @@
 """Delegated Teams ingestion and bounded structured AI extraction, independent of Oracle."""
 
+from __future__ import annotations
+
 import base64
 import json
 import os
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime, timedelta, timezone
 from time import monotonic
+from typing import Any, cast
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .collection_types import (
+    Channel,
+    CollectionReport,
+    EventDraft,
+    RetiredEvent,
+    SourceEvent,
+)
 from .oracle_source import PlainText
+from .ports import AnalysisStore, EventExtractor, MessageGraph, SharedAnalysisStore
 from .school_graph import BASE, DelegatedGraph, GraphFailure, _graph_log
 from .storage import digest
 
@@ -83,7 +95,9 @@ def _hosted_image_target(channel, message_id, url):
     )
 
 
-def _message_context(message, channel, message_id, images, reply_limit):
+def _message_context(
+    message: dict[str, Any], channel: Channel, message_id: str, images: bool, reply_limit: int
+) -> tuple[str, list[str], str | None]:
     # These local checks must also run for a cached source revision. A prior
     # truncated analysis is not proof that the current input is complete.
     if message.get("replies@odata.nextLink") is not None:
@@ -150,11 +164,11 @@ def _message_context(message, channel, message_id, images, reply_limit):
 
 
 class TeamsGraph(DelegatedGraph):
-    def message_path(self, channel, message=None):
+    def message_path(self, channel: Channel, message: str | None = None) -> str:
         root = f"/teams/{quote(channel['team_id'], safe='')}/channels/{quote(channel['id'], safe='')}/messages"
         return root + (("/" + quote(message, safe="")) if message else "")
 
-    def messages(self, token, channel):
+    def messages(self, token: str, channel: Channel) -> list[dict[str, Any]]:
         path = self.message_path(channel)
         with self.client_factory() as client:
             data = self._read(client, token, BASE + path + "?$top=50&$expand=replies")
@@ -165,7 +179,15 @@ class TeamsGraph(DelegatedGraph):
             raise GraphFailure()
         return messages[:50]
 
-    def message(self, token, channel, message_id, *, complete_replies=False, deadline=None):
+    def message(
+        self,
+        token: str,
+        channel: Channel,
+        message_id: str,
+        *,
+        complete_replies: bool = False,
+        deadline: float | None = None,
+    ) -> dict[str, Any] | None:
         if complete_replies and deadline is None:
             deadline = monotonic() + 80
         with self.client_factory() as client:
@@ -246,7 +268,7 @@ class TeamsGraph(DelegatedGraph):
             url = next_link
         raise GraphFailure("source_unavailable")
 
-    def hosted_image(self, token, channel, message_id, url):
+    def hosted_image(self, token: str, channel: Channel, message_id: str, url: str) -> str | None:
         if not _hosted_image_target(channel, message_id, url):
             _graph_log("hosted_image", "invalid_target")
             return None
@@ -289,10 +311,12 @@ class AIExtractor:
         )
 
     @property
-    def configured(self):
+    def configured(self) -> bool:
         return bool(self.key)
 
-    def extract(self, text, images, previous):
+    def extract(
+        self, text: str, images: list[str], previous: Sequence[SourceEvent | RetiredEvent]
+    ) -> list[EventDraft]:
         if not self.configured:
             raise ValueError("AI is not configured")
         system = (
@@ -302,7 +326,7 @@ class AIExtractor:
             "취소 공지는 cancelled=true로 반환한다. 답글과 수정이 본문을 바꾸면 최신 내용을 반영하되 사용자가 변경을 검토한다. "
             "이미지에서 날짜를 읽을 수 없으면 만들어내지 않는다. 일정이 없으면 빈 배열이다."
         )
-        content = [
+        content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": text[:16000]
@@ -349,39 +373,44 @@ class AIExtractor:
         events = Extraction.model_validate_json(value["content"]).events
         if len({e.key for e in events}) != len(events):
             raise ValueError("Duplicate event keys")
-        return [e.model_dump(mode="json") for e in events]
+        return [cast(EventDraft, e.model_dump(mode="json")) for e in events]
 
 
-class CollectionResult(list):
+class CollectionResult(list[SourceEvent]):
     """Existing event-list contract plus counts that contain no source content."""
 
-    def __init__(self, events, report):
+    # Scope evidence exists only on progress-enabled collections. Declaring the
+    # types does not create the attributes or change legacy hasattr() behavior.
+    checked_channels: frozenset[str]
+    scanned_channels: frozenset[str]
+
+    def __init__(self, events: Iterable[SourceEvent], report: CollectionReport) -> None:
         super().__init__(events)
-        self.report = dict(report)
+        self.report = cast(CollectionReport, dict(report))
 
 
 class DirectSource:
-    def __init__(self, graph, extractor, images=True):
+    def __init__(self, graph: MessageGraph, extractor: EventExtractor, images: bool = True) -> None:
         self.graph, self.extractor, self.images = graph, extractor, images
 
     @property
-    def configured(self):
+    def configured(self) -> bool:
         return self.extractor.configured
 
     supports_progress = True
 
     def collect(
         self,
-        token,
-        channels,
-        tenant,
-        db,
-        user_id,
+        token: str,
+        channels: list[Channel],
+        tenant: str,
+        db: AnalysisStore,
+        user_id: str,
         *,
-        selected_channels=None,
-        selected_messages=None,
-        on_progress=None,
-    ):
+        selected_channels: list[Channel] | None = None,
+        selected_messages: list[str] | None = None,
+        on_progress: Callable[[CollectionReport], None] | None = None,
+    ) -> CollectionResult:
         if not self.configured:
             raise ValueError("AI is not configured")
         targeted = None
@@ -405,7 +434,10 @@ class DirectSource:
             targeted = list(dict.fromkeys(selected_messages))
         broad = selected_channels is None
         shared = bool(getattr(db, "shared_ingestion_enabled", False))
-        report = {
+        # A cast describes the optional adapter capability; it does not bypass
+        # the feature flag or replace the existing lease checks.
+        shared_db = cast(SharedAnalysisStore, db)
+        report: CollectionReport = {
             "channels_total": len(channels) if broad else len(selected_channels),
             "channels_scanned": 0,
             "messages_seen": 0,
@@ -414,8 +446,8 @@ class DirectSource:
             "messages_failed": 0,
             "partial": False,
         }
-        checked = set()
-        scanned = set()
+        checked: set[str] = set()
+        scanned: set[str] = set()
 
         def emit_progress():
             if on_progress is not None:
@@ -476,11 +508,13 @@ class DirectSource:
                 break
             lease = None
             if shared:
-                lease = db.claim_channel_ingestion(channel, freshness_seconds=300 if broad else 0)
+                lease = shared_db.claim_channel_ingestion(
+                    channel, freshness_seconds=300 if broad else 0
+                )
                 if lease is None:
                     if not broad:
                         raise GraphFailure("source_unavailable")
-                    if db.channel_ingestion_fresh(channel, freshness_seconds=300):
+                    if shared_db.channel_ingestion_fresh(channel, freshness_seconds=300):
                         checked.add(channel["id"])
                     else:
                         # Another owner is still collecting. Its eventual result
@@ -583,6 +617,7 @@ class DirectSource:
                         report["messages_cached"] += 1
                         emit_progress()
                         continue
+                    events: list[SourceEvent]
                     if message.get("deletedDateTime"):
                         events = [
                             {**e, "cancelled": True, "source_version": version}
@@ -718,7 +753,7 @@ class DirectSource:
                     if ended_normally and complete and monotonic() > deadline:
                         complete = False
                         report["partial"] = True
-                    finished = db.finish_channel_ingestion(
+                    finished = shared_db.finish_channel_ingestion(
                         channel,
                         lease,
                         # An exact-root job proves only its requested roots. It
