@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from pydantic import Field, model_validator
 
 from .config import PushConfig
+from .reminder_rules import reminder_times, within_reminder_window
 from .schemas import Input
 from .storage import digest
 
@@ -146,7 +147,7 @@ class Notifications:
         if (
             (only_key is None or only_key.startswith("morning:"))
             and prefs["morning_enabled"]
-            and 0 <= (now - morning).total_seconds() < 600
+            and within_reminder_window(now, morning)
         ):
             agenda = self.db.agenda(user, tenant, today)
             for group in ("teams", "personal"):
@@ -183,21 +184,9 @@ class Notifications:
                 item["end_date"] + "T" + (item.get("time") or "23:59")
             ).replace(tzinfo=KST)
             rule = self.db.rules(user, item["id"], item["source"])
-            times = []
-            for offset in rule["offsets"]:
-                try:
-                    times.append(deadline + timedelta(minutes=offset))
-                except OverflowError:
-                    continue
-            for value in rule["custom_times"]:
-                try:
-                    times.append(
-                        datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(KST)
-                    )
-                except (OverflowError, ValueError):
-                    continue
+            times = reminder_times(deadline, rule["offsets"], rule["custom_times"])
             for due in times:
-                if 0 <= (now - due).total_seconds() < 600:
+                if within_reminder_window(now, due):
                     key = "item:" + item["source"] + ":" + item["id"] + ":" + due.isoformat()
                     if only_key is None or only_key == key:
                         candidates.append(

@@ -78,3 +78,5 @@ DB가 없으면 해당 검사는 건너뜁니다. 운영 DB 주소를 테스트�
 외부 연결을 차단하는 로컬 검사는 `python -I -S tools/run_restricted_tests.py`로 실행합니다.
 이 실행기는 같은 `pyproject.toml`을 읽되 추가 pytest 옵션을 비우고,
 하위 프로세스가 필요한 베타 패키지 실행 검사를 제외합니다.
+
+원본의 구조 개선 이식 범위와 완료 판단은 [LTEANN 이식 검토](docs/LTEANN_PORT_REVIEW.md)를 참고합니다.

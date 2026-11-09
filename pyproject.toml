@@ -45,6 +45,7 @@ include = [
     "web_service/shared_collection.py",
     "web_service/sync_diagnostics.py",
     "web_service/sync_ports.py",
+    "web_service/reminder_rules.py",
     "web_service/sync_results.py",
     "web_service/sync_workflow.py",
     "web_service/direct_source.py",

@@ -6,13 +6,11 @@ import asyncio
 import hmac
 import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, HTTPException, Response
+from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import Field, model_validator
+from fastapi.responses import JSONResponse
 
 from .api import create_app
 from .collection_types import (
@@ -23,43 +21,19 @@ from .collection_types import (
 )
 from .composition import compose_server
 from .connections import ConnectionTokens
-from .push import Notifications, Subscription
-from .schemas import Input, TaskInput
+from .push import Notifications
+from .push_routes import install_push_routes
+from .reminder_routes import ReminderRule as ReminderRule
+from .reminder_routes import install_reminder_routes
+from .review_routes import ChangeDecision as ChangeDecision
+from .review_routes import install_review_routes
 from .school import SchoolIntegration
 from .school_security import SecurityBoundary
+from .server_routes import Feedback as Feedback
+from .server_routes import install_server_routes
 from .storage import Missing, PermissionPending, digest
 from .sync_ports import SyncResult
 from .sync_workflow import run_sync
-
-
-class ChangeDecision(Input):
-    accept: bool
-
-
-class Feedback(Input):
-    message: str = Field(min_length=1, max_length=4000)
-
-
-class ReminderRule(Input):
-    offsets: list[int] = Field(default_factory=lambda: [-1440, -60], max_length=10)
-    custom_times: list[str] = Field(default_factory=list, max_length=10)
-
-    @model_validator(mode="after")
-    def valid_times(self):
-        if any(x > 0 or x < -10080 for x in self.offsets):
-            raise ValueError("Invalid reminder offset")
-        self.offsets = sorted(set(self.offsets))
-        parsed = []
-        for value in self.custom_times:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                raise ValueError("Reminder times must include timezone")
-            try:
-                parsed.append(dt.astimezone(timezone.utc).isoformat())
-            except OverflowError:
-                raise ValueError("Reminder time is out of range") from None
-        self.custom_times = sorted(set(parsed))
-        return self
 
 
 class ServerIntegration(SchoolIntegration):
@@ -432,14 +406,6 @@ def create_test_server(
     app.add_middleware(SecurityBoundary, settings=settings)
     require = app.state.require_session
 
-    @app.get("/api/assignments")
-    def assignments(refresh: bool = False, session=Depends(require)):
-        if not integration.assignments_enabled:
-            raise HTTPException(404, "Assignments unavailable")
-        if refresh and not db.allow("assignment-sync:" + session["user_id"], 2):
-            raise HTTPException(429, "Wait before syncing again")
-        return app.state.assignments.read(session, force=refresh)
-
     @app.exception_handler(RequestValidationError)
     async def invalid(request, error):
         return JSONResponse({"detail": "Check the input and dates"}, status_code=422)
@@ -481,187 +447,9 @@ def create_test_server(
 
     app.router.lifespan_context = lifespan
 
-    @app.get("/api/service")
-    def info():
-        return {
-            "mode": "preview" if preview else "test-server",
-            "school_login": not preview,
-            "synthetic_data_only": preview,
-            "idle_seconds": settings.idle_seconds,
-            "shared_channel_ingestion": integration.shared_ingestion_enabled,
-            "personal_agenda": True,
-            "assignments_enabled": integration.assignments_enabled,
-            "planner_enhancements": bool(getattr(db, "planner_enhancements_enabled", False)),
-        }
-
-    @app.get("/service-worker.js")
-    def service_worker():
-        return FileResponse(
-            static / "service-worker.js",
-            media_type="text/javascript",
-            headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-store"},
-        )
-
-    @app.get("/manifest.webmanifest")
-    def manifest():
-        return FileResponse(static / "manifest.webmanifest", media_type="application/manifest+json")
-
-    @app.get("/privacy")
-    def privacy():
-        return FileResponse(
-            Path(__file__).parent.parent / "docs" / "TEST_SERVER_PRIVACY.md",
-            media_type="text/plain; charset=utf-8",
-        )
-
-    @app.post("/api/teams/sync")
-    def sync(background_tasks: BackgroundTasks, session=Depends(require)):
-        if not db.allow("manual-sync:" + session["user_id"], 2):
-            raise HTTPException(429, "Wait before syncing again")
-        return integration.sync(session, background_tasks)
-
-    @app.get("/api/teams/ingestion-status")
-    def ingestion_status(session=Depends(require)):
-        if not getattr(db, "planner_enhancements_enabled", False):
-            raise HTTPException(404, "Not available")
-        return db.ingestion_status(db.session_device(session))
-
-    @app.post("/auth/logout-all", status_code=204)
-    def logout_all(session=Depends(require)):
-        db.revoke_all(session["user_id"])
-        response = Response(status_code=204)
-        response.delete_cookie(
-            integration.session_cookie,
-            path="/",
-            secure=settings.secure_cookies,
-            httponly=True,
-            samesite="lax",
-        )
-        integration.logout_response(response)
-        return response
-
-    @app.get("/api/changes")
-    def changes(session=Depends(require)):
-        return integration.read_teams(
-            session, lambda: {"items": db.changes(session["user_id"], session["tenant_id"])}
-        )
-
-    @app.post("/api/changes/{change_id}")
-    def decide(change_id: str, body: ChangeDecision, session=Depends(require)):
-        db.resolve_change(session["user_id"], session["tenant_id"], change_id, body.accept)
-        return {"saved": True}
-
-    @app.put("/api/events/{event_id}/override")
-    def override(event_id: str, body: TaskInput, session=Depends(require)):
-        if hasattr(db, "override_event"):
-            db.override_event(
-                session["user_id"],
-                session["tenant_id"],
-                event_id,
-                body.model_dump(mode="json", exclude={"display_mode", "selected_dates"}),
-            )
-            return {"saved": True}
-        events = {e["id"]: e for e in db._shared(session["user_id"], session["tenant_id"])}
-        if event_id not in events:
-            raise Missing()
-        item = {
-            **events[event_id],
-            **body.model_dump(mode="json", exclude={"display_mode", "selected_dates"}),
-        }
-        with db.connect() as c:
-            c.execute(
-                "INSERT INTO web_event_states(user_id,event_id,override_blob) VALUES(?,?,?) ON CONFLICT(user_id,event_id) DO UPDATE SET override_blob=excluded.override_blob",
-                (session["user_id"], event_id, db.seal(item)),
-            )
-        return {"saved": True}
-
-    @app.post("/api/feedback", status_code=201)
-    def feedback(body: Feedback, session=Depends(require)):
-        if not db.allow("feedback:" + session["user_id"], 5):
-            raise HTTPException(429, "Try again later")
-        return {"id": db.save_feedback(session["user_id"], body.message)}
-
-    def accessible_item(session, source, item_id):
-        if source == "personal":
-            return db.task(session["user_id"], item_id)
-        if source != "teams":
-            raise Missing()
-        integration.run_sync(db.session_device(session), False)
-        integration.require_permission_ready(session)
-        return next(
-            (e for e in db._shared(session["user_id"], session["tenant_id"]) if e["id"] == item_id),
-            None,
-        ) or (_ for _ in ()).throw(Missing())
-
-    @app.get("/api/reminders/{source}/{item_id}")
-    def reminders(source: str, item_id: str, session=Depends(require)):
-        accessible_item(session, source, item_id)
-        return db.rules(session["user_id"], item_id, source)
-
-    @app.put("/api/reminders/{source}/{item_id}")
-    def save_reminders(source: str, item_id: str, body: ReminderRule, session=Depends(require)):
-        accessible_item(session, source, item_id)
-        now = datetime.fromtimestamp(db.clock(), timezone.utc)
-        existing = set(db.rules(session["user_id"], item_id, source)["custom_times"])
-        future = []
-        for value in body.custom_times:
-            when = datetime.fromisoformat(value)
-            if when <= now and value in existing:
-                continue
-            if not now < when <= now + timedelta(days=366):
-                raise HTTPException(422, "Custom reminders must be within the next year")
-            future.append(value)
-        db.save_rules(
-            session["user_id"], item_id, source, {**body.model_dump(), "custom_times": future}
-        )
-        return {"saved": True}
-
-    @app.get("/api/push")
-    def push_info(session=Depends(require)):
-        device = db.session_device(session)
-        return {
-            "configured": integration.sender.configured,
-            "public_key": integration.sender.public,
-            "registered": bool(db.subscriptions(device["id_hash"])),
-            "background_enabled": bool(device["background"]),
-        }
-
-    @app.post("/api/push", status_code=201)
-    def subscribe(body: Subscription, session=Depends(require)):
-        if not integration.sender.configured:
-            raise HTTPException(503, "Push is not configured")
-        device = db.session_device(session)
-        if not device["background"]:
-            raise HTTPException(409, "Sign in with device connection enabled first")
-        db.subscribe(device, body.model_dump())
-        return {"saved": True}
-
-    @app.delete("/api/push", status_code=204)
-    def unsubscribe(session=Depends(require)):
-        db.unsubscribe(db.session_device(session)["id_hash"])
-
-    @app.post("/api/push/test")
-    def test_push(session=Depends(require)):
-        device = db.session_device(session)
-        subscriptions = db.subscriptions(device["id_hash"])
-        if not integration.sender.configured or not subscriptions:
-            raise HTTPException(409, "Enable notifications on this device first")
-        if not db.allow("push-test:" + device["id_hash"], 1):
-            raise HTTPException(429, "Wait a minute before testing again")
-        outcomes = [
-            integration.sender.send(
-                s["subscription"],
-                {
-                    "title": "CalendarSync",
-                    "body": "테스트 알림이 도착했어요.",
-                    "url": "/",
-                    "tag": "calendarsync-test",
-                },
-            )
-            for s in subscriptions
-        ]
-        return {
-            "accepted": outcomes.count("sent"),
-            "failed": len(outcomes) - outcomes.count("sent"),
-        }
+    install_server_routes(app, settings, db, integration, require, static, preview)
+    install_review_routes(app, db, integration, require)
+    install_reminder_routes(app, db, integration, require)
+    install_push_routes(app, db, integration, require)
 
     return app

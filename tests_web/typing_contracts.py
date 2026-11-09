@@ -8,7 +8,8 @@ from support.fakes import Cache, Extractor, Graph, Refresher, SharedCache
 
 from web_service.beta import BetaDatabase
 from web_service.connections import ConnectionTokens, PersistentIdentity
-from web_service.direct_source import AIExtractor, TeamsGraph
+from web_service.direct_source import AIExtractor, DirectSource, TeamsGraph
+from web_service.oracle_source import NoSource, OracleSource
 from web_service.personal_ports import PersonalTaskStore, PreferenceStore, TaskTrashStore
 from web_service.ports import (
     AnalysisStore,
@@ -22,7 +23,15 @@ from web_service.ports import (
 from web_service.postgres_database import PostgresDatabase
 from web_service.server import ServerIntegration
 from web_service.storage import Database
-from web_service.sync_ports import SyncContext
+from web_service.sync_ports import (
+    CollectionSource,
+    EventSource,
+    IngestionTrackingStore,
+    PermissionGraph,
+    SharedCollectionStore,
+    SnapshotStore,
+    SyncContext,
+)
 from web_service.test_storage import TestDatabase
 
 
@@ -67,3 +76,26 @@ def planner_stores(
 
 def synchronization(integration: ServerIntegration) -> SyncContext:
     return integration
+
+
+def sync_providers(
+    graph: TeamsGraph,
+    direct: DirectSource,
+    oracle: OracleSource,
+    absent: NoSource,
+) -> tuple[PermissionGraph, CollectionSource, EventSource, EventSource]:
+    return graph, direct, oracle, absent
+
+
+def sync_stores(
+    sqlite: TestDatabase,
+    postgres: PostgresDatabase,
+) -> tuple[
+    SnapshotStore,
+    SnapshotStore,
+    IngestionTrackingStore,
+    IngestionTrackingStore,
+    SharedCollectionStore,
+    SharedCollectionStore,
+]:
+    return sqlite, postgres, sqlite, postgres, sqlite, postgres
