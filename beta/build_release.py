@@ -13,6 +13,7 @@ def build(release_directory=None):
         "__init__.py",
         "api.py",
         "beta.py",
+        "calendar_rules.py",
         "config.py",
         "identity.py",
         "schemas.py",

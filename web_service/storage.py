@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from cryptography.fernet import Fernet
 
+from .calendar_rules import agenda_result, calendar_result
+from .calendar_rules import personal_agenda_result as personal_agenda_result
 from .schemas import Preferences
 
 
@@ -50,23 +52,6 @@ class Conflict(Exception):
 
 def digest(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def personal_agenda_result(items, day):
-    visible = [
-        item
-        for item in items
-        if not item["hidden"]
-        and (
-            item["end_date"] == day
-            or item["display_mode"] == "daily"
-            or (item["display_mode"] == "selected" and day in item["selected_dates"])
-        )
-    ]
-    return {
-        "date": day,
-        "personal": sorted(visible, key=lambda item: (item.get("time") or "99:99", item["id"])),
-    }
 
 
 class Database:
@@ -349,35 +334,9 @@ class Database:
                 (user_id, end, start),
             ).fetchall()
             personal = [self._task_value(row) for row in rows]
-        teams = [
-            e
-            for e in self._shared(user_id, tenant_id)
-            if e["start_date"] <= end and e["end_date"] >= start
-        ]
-        result = []
-        for e in personal + teams:
-            if hidden_only:
-                if not e["hidden"]:
-                    continue
-            elif e["hidden"] or (
-                e["source"] == "teams"
-                and (not e["channel_enabled"] or e["kind"] in prefs["disabled_kinds"])
-            ):
-                continue
-            result.append({k: v for k, v in e.items() if k != "channel_enabled"})
-        return sorted(result, key=lambda e: (e.get("time") or "99:99", e["source"], e["id"]))
+        return calendar_result(
+            personal, self._shared(user_id, tenant_id), prefs, start, end, hidden_only
+        )
 
     def agenda(self, user_id, tenant_id, day):
-        items = self.calendar(user_id, tenant_id, day, day)
-
-        def appears(e):
-            if e["source"] == "teams" or e["end_date"] == day:
-                return True
-            mode = e["display_mode"]
-            return mode == "daily" or (mode == "selected" and day in e["selected_dates"])
-
-        return {
-            "date": day,
-            "teams": [e for e in items if e["source"] == "teams" and appears(e)],
-            "personal": [e for e in items if e["source"] == "personal" and appears(e)],
-        }
+        return agenda_result(self.calendar(user_id, tenant_id, day, day), day)

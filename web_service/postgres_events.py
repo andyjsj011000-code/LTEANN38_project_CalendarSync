@@ -8,19 +8,20 @@ list and deliberately does not use ACLs cleared by begin_sync. This module
 does not initialize a schema, connect to a live DB, or modify the legacy app.
 """
 
-import re
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
+from .calendar_rules import agenda_result, calendar_result
 from .postgres_channels import PostgresChannels
 from .postgres_personal_tasks import PostgresPersonalTasks
 from .schemas import Preferences
-from .storage import Missing, PermissionPending
-
-_EDITABLE_FIELDS = frozenset(
-    {"title", "notes", "time", "source_url", "start_date", "end_date", "kind", "cancelled"}
+from .source_updates import SOURCE_EVENT_FIELDS as _SOURCE_FIELDS
+from .source_updates import (
+    source_display_fields,
+    validate_event_override,
+    validate_override_request,
 )
-_SOURCE_FIELDS = _EDITABLE_FIELDS | {"source_version"}
+from .storage import Missing, PermissionPending
 
 
 class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
@@ -37,10 +38,7 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
         self.connect, self.seal, self.unseal, self.clock = connect, seal, unseal, clock
 
     def _source_fields(self, blob):
-        values = self.unseal(blob)
-        if not isinstance(values, dict):
-            raise ValueError("Invalid event payload")
-        return {key: value for key, value in values.items() if key in _SOURCE_FIELDS}
+        return source_display_fields(self.unseal(blob))
 
     def _event_value(self, row):
         fields = self._source_fields(row[5])
@@ -158,35 +156,11 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
 
     @staticmethod
     def _validate_override(fields):
-        if (
-            not isinstance(fields.get("title"), str)
-            or not 1 <= len(fields["title"]) <= 500
-            or not isinstance(fields.get("notes", ""), str)
-            or len(fields.get("notes", "")) > 10000
-        ):
-            raise ValueError("Invalid event text")
-        start, end = (
-            date.fromisoformat(fields["start_date"]),
-            date.fromisoformat(fields["end_date"]),
-        )
-        if start > end:
-            raise ValueError("Invalid event period")
-        when = fields.get("time")
-        if when is not None and (
-            not isinstance(when, str) or re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", when) is None
-        ):
-            raise ValueError("Invalid event time")
-        if (
-            not isinstance(fields.get("kind"), str)
-            or not fields["kind"]
-            or not isinstance(fields.get("cancelled", False), bool)
-        ):
-            raise ValueError("Invalid event kind or cancellation")
+        validate_event_override(fields)
 
     def override_event(self, user_id, tenant_id, event_id, values):
         """Apply allowed per-user field changes; immutable identities are rejected."""
-        if not isinstance(values, dict) or not values or set(values) - _EDITABLE_FIELDS:
-            raise ValueError("Only event display fields may be overridden")
+        validate_override_request(values)
         with self.connect() as db:
             expiry = self._lock_event_access(db, user_id, tenant_id, event_id)
             rows = self._shared_in(db, user_id, tenant_id, event_id)
@@ -231,43 +205,11 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
                 (user_id, tenant_id, end, start),
             ).fetchall()
             personal = [PostgresPersonalTasks._value(self, row) for row in rows]
-            teams = [
-                event
-                for event in self._shared_in(db, user_id, tenant_id)
-                if event["start_date"] <= end and event["end_date"] >= start
-            ]
-        result = []
-        for event in personal + teams:
-            if hidden_only:
-                if not event["hidden"]:
-                    continue
-            elif event["hidden"] or (
-                event["source"] == "teams"
-                and (not event["channel_enabled"] or event["kind"] in prefs["disabled_kinds"])
-            ):
-                continue
-            result.append({key: value for key, value in event.items() if key != "channel_enabled"})
-        return sorted(
-            result, key=lambda event: (event.get("time") or "99:99", event["source"], event["id"])
-        )
+            teams = self._shared_in(db, user_id, tenant_id)
+        return calendar_result(personal, teams, prefs, start, end, hidden_only)
 
     def agenda(self, user_id, tenant_id, day):
-        items = self.calendar(user_id, tenant_id, day, day)
-
-        def appears(event):
-            if event["source"] == "teams" or event["end_date"] == day:
-                return True
-            return event["display_mode"] == "daily" or (
-                event["display_mode"] == "selected" and day in event["selected_dates"]
-            )
-
-        return {
-            "date": day,
-            "teams": [event for event in items if event["source"] == "teams" and appears(event)],
-            "personal": [
-                event for event in items if event["source"] == "personal" and appears(event)
-            ],
-        }
+        return agenda_result(self.calendar(user_id, tenant_id, day, day), day)
 
     def changes(self, user_id, tenant_id):
         with self.connect() as db:

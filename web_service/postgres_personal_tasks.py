@@ -11,7 +11,8 @@ must also be revalidated by the authenticated application boundary.
 
 from uuid import uuid4
 
-from .storage import Conflict, Missing, personal_agenda_result
+from .calendar_rules import personal_agenda_result
+from .storage import Conflict, Missing
 
 
 class PostgresPersonalTasks:
