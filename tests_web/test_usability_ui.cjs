@@ -1196,7 +1196,53 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     await h.click({action:'changes'});assert.doesNotMatch(h.elements.modal.innerHTML,/Late private review body|Changed private review/);assert.equal(writes(h).length,1);
     const stopped=h.requests.length;await h.advance(60000);assert.equal(h.requests.length,stopped);
   }
-  console.log('Usability UI: 119 synthetic scenarios passed (progressive independent responses, bounded ingestion and permission retries, redaction and recovery, final-pass races, focus preservation and prior regressions).');
+  // Temporary renewal preserves only the last displayed calendar; a late result cannot replace it.
+  {
+    let pending=false;
+    const h=harness({overrides:{'/api/service':personalService,'/api/settings':()=>pending
+      ? response({preferences:{disabled_kinds:[]},connection:{state:'checking',teams_verified:false,retryable:true,retain_teams_snapshot:true}})
+      : accessSettings(true)}});
+    await settle();await h.click({action:'calendar'});assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    const late=deferred();h.overrides[calendarUrl(h,'2026-11')]=()=>late.promise;pending=true;
+    const refresh=h.click({action:'refresh'});await settle();
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);assert.match(h.elements.app.innerHTML,/마지막으로 확인한 일정을 유지/);
+    late.resolve(response({items:[{...h.item,title:'Late unverified replacement'}]}));await refresh;await settle();
+    assert.match(h.elements.app.innerHTML,/Fixture assignment/);assert.doesNotMatch(h.elements.app.innerHTML,/Late unverified replacement/);
+    pending=false;h.overrides['/api/calendar']=()=>response({items:[]});delete h.overrides[calendarUrl(h,'2026-11')];
+    await h.advance(15000);await settle();
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment|마지막으로 확인한 일정을 유지/);
+    assert.equal(writes(h).length,0);
+  }
+  // The typed renewal response retains rows; subsequent definitive revocation still clears them.
+  {
+    const h=harness({overrides:{'/api/service':personalService}});await settle();await h.click({action:'calendar'});
+    h.overrides['/api/today']=()=>response({code:'permission_check_pending',teams_access_unverified:true,
+      connection_state:'checking',retryable:true,retain_teams_snapshot:true},503);
+    await h.click({action:'refresh'});assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    h.overrides['/api/today']=()=>unverifiedAccess(false,'reauth_required');await h.click({action:'refresh'});
+    assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);assert.match(h.elements.app.innerHTML,/다시 로그인/);
+  }
+  // Logout clears a retained calendar instead of persisting source data across accounts.
+  {
+    const h=harness({overrides:{'/api/service':personalService}});await settle();await h.click({action:'calendar'});
+    h.overrides['/api/today']=()=>response({code:'permission_check_pending',teams_access_unverified:true,
+      connection_state:'checking',retryable:true,retain_teams_snapshot:true},503);
+    await h.click({action:'refresh'});assert.match(h.elements.app.innerHTML,/Fixture assignment/);
+    await h.click({action:'logout'});assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment/);
+    assert.match(h.elements.app.innerHTML,/school-signin/);
+  }
+  // A completed scope check removes the revoked channel while retaining the other channel's snapshot.
+  {
+    const h=harness({overrides:{'/api/service':personalService}});await settle();
+    const allowed={...h.item,channel_id:'allowed',title:'Still authorized schedule'};
+    const revoked={...h.item,id:'revoked',channel_id:'revoked',title:'Revoked channel schedule'};
+    h.overrides['/api/calendar']=()=>response({items:[allowed,revoked]});await h.click({action:'refresh'});await h.click({action:'calendar'});
+    h.overrides['/api/today']=()=>response({code:'permission_check_pending',teams_access_unverified:true,
+      connection_state:'connected',retryable:true,retain_teams_snapshot:true,snapshot_channel_ids:['allowed']},503);
+    await h.click({action:'refresh'});
+    assert.match(h.elements.app.innerHTML,/Still authorized schedule/);assert.doesNotMatch(h.elements.app.innerHTML,/Revoked channel schedule/);
+  }
+  console.log('Usability UI: 123 synthetic scenarios passed (incremental snapshots, permission renewal, redaction and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);

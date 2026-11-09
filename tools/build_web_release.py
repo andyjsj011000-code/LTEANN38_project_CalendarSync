@@ -75,6 +75,8 @@ REQUIRED_FILES = (
     "web_service/school_security.py",
     "web_service/school_storage.py",
     "web_service/server.py",
+    "web_service/shared_collection.py",
+    "web_service/source_updates.py",
     "web_service/sqlite_ingestion_status.py",
     "web_service/storage.py",
     "web_service/subscription_registry.py",

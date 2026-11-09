@@ -67,7 +67,7 @@
       const value = await response.json().catch(error => {if (controller?.signal.aborted) throw abortError(); invalidJson = true; return {};});
       if (!response.ok) {
         const message = response.status === 409 ? '다른 화면에서 변경되었어요. 새로고침한 뒤 다시 시도해 주세요.' : response.status === 404 ? '일정이 변경되었거나 접근 권한을 다시 확인해야 해요. 최신 목록에서 다시 선택해 주세요.' : typeof value.detail === 'string' ? value.detail : '입력 내용과 날짜를 확인해 주세요.';
-        const error = new Error(message); error.status = response.status; error.code = value.code; error.teamsAccessUnverified = value.teams_access_unverified === true; if (typeof value.retryable === 'boolean') error.retryable = value.retryable; if (typeof value.connection_state === 'string') error.connectionState = value.connection_state; throw error;
+        const error = new Error(message); error.status = response.status; error.code = value.code; error.teamsAccessUnverified = value.teams_access_unverified === true; error.retainTeamsSnapshot = value.retain_teams_snapshot === true; if (Array.isArray(value.snapshot_channel_ids)) error.snapshotChannels = value.snapshot_channel_ids; if (typeof value.retryable === 'boolean') error.retryable = value.retryable; if (typeof value.connection_state === 'string') error.connectionState = value.connection_state; throw error;
       }
       if (invalidJson) throw new Error(read ? '서버 응답을 확인하지 못했어요. 잠시 후 다시 연결해 주세요.' : '처리 결과를 확인하지 못했어요. 다시 저장하기 전에 새로고침으로 결과를 확인해 주세요.');
       return value;
@@ -101,7 +101,7 @@
     activeLoad?.abort(); activeLoad = null;
     monthRequest?.abort(); monthRequest = null; monthEpoch++;
     S.pendingMonth = ''; S.syncing = false; S.syncUncertain = false; S.syncMessage = ''; S.quickDraft = ''; reviewDialogItems.clear();
-    S.refreshing = false; S.refreshError = ''; S.permissionPending = false; S.teamsUnverified = false; S.permissionMonth = ''; S.permissionMonthSelected = ''; teamsAccessRevision++;
+    S.refreshing = false; S.refreshError = ''; S.permissionPending = false; S.teamsUnverified = false; S.teamsSnapshotPending = false; S.permissionMonth = ''; S.permissionMonthSelected = ''; teamsAccessRevision++;
     for (const controller of readRequests) controller.abort();
     reviewItems = []; reminderRules = null; reminderCustomInitial = ''; S.connection = null;
     S.epoch++; S.me = null; S.items = []; S.upcoming = []; S.today = null; S.channels = []; S.prefs = null; S.busy = false; S.loading = false; S.loadError = false;
@@ -137,6 +137,7 @@
     return S.connection?.retryable === true || S.connection?.state === 'checking';
   }
   function redactTeams(unverified = true) {
+    S.teamsSnapshotPending = false;
     if (unverified) S.teamsUnverified = true;
     teamsAccessRevision++;
     if (S.today) S.today = {...S.today,teams:[]};
@@ -145,10 +146,24 @@
     if (dialogContainsTeams && modal.open) {dialogEpoch++; modal.close(); modal.replaceChildren();}
     if (detailItem?.source === 'teams') detailItem = null;
   }
+  function suspendTeams(retain, channels) {
+    if (!retain || ['not_connected','reauth_required','account_not_allowed','source_not_configured'].includes(S.connection?.state)) {redactTeams(); return;}
+    // Retain only the already-rendered schedules in this signed-in session.
+    // New reads and writes still require the server's unchanged permission proof.
+    S.teamsUnverified = true; S.teamsSnapshotPending = true; teamsAccessRevision++;
+    if (Array.isArray(channels)) {
+      const allowed = new Set(channels), visible = item => item.source === 'personal' || allowed.has(item.channel_id);
+      if (S.today) S.today = {...S.today,teams:S.today.teams.filter(visible)};
+      S.items = S.items.filter(visible); S.upcoming = S.upcoming.filter(visible); hiddenItems = hiddenItems.filter(visible);
+    }
+    S.channels = []; reviewItems = []; reviewDialogItems.clear(); dialogRequestId++;
+    if (dialogContainsTeams && modal.open) {dialogEpoch++; modal.close(); modal.replaceChildren();}
+    if (detailItem?.source === 'teams') detailItem = null;
+  }
   function presentPermissionPending(error) {
     if (error.status !== 503 || error.code !== 'permission_check_pending' || !S.me) return false;
     S.permissionPending = error.retryable !== false; S.connection = {...S.connection, state:error.connectionState || 'checking', retryable:error.retryable !== false};
-    if (error.teamsAccessUnverified) {S.connection.teams_verified = false; redactTeams();}
+    if (error.teamsAccessUnverified) {S.connection.teams_verified = false; suspendTeams(error.retainTeamsSnapshot && error.retryable !== false,error.snapshotChannels);}
     S.refreshError = error.retryable === false ? connectionText[S.connection.state] || 'Teams 연결 상태를 확인해 주세요.' : 'Teams 접근 권한을 확인하고 있어요. 잠시 후 다시 확인해 주세요.';
     if (!S.today) {S.loadError = true; renderLoadState(true);}
     else {updateRefreshStatus(); render();}
@@ -220,7 +235,9 @@
     const controller = new AbortController(); activeLoad = controller;
     const timer = setTimeout(() => controller.abort(), 100000), errors = [], applied = new Set();
     let teamsRejected = false; const accessRevision = teamsAccessRevision;
-    const permittedItems = items => teamsRejected || accessRevision !== teamsAccessRevision ? items.filter(item => item.source === 'personal') : items;
+    const permittedItems = (items, previous) => teamsRejected || accessRevision !== teamsAccessRevision
+      ? [...(S.teamsSnapshotPending ? previous.filter(item => item.source === 'teams') : []),...items.filter(item => item.source === 'personal')]
+      : items;
     const current = () => epoch === S.epoch && activeView(sessionEpoch) && revision === mutationRevision;
     const publishable = () => current() && !((checkingRetry || ingestionRetry) && (autoReadsPaused || resumeCheck || document.hidden)) && !((afterSync || checkingRetry || ingestionRetry) && (S.busy || mutationVersion !== mutationRevision));
     S.loading = !S.today; S.loadError = false; S.refreshing = background; S.refreshError = ''; S.partErrors = {}; updateRefreshStatus();
@@ -263,8 +280,8 @@
           render(); return false;
         }
         S.ready.personal = true; delete S.partErrors.personal;
-        if (accessRevision === teamsAccessRevision && !teamsRejected) {S.permissionPending = false; S.teamsUnverified = false;}
-        else {teamsRejected = true; value = {...value,teams:[]};}
+        if (accessRevision === teamsAccessRevision && !teamsRejected) {S.permissionPending = false; S.teamsUnverified = false; S.teamsSnapshotPending = false;}
+        else {teamsRejected = true; value = {...value,teams:S.teamsSnapshotPending ? S.today?.teams || [] : []};}
         Object.assign(S, {today:value, day:value.date, month:S.month || value.date.slice(0,7), selected:S.selected || value.date, loading:false, refreshing:true});
       });
       if (!today || !publishable()) {
@@ -272,15 +289,15 @@
       } else {
         const month = S.month, grid = C.monthGrid(month);
         const jobs = [
-          part('calendar', `/api/calendar?start=${grid.start}&end=${grid.end}`, value => {if (calendarEpoch !== monthEpoch) return false; S.items = permittedItems(value.items);}),
-          part('upcoming', `/api/calendar?start=${today.date}&end=${C.addDays(today.date,7)}`, value => {S.upcoming = permittedItems(value.items);}),
+          part('calendar', `/api/calendar?start=${grid.start}&end=${grid.end}`, value => {if (calendarEpoch !== monthEpoch) return false; S.items = permittedItems(value.items,S.items);}),
+          part('upcoming', `/api/calendar?start=${today.date}&end=${C.addDays(today.date,7)}`, value => {S.upcoming = permittedItems(value.items,S.upcoming);}),
           part('channels', '/api/channels', value => {S.channels = teamsRejected || accessRevision !== teamsAccessRevision ? [] : value;}),
           part('settings', '/api/settings', value => {
             const wasPending = S.connection?.ingestion_pending === true;
             S.prefs = value.preferences;
             if (accessRevision === teamsAccessRevision) {
               S.connection = S.permissionPending ? {...value.connection,state:S.connection?.state || 'checking',...(S.connection?.teams_verified === false ? {teams_verified:false,retryable:S.connection.retryable} : {})} : value.connection;
-              if (value.connection?.teams_verified === false) {S.permissionPending = value.connection.retryable === true; teamsRejected = true; redactTeams();}
+              if (value.connection?.teams_verified === false) {S.permissionPending = value.connection.retryable === true; teamsRejected = true; suspendTeams(value.connection.retain_teams_snapshot === true && value.connection.retryable === true);}
             } else teamsRejected = true;
             // Data may predate the final worker commit even when this is our first pending=false response.
             if ((wasPending || (!ingestionRetry && S.service?.shared_channel_ingestion)) && value.connection?.ingestion_pending === false) ingestionFinalNeeded = true;
@@ -444,11 +461,16 @@
       applyConfirmedState({...result,source:'personal'},{},result);
     });
   }
-  function connectionRejectsTeams() {return S.connection?.teams_verified === false || ['not_connected','source_not_configured','source_unavailable','verification_failed','reauth_required','account_not_allowed'].includes(S.connection?.state);}
+  function connectionRejectsTeams() {
+    if (['not_connected','reauth_required','account_not_allowed','source_not_configured'].includes(S.connection?.state)) return true;
+    if (S.teamsSnapshotPending && S.permissionPending) return false;
+    return S.connection?.teams_verified === false || ['source_unavailable','verification_failed'].includes(S.connection?.state);
+  }
   function connectionNotice() {
     if (S.service?.mode === 'preview') return '<div class="beta-banner" role="status"><strong>예시 화면</strong><span>실제 학교 계정이나 공지와 연결되지 않은 미리보기예요.</span></div>';
     if (S.teamsUnverified) {
       const retry = permissionRetryNeeded(), signIn = ['not_connected','reauth_required','account_not_allowed'].includes(S.connection?.state);
+      if (S.teamsSnapshotPending) return '<div class="beta-banner" role="status" data-teams-unverified><strong>Teams 권한 재확인 중</strong><span>마지막으로 확인한 일정을 유지하고 있어요. 새 일정과 변경 내용은 권한 확인 후 반영돼요.</span><button data-action="refresh">다시 확인</button></div>';
       return `<div class="beta-banner" role="status" data-teams-unverified><strong>Teams 일정 ${retry ? '권한 재확인 중' : '연결 확인 필요'}</strong><span>권한을 확인하는 동안 Teams 일정을 잠시 숨겼어요. 이 확인 과정에서 일정을 삭제하지 않아요. 개인 할 일은 계속 사용할 수 있어요.</span>${signIn ? '<a href="/auth/login">다시 로그인</a>' : retry ? '<button data-action="refresh">다시 확인</button>' : '<button data-action="security">연결 및 보안</button>'}</div>`;
     }
     if (!S.ready.settings) return '';
@@ -549,6 +571,7 @@
       if (epoch !== monthEpoch || !activeView(sessionEpoch)) return;
       const grid = C.monthGrid(month), result = await api(`/api/calendar?start=${grid.start}&end=${grid.end}`, {signal: controller.signal});
       if (epoch !== monthEpoch || !activeView(sessionEpoch)) return;
+      if (accessRevision !== teamsAccessRevision && S.teamsSnapshotPending) return;
       S.month = month; S.items = connectionRejectsTeams() || accessRevision !== teamsAccessRevision ? result.items.filter(item => item.source === 'personal') : result.items; S.selected = selected; S.ready.calendar = true; delete S.partErrors.calendar;
       if (!S.teamsUnverified) {S.permissionMonth = ''; S.permissionMonthSelected = '';}
     } catch (error) {

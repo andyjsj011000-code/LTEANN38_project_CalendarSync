@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from .planner_drafts import SQLiteTaskDrafts
 from .planner_trash import SQLiteTaskTrash
 from .school_storage import SchoolDatabase
+from .source_updates import automatic_source_update
 from .sqlite_ingestion_status import SQLiteIngestionStatus
 from .storage import Conflict, Missing, PermissionPending, digest
 
@@ -381,6 +382,30 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
                     (user, event_id, self.seal(fields)),
                 )
             elif seen[0] != version:
+                if getattr(self, "shared_ingestion_enabled", False):
+                    state = c.execute(
+                        "SELECT override_blob FROM web_event_states WHERE user_id=? AND event_id=?",
+                        (user, event_id),
+                    ).fetchone()
+                    current = self.unseal(state[0]) if state and state[0] else None
+                    update, accepted = automatic_source_update(
+                        current, seen[0], fields, source_hash
+                    )
+                    if update is not None:
+                        c.execute(
+                            "UPDATE web_event_states SET override_blob=? WHERE user_id=? AND event_id=?",
+                            (self.seal(update), user, event_id),
+                        )
+                    if accepted:
+                        c.execute(
+                            "UPDATE web_user_source_versions SET seen_hash=? WHERE user_id=? AND event_id=?",
+                            (version, user, event_id),
+                        )
+                        c.execute(
+                            "UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND status='pending'",
+                            (user, event_id),
+                        )
+                        continue
                 change_id = digest(user + "|" + event_id + "|" + version)
                 c.execute(
                     "UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND source_hash<>? AND status='pending'",

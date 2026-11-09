@@ -181,6 +181,26 @@ class PostgresIngestionStatus:
             )
         return True
 
+    def finish_shared_collection(self, device, report, *, attempt=None):
+        """Finish source work without replacing or extending a permission proof."""
+        with self._status_connect() as db:
+            self._status_device(db, device)
+            if attempt is not None:
+                context = {"attempt": attempt, "report": report}
+                finished = self.finish_ingestion_snapshot_in(db, device, context)
+                self._status_device(db, device)
+                if finished and context["_attempt_until"] <= self.clock():
+                    raise Missing()
+                return finished
+            if not report["partial"]:
+                self._status_execute(
+                    db,
+                    "UPDATE web_connections SET ingest_at=%s WHERE id_hash=%s",
+                    (int(self.clock()) + 300, device["id_hash"]),
+                )
+            self._status_device(db, device)
+        return True
+
     def finish_ingestion_snapshot_in(self, db, device, context):
         """Called inside the final snapshot transaction, before its expiry fence."""
         current = self._status_device(db, device)

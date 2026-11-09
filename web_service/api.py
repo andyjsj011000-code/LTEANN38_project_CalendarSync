@@ -69,6 +69,12 @@ def create_app(
                 "connection_state": _error.connection_state,
                 "retryable": _error.retryable,
                 "teams_access_unverified": True,
+                **({"retain_teams_snapshot": True} if _error.retain_snapshot else {}),
+                **(
+                    {"snapshot_channel_ids": _error.snapshot_channels}
+                    if _error.snapshot_channels is not None
+                    else {}
+                ),
             },
             status_code=503,
             headers={"Retry-After": "2"},

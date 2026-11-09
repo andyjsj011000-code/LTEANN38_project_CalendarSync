@@ -92,14 +92,21 @@ def test_final_graph_failure_records_error_without_success(tracked_server, monke
     monkeypatch.setattr(s.source, "collect", source_then_revocation)
     s.integration.run_sync(s.device, ingest=True)
     result = s.db.ingestion_status(s.device)
+    if shared:
+        assert result["state"] == "completed"
+        assert result["last_success_at"] == s.now[0]
+        # Permission failure is recorded by its independent operation, not by
+        # a successful source pass, and cannot rewrite that pass's progress.
+        s.integration.run_sync(s.device, force=True)
+        assert s.db.sync_status(s.device["user_id"])["state"] == "verification_failed"
+        assert s.db.ingestion_status(s.device) == result
+        return
     assert result["state"] == "error" and result["error_code"] == "verification_failed"
     assert result["last_success_at"] is None
     assert s.db.device(s.device["id_hash"])["ingest_at"] == 0
 
 
-def test_sqlite_final_status_and_schedule_rollback_when_permission_expires(
-    tracked_server, monkeypatch
-):
+def test_collection_completion_does_not_renew_expired_permissions(tracked_server, monkeypatch):
     s = tracked_server
     finish = s.db.finish_ingestion_snapshot_in
 
@@ -111,8 +118,9 @@ def test_sqlite_final_status_and_schedule_rollback_when_permission_expires(
     monkeypatch.setattr(s.db, "finish_ingestion_snapshot_in", expire)
     s.integration.run_sync(s.device, ingest=True)
     result = s.db.ingestion_status(s.device)
-    assert result["state"] == "error" and result["last_success_at"] is None
-    assert s.db.device(s.device["id_hash"])["ingest_at"] == 0
+    assert result["state"] == "completed" and result["last_success_at"] is not None
+    assert s.db.channels(s.device["user_id"], s.device["tenant_id"]) == []
+    assert s.db.sync_status(s.device["user_id"])["checked_at"] == 1000
 
 
 def test_duplicate_collection_does_not_replace_active_attempt(tracked_server):
@@ -151,7 +159,7 @@ def test_attempt_expiring_after_terminal_write_rolls_back_completion(tracked_ser
 
 
 @pytest.mark.parametrize("change", ["added", "removed"])
-def test_final_membership_uses_only_current_scope_counts_without_exposing_ids(
+def test_collection_counts_keep_the_scanned_scope_when_permissions_change_independently(
     tracked_server, monkeypatch, change
 ):
     s = tracked_server
@@ -174,14 +182,18 @@ def test_final_membership_uses_only_current_scope_counts_without_exposing_ids(
     monkeypatch.setattr(s.source, "collect", collected)
     outcome = s.integration.run_sync(s.device, ingest=True)
     status = s.db.ingestion_status(s.device)
-    assert status["state"] == ("partial" if change == "added" else "completed")
-    assert status["counts"]["channels_total"] == len(final)
-    assert status["counts"]["channels_checked"] == status["counts"]["channels_scanned"] == 1
-    assert (status["last_success_at"] is None) == (change == "added")
+    assert status["state"] == "completed"
+    assert status["counts"]["channels_total"] == len(initial)
+    assert (
+        status["counts"]["channels_checked"] == status["counts"]["channels_scanned"] == len(initial)
+    )
+    assert status["last_success_at"] is not None
     for value in (outcome, status):
         serialized = json.dumps(value)
         assert '"class"' not in serialized and '"other"' not in serialized
         assert "checked_channels" not in serialized and "scanned_channels" not in serialized
+    s.integration.run_sync(s.device, force=True)
+    assert s.db.ingestion_status(s.device) == status
     assert {item["id"] for item in s.db.channels(s.device["user_id"], s.device["tenant_id"])} == {
         item["id"] for item in final
     }

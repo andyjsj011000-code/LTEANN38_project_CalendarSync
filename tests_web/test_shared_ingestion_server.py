@@ -67,11 +67,11 @@ def test_background_collection_releases_snapshot_lease_and_allows_permission_rec
     report = server.integration.run_sync(device, ingest=True)
 
     assert report["state"] == "completed"
-    assert server.graph.calls == 3  # Initial proof, view recheck, final proof.
+    assert server.graph.calls == 2  # Initial proof and independent view recheck.
     assert server.db.device(device["id_hash"])["ingest_at"] == server.now[0] + 300
 
 
-def test_final_snapshot_rechecks_membership_after_background_collection(server, monkeypatch):
+def test_independent_permission_refresh_rechecks_membership_after_collection(server, monkeypatch):
     _, session, device = enable_shared(server)
     original_collect = server.integration.source.collect
 
@@ -84,6 +84,8 @@ def test_final_snapshot_rechecks_membership_after_background_collection(server, 
     report = server.integration.run_sync(device, ingest=True)
 
     assert report["state"] == "completed"
+    assert server.graph.calls == 1
+    server.integration.run_sync(device, force=True)
     assert server.graph.calls == 2
     assert server.db.channels(session["user_id"], session["tenant_id"]) == []
     assert server.db.agenda(session["user_id"], session["tenant_id"], "2026-10-22")["teams"] == []
@@ -104,12 +106,12 @@ def test_revoked_device_cannot_publish_final_background_snapshot(server, monkeyp
 
     assert server.integration.run_sync(device, ingest=True) is None
     assert marked == []
-    assert server.db.sync_status(session["user_id"])["state"] == "reauth_required"
+    assert server.db.sync_status(session["user_id"])["checked_at"] == 0
     assert server.db.channels(session["user_id"], session["tenant_id"]) == []
 
 
 @pytest.mark.parametrize("failure", ["verification_failed", "source_unavailable"])
-def test_interrupted_collection_reverifies_and_retains_authorized_cache_without_completing(
+def test_interrupted_collection_retains_authorized_cache_without_reverification_or_completion(
     server, monkeypatch, failure
 ):
     client, session, device = enable_shared(server)
@@ -134,7 +136,7 @@ def test_interrupted_collection_reverifies_and_retains_authorized_cache_without_
         "partial": True,
         "state": "partial",
     }
-    assert marked == [] and server.graph.calls == 2
+    assert marked == [] and server.graph.calls == 1
     assert server.db.sync_status(session["user_id"])["state"] == "connected"
     assert [event["title"] for event in client.get("/api/today").json()["teams"]] == [
         "Cached deadline"
@@ -143,7 +145,7 @@ def test_interrupted_collection_reverifies_and_retains_authorized_cache_without_
 
 
 @pytest.mark.parametrize("failure", ["reauth_required", "account_not_allowed", "unexpected"])
-def test_auth_and_unexpected_collection_failures_do_not_use_cache_recovery(
+def test_auth_failure_revokes_access_but_unexpected_source_failure_preserves_permission(
     server, monkeypatch, failure
 ):
     _, session, device = enable_shared(server)
@@ -159,10 +161,13 @@ def test_auth_and_unexpected_collection_failures_do_not_use_cache_recovery(
 
     assert server.integration.run_sync(device, ingest=True) is None
     assert server.graph.calls == 1 and marked == []
-    assert server.db.sync_status(session["user_id"])["state"] == (
-        "source_unavailable" if failure == "unexpected" else failure
-    )
-    assert server.db.channels(session["user_id"], session["tenant_id"]) == []
+    if failure == "unexpected":
+        assert server.db.sync_status(session["user_id"])["state"] == "connected"
+        assert server.db.channels(session["user_id"], session["tenant_id"])
+    else:
+        assert server.db.sync_status(session["user_id"])["checked_at"] == 0
+        assert server.db.channels(session["user_id"], session["tenant_id"]) == []
+    assert server.db.device(device["id_hash"])["ingest_at"] == 0
 
 
 @pytest.mark.parametrize("busy", [False, True])
@@ -188,24 +193,24 @@ def test_manual_sync_does_not_queue_without_successful_permission_commit(server,
     assert server.integration.source.calls == 0
 
 
-def test_final_commit_failure_does_not_mark_background_ingestion_complete(server, monkeypatch):
+def test_collection_finish_failure_does_not_mark_ingestion_complete_or_revoke_access(
+    server, monkeypatch
+):
     _, session, device = enable_shared(server)
-    original_commit = server.db.commit_snapshot
     commits = []
     marked = []
 
-    def commit(*args):
+    def commit(*args, **kwargs):
         commits.append(1)
-        if len(commits) == 2:
-            raise Missing()
-        return original_commit(*args)
+        raise Missing()
 
-    monkeypatch.setattr(server.db, "commit_snapshot", commit)
+    monkeypatch.setattr(server.db, "finish_shared_collection", commit)
     monkeypatch.setattr(server.db, "mark_ingested", marked.append)
 
     assert server.integration.run_sync(device, ingest=True) is None
-    assert len(commits) == 2 and marked == []
-    assert server.db.sync_status(session["user_id"])["state"] == "source_unavailable"
+    assert len(commits) == 1 and marked == []
+    assert server.db.sync_status(session["user_id"])["state"] == "connected"
+    assert server.db.device(device["id_hash"])["ingest_at"] == 0
 
 
 def test_worker_picks_up_durable_request_without_response_background_task(server):
@@ -252,7 +257,7 @@ def test_deferred_database_failure_preserves_worker_retry_without_failing_respon
     assert server.db.device(device["id_hash"])["ingest_at"] == 0
 
 
-def test_queued_collection_reuses_foreground_proof_and_keeps_cache_readable_during_final_graph(
+def test_queued_collection_reuses_proof_and_independent_verification_keeps_cache_readable(
     server, monkeypatch
 ):
     client, session, device = enable_shared(server)
@@ -279,8 +284,7 @@ def test_queued_collection_reuses_foreground_proof_and_keeps_cache_readable_duri
         return original_collect(*args)
 
     def channels(*args):
-        # Even a fully cached collection reaches this immediately. The old
-        # proof must stay readable throughout this potentially slow Graph call.
+        # Independent verification keeps the old, unexpired proof readable.
         observe("final_graph")
         lease = server.db.sync_status(session["user_id"])["lease_until"]
         # A newer proof cannot race this Graph call and then be overwritten by
@@ -293,6 +297,8 @@ def test_queued_collection_reuses_foreground_proof_and_keeps_cache_readable_duri
     monkeypatch.setattr(server.graph, "channels", channels)
     function, args, kwargs = tasks.items[0]
     function(*args, **kwargs)
+    assert observations == [("collect", "connected", False, 1)]
+    server.integration.run_sync(device, force=True)
 
     assert observations == [
         ("collect", "connected", False, 1),
@@ -320,7 +326,7 @@ def test_expired_prepared_proof_is_verified_again_before_collecting(server, monk
     function(*args, **kwargs)
 
     assert calls_at_collection == [2]
-    assert server.graph.calls == 3
+    assert server.graph.calls == 2
     assert server.db.device(device["id_hash"])["ingest_at"] == server.now[0] + 300
 
 
@@ -334,11 +340,11 @@ def test_queued_prepared_proof_does_not_bypass_device_revocation(server):
     function(*args, **kwargs)
 
     assert server.integration.source.calls == 0
-    assert server.db.sync_status(session["user_id"])["state"] == "reauth_required"
+    assert server.db.sync_status(session["user_id"])["checked_at"] == 0
     assert server.db.channels(session["user_id"], session["tenant_id"]) == []
 
 
-def test_final_graph_failure_revokes_preserved_access(server, monkeypatch):
+def test_independent_graph_failure_revokes_access_without_rewriting_collection(server, monkeypatch):
     _, session, device = enable_shared(server)
     tasks = DeferredTasks()
     server.integration.sync(session, tasks)
@@ -350,10 +356,13 @@ def test_final_graph_failure_revokes_preserved_access(server, monkeypatch):
     monkeypatch.setattr(server.graph, "channels", channels)
     function, args, kwargs = tasks.items[0]
     function(*args, **kwargs)
+    assert server.graph.calls == 1
+    assert server.db.device(device["id_hash"])["ingest_at"] == server.now[0] + 300
+    server.integration.run_sync(device, force=True)
 
     assert server.db.sync_status(session["user_id"])["state"] == "verification_failed"
     assert server.db.channels(session["user_id"], session["tenant_id"]) == []
-    assert server.db.device(device["id_hash"])["ingest_at"] == 0
+    assert server.db.device(device["id_hash"])["ingest_at"] == server.now[0] + 300
 
 
 def test_reads_publish_each_finished_post_without_waiting_for_collection_or_new_graph(server):

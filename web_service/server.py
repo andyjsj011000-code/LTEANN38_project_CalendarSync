@@ -26,6 +26,7 @@ from .schemas import Input, TaskInput
 from .school import SchoolIntegration
 from .school_graph import GraphFailure
 from .school_security import SecurityBoundary
+from .shared_collection import collect_shared
 from .storage import Missing, PermissionPending, digest
 from .test_storage import TestDatabase
 
@@ -68,6 +69,7 @@ class ServerIntegration(SchoolIntegration):
         self.sender = sender
         self.notifications = Notifications(db, sender)
         self._cookie_responses = {}
+        self._collection_proofs = {}
         self.notification_runtime = None
         self.device_cookie = (
             "__Host-calendarsync_device" if settings.secure_cookies else "calendarsync_device"
@@ -82,6 +84,22 @@ class ServerIntegration(SchoolIntegration):
         return bool(
             getattr(self.db, "shared_ingestion_enabled", False) and hasattr(self.source, "collect")
         )
+
+    def collection_proof(self, device):
+        """Reuse verified routes only within the original permission lifetime."""
+        prepared = self._collection_proofs.get(device["id_hash"])
+        if not prepared or prepared["valid_until"] <= self.db.clock():
+            return None
+        if any(prepared["device"][key] != device[key] for key in prepared["device"]):
+            return None
+        proof = self.db.teams_read_proof(device["user_id"], device["tenant_id"])
+        if (
+            proof["state"] not in {"connected", "checking"}
+            or proof["checked_at"] + self.settings.access_seconds <= self.db.clock()
+            or proof["channels"] != frozenset(ch["id"] for ch in prepared["channels"])
+        ):
+            return None
+        return prepared
 
     def begin_login(self, provider, request):
         options = {"background": request.query_params.get("background") == "1"}
@@ -166,6 +184,7 @@ class ServerIntegration(SchoolIntegration):
                 state=readiness["state"],
                 teams_verified=readiness["verified"],
                 retryable=readiness["retryable"],
+                retain_teams_snapshot=not readiness["verified"] and readiness["retryable"],
             )
         try:
             device = self.db.session_device(session)
@@ -194,6 +213,8 @@ class ServerIntegration(SchoolIntegration):
     def run_sync(
         self, device, ingest=False, force=False, *, prepare_collection=False, prepared=None
     ):
+        if ingest and self.shared_ingestion_enabled:
+            return collect_shared(self, device, prepared, force=force)
         started = monotonic()
         logger = logging.getLogger("uvicorn.error")
 
@@ -245,36 +266,18 @@ class ServerIntegration(SchoolIntegration):
             except Exception:
                 pass
 
-        reuse = bool(
-            ingest
-            and self.shared_ingestion_enabled
-            and prepared
-            and prepared["device"]["id_hash"] == device["id_hash"]
-            and prepared["device"]["user_id"] == user
-            and prepared["device"]["tenant_id"] == device["tenant_id"]
-            and prepared["valid_until"] > self.db.clock()
+        lease = self.db.begin_sync(
+            user,
+            0 if ingest or force else self.settings.access_seconds,
+            **({"preserve_access": True} if self.shared_ingestion_enabled else {}),
         )
-        lease = (
-            None
-            if reuse
-            else self.db.begin_sync(
-                user,
-                0 if ingest or force else self.settings.access_seconds,
-                **({"preserve_access": True} if self.shared_ingestion_enabled else {}),
-            )
-        )
-        progress("lease", "reused" if reuse else "acquired" if lease else "skipped")
-        if not reuse and not lease:
+        progress("lease", "acquired" if lease else "skipped")
+        if not lease:
             end_tracking(queued=True)
             progress("sync", "skipped")
             return {"state": "busy"} if ingest else None
 
         def fail_current(state):
-            nonlocal lease
-            # Shared collection runs after its first snapshot has committed.
-            # Reacquire our own lease before recording any collection failure.
-            if lease is None:
-                lease = self.db.begin_sync(user, 0)
             return self.db.fail_sync(user, state, lease) if lease else False
 
         try:
@@ -288,11 +291,7 @@ class ServerIntegration(SchoolIntegration):
             token, device = acquire_snapshot(self.tokens, device, self.db)
             progress("token", "completed")
             progress("channels", "started")
-            channels = (
-                prepared["channels"]
-                if reuse
-                else self.graph.channels(token, device["object_id"], device["tenant_id"])
-            )
+            channels = self.graph.channels(token, device["object_id"], device["tenant_id"])
             verified_at = int(self.db.clock())
             progress("channels", "completed")
             if not self.source.configured:
@@ -305,54 +304,24 @@ class ServerIntegration(SchoolIntegration):
             if hasattr(self.source, "collect"):
                 if ingest:
                     collected_scope = {ch["id"] for ch in channels}
-                    if self.shared_ingestion_enabled and not reuse:
-                        # Publish the authorized cache before potentially slow AI
-                        # work, and let normal permission checks run meanwhile.
-                        cached = self.db.catalog_events([ch["id"] for ch in channels])
-                        self.db.commit_snapshot(
-                            device, channels, cached, self.settings.access_seconds, lease
-                        )
-                        lease = None
-                        progress("cached_commit", "completed")
-                    try:
-                        options = (
-                            {"on_progress": collection_progress}
-                            if attempt and getattr(self.source, "supports_progress", False)
-                            else {}
-                        )
-                        events = self.source.collect(
-                            token, channels, device["tenant_id"], self.db, user, **options
-                        )
-                        report = getattr(events, "report", None)
-                        if tracked:
-                            collected_checked = getattr(events, "checked_channels", None)
-                            collected_scanned = getattr(events, "scanned_channels", None)
-                            for scope in (collected_checked, collected_scanned):
-                                if scope is not None and (
-                                    not isinstance(scope, (set, frozenset))
-                                    or not scope <= collected_scope
-                                ):
-                                    raise ValueError("Invalid ingestion channel scope")
-                    except GraphFailure as error:
-                        if not self.shared_ingestion_enabled or error.state not in {
-                            "verification_failed",
-                            "source_unavailable",
-                        }:
-                            raise
-                        # A failed post fetch does not establish that every
-                        # cached channel is inaccessible. Reverify permissions
-                        # below before publishing any of the shared catalog.
-                        # No per-message progress was returned by this pass.
-                        report = {
-                            "channels_total": len(channels),
-                            "channels_scanned": 0,
-                            "messages_seen": 0,
-                            "messages_analyzed": 0,
-                            "messages_cached": 0,
-                            "messages_failed": 0,
-                            "partial": True,
-                        }
-                        progress("collection", "interrupted")
+                    options = (
+                        {"on_progress": collection_progress}
+                        if attempt and getattr(self.source, "supports_progress", False)
+                        else {}
+                    )
+                    events = self.source.collect(
+                        token, channels, device["tenant_id"], self.db, user, **options
+                    )
+                    report = getattr(events, "report", None)
+                    if tracked:
+                        collected_checked = getattr(events, "checked_channels", None)
+                        collected_scanned = getattr(events, "scanned_channels", None)
+                        for scope in (collected_checked, collected_scanned):
+                            if scope is not None and (
+                                not isinstance(scope, (set, frozenset))
+                                or not scope <= collected_scope
+                            ):
+                                raise ValueError("Invalid ingestion channel scope")
                     if report is not None:
                         # Only content-free counts cross the API boundary. An
                         # incomplete pass must remain eligible for the worker.
@@ -378,17 +347,8 @@ class ServerIntegration(SchoolIntegration):
                             partial=report["partial"],
                             state="partial" if report["partial"] else "completed",
                         )
-                    if self.shared_ingestion_enabled or tracked:
-                        # Membership or credentials may have changed during AI
-                        # work. Keep the still-valid prior snapshot readable
-                        # while a lease serializes the replacement proof. Its
-                        # original permission expiry is never extended here.
-                        # Non-shared collection still owns its initial lease.
-                        if self.shared_ingestion_enabled:
-                            lease = self.db.begin_sync(user, 0, preserve_access=True)
-                            if not lease:
-                                end_tracking(queued=True)
-                                return {"state": "busy"}
+                    if tracked:
+                        # The legacy, non-shared path still owns its initial lease.
                         token, device = acquire_snapshot(self.tokens, device, self.db)
                         channels = self.graph.channels(
                             token, device["object_id"], device["tenant_id"]
@@ -451,18 +411,25 @@ class ServerIntegration(SchoolIntegration):
                 attempt_closed = True
                 if not recorded:
                     return {"state": "busy"}
-            if prepare_collection and self.shared_ingestion_enabled and not ingest:
+            if self.shared_ingestion_enabled and not ingest:
                 # Internal-only handoff. It contains no token and never enters
                 # the API response; queued work revalidates the live device.
                 identity = {
                     key: device[key]
                     for key in ("id_hash", "user_id", "tenant_id", "object_id", "version")
                 }
-                return {
+                prepared = {
                     "device": identity,
                     "channels": [dict(ch) for ch in channels],
                     "valid_until": verified_at + self.settings.access_seconds,
                 }
+                # Bounded in-memory route hints; the database proof is checked on
+                # every reuse. Restart, logout, expiry and scope changes invalidate it.
+                if len(self._collection_proofs) >= 128:
+                    self._collection_proofs.clear()
+                self._collection_proofs[device["id_hash"]] = prepared
+                if prepare_collection:
+                    return prepared
             if (
                 ingest
                 and hasattr(self.source, "collect")
@@ -569,7 +536,9 @@ class ServerIntegration(SchoolIntegration):
     def sync(self, session, background_tasks=None):
         if self.shared_ingestion_enabled:
             device = self.db.session_device(session)
-            prepared = self.run_sync(device, force=True, prepare_collection=True)
+            prepared = self.collection_proof(device) or self.run_sync(
+                device, force=True, prepare_collection=True
+            )
             result = self.status(session)
             if result["state"] == "checking":
                 result["ingestion"] = {"state": "busy"}
@@ -622,7 +591,10 @@ class ServerIntegration(SchoolIntegration):
 
     def _raise_unverified(self, readiness):
         raise PermissionPending(
-            state=readiness["state"], retryable=readiness["retryable"] or readiness["verified"]
+            state=readiness["state"],
+            retryable=readiness["retryable"] or readiness["verified"],
+            retain_snapshot=readiness["retryable"] or readiness["verified"],
+            snapshot_channels=sorted(readiness["channels"]) if readiness["verified"] else None,
         )
 
     def require_permission_ready(self, session):

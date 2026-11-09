@@ -282,3 +282,41 @@ def test_shared_row_wait_cannot_commit_after_lease_or_access_expiry(sync):
         )
     assert sync.execute("SELECT * FROM web_events") == []
     assert sync.execute("SELECT * FROM web_channel_access") == []
+
+
+def test_shared_publication_automatically_updates_untouched_source_and_tombstones(sync):
+    commit(sync)
+    sync.repo.shared_ingestion_enabled = True
+    for values in (
+        {"title": "Updated automatically", "source_version": "v2"},
+        {"title": "Updated automatically", "source_version": "deleted", "cancelled": True},
+        {"title": "Restored", "source_version": "restored", "cancelled": False},
+    ):
+        with sync.repo.connect() as db:
+            sync.repo._publish_snapshot_events(
+                db, "alice", [("direct:event", event(**values))], 1000
+            )
+        blob = sync.execute("SELECT override_blob FROM web_event_states WHERE user_id='alice'")[0][
+            0
+        ]
+        visible = sync.unseal(blob)
+        assert visible["title"] == values["title"]
+        assert visible["cancelled"] == values.get("cancelled", False)
+        assert sync.execute("SELECT id FROM web_changes WHERE status='pending'") == []
+
+
+def test_shared_publication_cancels_locally_edited_source_without_losing_edits(sync):
+    commit(sync)
+    sync.repo.shared_ingestion_enabled = True
+    sync.execute(
+        "UPDATE web_event_states SET override_blob=%s WHERE user_id='alice'",
+        (sync.seal(event(title="My edit", cancelled=False)),),
+    )
+    with sync.repo.connect() as db:
+        sync.repo._publish_snapshot_events(
+            db, "alice", [("direct:event", event(source_version="deleted", cancelled=True))], 1000
+        )
+    blob = sync.execute("SELECT override_blob FROM web_event_states WHERE user_id='alice'")[0][0]
+    assert sync.unseal(blob)["title"] == "My edit"
+    assert sync.unseal(blob)["cancelled"] is True
+    assert len(sync.execute("SELECT id FROM web_changes WHERE status='pending'")) == 1

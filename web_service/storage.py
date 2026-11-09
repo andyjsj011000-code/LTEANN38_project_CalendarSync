@@ -34,9 +34,13 @@ class PermissionPending(Missing):
         }
     )
 
-    def __init__(self, *, state="checking", retryable=True):
+    def __init__(
+        self, *, state="checking", retryable=True, retain_snapshot=False, snapshot_channels=None
+    ):
         self.connection_state = state if state in self.STATES else "verification_failed"
         self.retryable = retryable is True
+        self.retain_snapshot = retain_snapshot is True and self.retryable
+        self.snapshot_channels = snapshot_channels
         super().__init__()
 
 

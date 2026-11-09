@@ -53,7 +53,7 @@ def test_every_shared_refresh_preserves_unexpired_access_during_graph(
     monkeypatch.setattr(s.graph, "channels", channels)
     s.integration.run_sync(device, ingest=ingest, force=True)
 
-    assert observed == ["checking"] * (2 if ingest else 1)
+    assert observed == ["checking"]  # Source work does not launch a second permission pass.
     assert s.db.sync_status(session["user_id"])["state"] == "connected"
 
 
@@ -203,6 +203,7 @@ def test_collection_failure_recovery_excludes_channels_revoked_during_collection
     monkeypatch.setattr(s.integration.source, "collect", collect)
     assert client.post("/api/teams/sync").status_code == 200
 
+    s.integration.run_sync(device, force=True)
     assert s.db.sync_status(session["user_id"])["state"] == "connected"
     assert s.db.channels(session["user_id"], session["tenant_id"]) == []
     assert client.get("/api/today").json()["teams"] == []
@@ -226,6 +227,7 @@ def test_collection_recovery_remains_fail_closed_when_fresh_permission_verificat
     monkeypatch.setattr(s.integration.source, "collect", collect)
     assert client.post("/api/teams/sync").status_code == 200
 
+    s.integration.run_sync(device, force=True)
     assert s.db.sync_status(session["user_id"])["state"] == "verification_failed"
     assert s.db.channels(session["user_id"], session["tenant_id"]) == []
     personal_task(s, session["user_id"])

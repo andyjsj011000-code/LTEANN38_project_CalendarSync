@@ -17,6 +17,7 @@ import secrets
 import time
 from datetime import date
 
+from .source_updates import automatic_source_update
 from .storage import Missing, PermissionPending, digest
 
 
@@ -458,6 +459,30 @@ class PostgresSync:
                     (user_id, event_id, payload),
                 )
             elif seen[0] != version:
+                if getattr(self, "shared_ingestion_enabled", False):
+                    state = db.execute(
+                        "SELECT override_blob FROM web_event_states WHERE user_id=%s AND event_id=%s",
+                        (user_id, event_id),
+                    ).fetchone()
+                    current = self.unseal(state[0]) if state and state[0] else None
+                    update, accepted = automatic_source_update(
+                        current, seen[0], fields, _source_hash
+                    )
+                    if update is not None:
+                        db.execute(
+                            "UPDATE web_event_states SET override_blob=%s WHERE user_id=%s AND event_id=%s",
+                            (self.seal(update), user_id, event_id),
+                        )
+                    if accepted:
+                        db.execute(
+                            "UPDATE web_user_source_versions SET seen_hash=%s WHERE user_id=%s AND event_id=%s",
+                            (version, user_id, event_id),
+                        )
+                        db.execute(
+                            "UPDATE web_changes SET status='superseded' WHERE user_id=%s AND event_id=%s AND status='pending'",
+                            (user_id, event_id),
+                        )
+                        continue
                 change_id = digest(user_id + "|" + event_id + "|" + version)
                 db.execute(
                     """UPDATE web_changes SET status='superseded'
