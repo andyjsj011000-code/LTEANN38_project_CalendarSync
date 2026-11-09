@@ -23,3 +23,19 @@ line-ending = "lf"
 minversion = "8.3"
 testpaths = ["tests_web"]
 python_files = ["test_*.py"]
+
+[tool.basedpyright]
+# Expand this boundary as the remaining legacy modules gain explicit types.
+typeCheckingMode = "standard"
+pythonVersion = "3.11"
+extraPaths = ["tests_web"]
+include = [
+    "web_service/collection_types.py",
+    "web_service/ports.py",
+    "web_service/calendar_rules.py",
+    "web_service/source_updates.py",
+    "web_service/connections.py",
+    "web_service/direct_source.py",
+    "tests_web/support/fakes.py",
+    "tests_web/typing_contracts.py",
+]

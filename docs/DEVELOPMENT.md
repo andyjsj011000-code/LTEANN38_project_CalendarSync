@@ -1,0 +1,49 @@
+# 개발 검사와 테스트 대역
+
+저장소 루트에서 실행합니다. 개발 도구는 고정 버전이며 런타임 의존성과 분리합니다.
+
+```powershell
+python -m pip install -r requirements-web.txt -r requirements-dev.txt
+python -m ruff check .
+python -m ruff format --check .
+python -m basedpyright
+python -m pytest tests_web --ignore=tests_web/test_beta_package.py -q
+```
+
+Windows 제한 환경에서는 `python -I -S tools/run_restricted_tests.py`로 기존 웹 테스트를
+실행할 수 있습니다. 베타 ZIP 실행기 테스트는 별도로 `python -m pytest
+tests_web/test_beta_package.py -q`로 실행합니다.
+
+## 타입 검사 범위
+
+`pyproject.toml`의 `tool.basedpyright.include`가 검사 경계를 정의합니다. 현재 범위는
+내부 데이터 타입, Protocol, 공통 업무 규칙, 공지 수집과 토큰 갱신 코드,
+공통 대역 및 실제 어댑터의 타입 계약입니다. 나머지 모듈은 이 경계에서 가져오는
+반환 타입과 메서드 규약을 확인하며, 명시적 타입을 정리할 때 검사 범위를 넓힙니다.
+
+`tests_web/typing_contracts.py`는 실제 Graph·AI·토큰·SQLite·PostgreSQL 구현과
+테스트 대역을 같은 Protocol에 대입합니다. 런타임 메서드 존재 검사와 달리 인자 이름,
+선택 인자와 반환 타입이 바뀌어도 CI에서 발견합니다. 타입 오류를 전체적으로 숨기거나
+현재 오류 수를 허용하는 기준선은 사용하지 않습니다.
+
+## 공통 대역과 계약 테스트
+
+- `tests_web/support/fakes.py`: 수집용 Graph·AI·캐시·공유 수집 잠금·토큰 갱신 대역과
+  합성 데이터. 관찰한 호출과 지정한 실패를 각 인스턴스에 보관합니다.
+- `tests_web/support/postgres.py`: 기존 환경 가드를 사용하는 임시 PostgreSQL fixture.
+  기존 테스트 파일의 fixture 가져오기도 유지합니다.
+- `tests_web/test_adapter_contracts.py`: 대역과 실제 구현에 같은 동작 검증을 적용합니다.
+  Graph/OpenAI는 MockTransport를 사용하고, 저장소는 메모리·SQLite·임시 PostgreSQL을
+  비교합니다. 수집 순서, 캐시 교체·취소, 잠금 소유권·만료, 갱신 실패 후 재시도를 검사합니다.
+
+```powershell
+python -m pytest tests_web/test_adapter_contracts.py -q
+```
+
+PostgreSQL 계약은 기존 `CALENDARSYNC_DISPOSABLE_POSTGRES_DSN`과
+`CALENDARSYNC_ALLOW_TEMP_SCHEMA=yes` 조건이 있을 때만 실행합니다. 각 테스트의
+임의 스키마 안에서만 데이터를 만들고 정리합니다. CI는 PostgreSQL 18에서 계약을
+재실행하고 JUnit 결과로 건너뛴 항목이 없는지 확인합니다.
+
+특정 테스트만의 실패 주입은 공통 대역의 작은 하위 클래스로 표현합니다. 대역은
+DB 트랜잭션이나 동시 잠금의 대체물이 아니므로 기존 PostgreSQL 통합 테스트도 유지합니다.

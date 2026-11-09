@@ -2,8 +2,7 @@
 
 import httpx
 import pytest
-from test_direct_ingestion_progress import Extractor, channels, message
-from test_direct_shared_ingestion import SharedCache
+from support.fakes import Extractor, SharedCache, channels, message
 
 from web_service.direct_source import DirectSource, TeamsGraph
 from web_service.school_graph import BASE, GraphFailure
