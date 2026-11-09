@@ -33,7 +33,7 @@ class PostgresSync:
         ):
             raise ValueError("Duration must be an integer number of seconds")
 
-    def sync_status(self, user_id):
+    def sync_status(self, user_id: str) -> dict[str, object]:
         with self.connect() as db:
             row = db.execute(
                 """SELECT checked_at,state,lease_until FROM web_school_sync

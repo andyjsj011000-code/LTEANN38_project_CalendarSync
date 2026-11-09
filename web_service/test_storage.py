@@ -619,6 +619,20 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
                 ("accepted" if accept else "kept", change_id),
             )
 
+    def override_event(self, user_id, tenant_id, event_id, values):
+        events = {e["id"]: e for e in self._shared(user_id, tenant_id)}
+        if event_id not in events:
+            raise Missing()
+        item = {
+            **events[event_id],
+            **values,
+        }
+        with self.connect() as c:
+            c.execute(
+                "INSERT INTO web_event_states(user_id,event_id,override_blob) VALUES(?,?,?) ON CONFLICT(user_id,event_id) DO UPDATE SET override_blob=excluded.override_blob",
+                (user_id, event_id, self.seal(item)),
+            )
+
     def save_feedback(self, user, message):
         key = secrets.token_hex(16)
         with self.connect() as c:

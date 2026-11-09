@@ -13,7 +13,7 @@ from .collection_types import (
 from .connection_snapshot import acquire_snapshot
 from .school_graph import GraphFailure
 from .storage import PermissionPending
-from .sync_ports import SyncContext
+from .sync_ports import CollectionSource, IngestionTrackingStore, SharedCollectionStore, SyncContext
 from .sync_results import COUNTS as COUNTS
 from .sync_results import BusyResult, IngestionSummary, checked_report, summarize_report
 
@@ -49,19 +49,20 @@ def collect_shared(
         if not prepared:
             return (
                 {"state": "busy"}
-                if db.sync_status(device["user_id"])["state"] == "checking"
+                if cast(SharedCollectionStore, db).sync_status(device["user_id"])["state"]
+                == "checking"
                 else None
             )
         token, device = acquire_snapshot(integration.tokens, device, db)
         tracked = bool(getattr(db, "planner_enhancements_enabled", False))
-        attempt = db.claim_ingestion(device) if tracked else None
+        attempt = cast(IngestionTrackingStore, db).claim_ingestion(device) if tracked else None
         if tracked and not attempt:
             return {"state": "busy"}
         channels = prepared["channels"]
 
         def progress(report: CollectionReport) -> None:
             if attempt:
-                db.update_ingestion(device, attempt, report)
+                cast(IngestionTrackingStore, db).update_ingestion(device, attempt, report)
 
         options = (
             {"on_progress": progress}
@@ -70,7 +71,7 @@ def collect_shared(
         )
         events = None
         try:
-            events = integration.source.collect(
+            events = cast(CollectionSource, integration.source).collect(
                 token, channels, device["tenant_id"], db, device["user_id"], **options
             )
             report = getattr(events, "report", None)
@@ -92,10 +93,12 @@ def collect_shared(
         try:
             # Publish upserts/tombstones only under the currently valid ACL.
             # Expiry leaves the catalog intact for the independent permission read.
-            db.materialize_cached_events(device)
+            cast(SharedCollectionStore, db).materialize_cached_events(device)
         except PermissionPending:
             pass
-        if not db.finish_shared_collection(device, report, attempt=attempt):
+        if not cast(SharedCollectionStore, db).finish_shared_collection(
+            device, report, attempt=attempt
+        ):
             return {"state": "busy"}
         closed = True
         return summarize_report(validated)
@@ -104,7 +107,9 @@ def collect_shared(
             db.fail_connection(device["id_hash"])
         if attempt:
             try:
-                db.end_ingestion(device, attempt, error_code=error.state)
+                cast(IngestionTrackingStore, db).end_ingestion(
+                    device, attempt, error_code=error.state
+                )
                 closed = True
             except Exception:
                 pass  # Revocation may already have invalidated the attempt's device.
@@ -114,7 +119,9 @@ def collect_shared(
     finally:
         if attempt and not closed:
             try:
-                db.end_ingestion(device, attempt, error_code="interrupted")
+                cast(IngestionTrackingStore, db).end_ingestion(
+                    device, attempt, error_code="interrupted"
+                )
             except Exception:
                 pass
     return None

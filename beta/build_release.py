@@ -12,6 +12,8 @@ def build(release_directory=None):
     allowed_web = [
         "__init__.py",
         "api.py",
+        "auth_routes.py",
+        "shared_routes.py",
         "beta.py",
         "calendar_rules.py",
         "config.py",

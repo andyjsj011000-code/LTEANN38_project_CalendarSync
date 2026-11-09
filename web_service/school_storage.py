@@ -102,7 +102,7 @@ class SchoolDatabase(Database):
             raise Missing()
         return self.unseal(row["token_blob"])["access_token"]
 
-    def sync_status(self, user_id):
+    def sync_status(self, user_id: str) -> dict[str, object]:
         with self.connect() as c:
             row = c.execute(
                 "SELECT checked_at,state,lease_until FROM web_school_sync WHERE user_id=?",

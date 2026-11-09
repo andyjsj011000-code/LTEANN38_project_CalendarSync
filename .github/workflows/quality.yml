@@ -46,4 +46,4 @@ jobs:
       - name: Check typed boundaries and adapter contracts
         run: python -m basedpyright
       - name: Check synchronization imports without the web adapter
-        run: python -c "import sys; import web_service.sync_workflow; assert 'web_service.server' not in sys.modules; assert 'fastapi' not in sys.modules"
+        run: python -c "import sys; import web_service.sync_workflow; import web_service.reminder_rules; assert 'web_service.server' not in sys.modules; assert 'fastapi' not in sys.modules"

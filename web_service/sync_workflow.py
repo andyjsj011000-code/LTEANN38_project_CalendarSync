@@ -8,7 +8,14 @@ from .oracle_source import OracleSource
 from .school_graph import GraphFailure
 from .shared_collection import collect_shared
 from .sync_diagnostics import SyncDiagnostics
-from .sync_ports import SyncContext, SyncResult
+from .sync_ports import (
+    EventSource,
+    IngestionTrackingStore,
+    SnapshotOptions,
+    SyncContext,
+    SyncResult,
+    is_collection_source,
+)
 from .sync_results import checked_report, summarize_report
 
 
@@ -29,10 +36,12 @@ def run_sync(
     user = device["user_id"]
     tracked = bool(
         ingest
-        and hasattr(integration.source, "collect")
+        and is_collection_source(integration.source)
         and getattr(integration.db, "planner_enhancements_enabled", False)
     )
-    attempt = integration.db.claim_ingestion(device) if tracked else None
+    attempt = (
+        cast(IngestionTrackingStore, integration.db).claim_ingestion(device) if tracked else None
+    )
     if tracked and not attempt:
         diagnostics.progress("sync", "skipped")
         return {"state": "busy"}
@@ -42,14 +51,16 @@ def run_sync(
         nonlocal attempt_closed
         if attempt and not attempt_closed:
             try:
-                integration.db.end_ingestion(device, attempt, error_code=error_code, queued=queued)
+                cast(IngestionTrackingStore, integration.db).end_ingestion(
+                    device, attempt, error_code=error_code, queued=queued
+                )
             except Exception:
                 pass
             attempt_closed = True
 
     def collection_progress(report):
         try:
-            integration.db.update_ingestion(device, attempt, report)
+            cast(IngestionTrackingStore, integration.db).update_ingestion(device, attempt, report)
         except Exception:
             pass
 
@@ -88,7 +99,7 @@ def run_sync(
             end_tracking("source_not_configured")
             return
         diagnostics.progress("source", "started")
-        if hasattr(integration.source, "collect"):
+        if is_collection_source(integration.source):
             if ingest:
                 collected_scope = {ch["id"] for ch in channels}
                 options = (
@@ -154,10 +165,10 @@ def run_sync(
             known = integration.db.known_oracle_events(user, device["tenant_id"], channels)
             events = integration.source.events(channels, device["tenant_id"], known_events=known)
         else:
-            events = integration.source.events(channels, device["tenant_id"])
+            events = cast(EventSource, integration.source).events(channels, device["tenant_id"])
         diagnostics.progress("source", "completed")
         diagnostics.progress("commit", "started")
-        context = (
+        context: SnapshotOptions = (
             {
                 "ingestion": {
                     "attempt": attempt,
@@ -203,7 +214,7 @@ def run_sync(
                 return prepared
         if (
             ingest
-            and hasattr(integration.source, "collect")
+            and is_collection_source(integration.source)
             and not tracked
             and not (ingestion and ingestion["partial"])
         ):
