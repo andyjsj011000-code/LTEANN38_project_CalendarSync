@@ -5,25 +5,10 @@ from __future__ import annotations
 from requests.exceptions import ConnectionError, RequestException, Timeout
 
 from .collection_types import DeviceSnapshot
-from .ports import ConnectionStore, TokenProvider, TokenRefresher
+from .connection_snapshot import acquire_snapshot as acquire_snapshot
+from .ports import ConnectionStore, TokenRefresher
 from .school import SchoolIdentity
 from .school_graph import SCOPES, GraphFailure
-
-
-def acquire_snapshot(
-    tokens: TokenProvider, device: DeviceSnapshot, db: ConnectionStore
-) -> tuple[str, DeviceSnapshot]:
-    """Use the current credential generation after a possible token refresh."""
-    token = tokens.acquire(device)
-    current = db.device(device["id_hash"])
-    if (
-        not current
-        or current["user_id"] != device["user_id"]
-        or current["tenant_id"] != device["tenant_id"]
-        or current.get("state") == "reauth_required"
-    ):
-        raise GraphFailure("reauth_required")
-    return token, current
 
 
 class PersistentIdentity(SchoolIdentity):

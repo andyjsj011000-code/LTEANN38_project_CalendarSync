@@ -45,3 +45,5 @@ jobs:
         run: python -m pip install -r requirements-web.txt -r requirements-dev.txt
       - name: Check typed boundaries and adapter contracts
         run: python -m basedpyright
+      - name: Check synchronization imports without the web adapter
+        run: python -c "import sys; import web_service.sync_workflow; assert 'web_service.server' not in sys.modules; assert 'fastapi' not in sys.modules"

@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import logging
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from time import monotonic
-from typing import cast
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
@@ -19,22 +16,20 @@ from pydantic import Field, model_validator
 
 from .api import create_app
 from .collection_types import (
-    DeviceIdentity,
     DeviceSnapshot,
     PermissionReadiness,
     PermissionSnapshot,
     PreparedCollection,
 )
 from .composition import compose_server
-from .connections import ConnectionTokens, acquire_snapshot
-from .oracle_source import OracleSource
+from .connections import ConnectionTokens
 from .push import Notifications, Subscription
 from .schemas import Input, TaskInput
 from .school import SchoolIntegration
-from .school_graph import GraphFailure
 from .school_security import SecurityBoundary
-from .shared_collection import collect_shared
 from .storage import Missing, PermissionPending, digest
+from .sync_ports import SyncResult
+from .sync_workflow import run_sync
 
 
 class ChangeDecision(Input):
@@ -217,322 +212,17 @@ class ServerIntegration(SchoolIntegration):
         }
 
     def run_sync(
-        self, device, ingest=False, force=False, *, prepare_collection=False, prepared=None
-    ):
-        if ingest and self.shared_ingestion_enabled:
-            return collect_shared(self, device, prepared, force=force)
-        started = monotonic()
-        logger = logging.getLogger("uvicorn.error")
-
-        def progress(stage, outcome):
-            # Only fixed stage/outcome labels and elapsed time leave this method.
-            # Diagnostics must never change synchronization or expose inputs.
-            try:
-                logger.info(
-                    "CalendarSync sync stage=%s outcome=%s elapsed_ms=%d",
-                    stage,
-                    outcome,
-                    int((monotonic() - started) * 1000),
-                )
-            except Exception:
-                pass
-
-        def failure_progress(saved):
-            progress(
-                "failure",
-                "recorded" if saved is True else "not_recorded" if saved is False else "completed",
-            )
-
-        progress("sync", "started")
-        progress("lease", "started")
-        user = device["user_id"]
-        tracked = bool(
-            ingest
-            and hasattr(self.source, "collect")
-            and getattr(self.db, "planner_enhancements_enabled", False)
+        self,
+        device: DeviceSnapshot,
+        ingest: bool = False,
+        force: bool = False,
+        *,
+        prepare_collection: bool = False,
+        prepared: PreparedCollection | None = None,
+    ) -> SyncResult:
+        return run_sync(
+            self, device, ingest, force, prepare_collection=prepare_collection, prepared=prepared
         )
-        attempt = self.db.claim_ingestion(device) if tracked else None
-        if tracked and not attempt:
-            progress("sync", "skipped")
-            return {"state": "busy"}
-        attempt_closed = False
-
-        def end_tracking(error_code=None, queued=False):
-            nonlocal attempt_closed
-            if attempt and not attempt_closed:
-                try:
-                    self.db.end_ingestion(device, attempt, error_code=error_code, queued=queued)
-                except Exception:
-                    pass
-                attempt_closed = True
-
-        def collection_progress(report):
-            try:
-                self.db.update_ingestion(device, attempt, report)
-            except Exception:
-                pass
-
-        lease = self.db.begin_sync(
-            user,
-            0 if ingest or force else self.settings.access_seconds,
-            **({"preserve_access": True} if self.shared_ingestion_enabled else {}),
-        )
-        progress("lease", "acquired" if lease else "skipped")
-        if not lease:
-            end_tracking(queued=True)
-            progress("sync", "skipped")
-            return {"state": "busy"} if ingest else None
-
-        def fail_current(state):
-            return self.db.fail_sync(user, state, lease) if lease else False
-
-        try:
-            ingestion = None
-            report = None
-            reset_channels = False
-            collected_scope = None
-            collected_checked = None
-            collected_scanned = None
-            progress("token", "started")
-            token, device = acquire_snapshot(self.tokens, device, self.db)
-            progress("token", "completed")
-            progress("channels", "started")
-            channels = self.graph.channels(token, device["object_id"], device["tenant_id"])
-            verified_at = int(self.db.clock())
-            progress("channels", "completed")
-            if not self.source.configured:
-                progress("source", "not_configured")
-                progress("failure", "started")
-                failure_progress(fail_current("source_not_configured"))
-                end_tracking("source_not_configured")
-                return
-            progress("source", "started")
-            if hasattr(self.source, "collect"):
-                if ingest:
-                    collected_scope = {ch["id"] for ch in channels}
-                    options = (
-                        {"on_progress": collection_progress}
-                        if attempt and getattr(self.source, "supports_progress", False)
-                        else {}
-                    )
-                    events = self.source.collect(
-                        token, channels, device["tenant_id"], self.db, user, **options
-                    )
-                    report = getattr(events, "report", None)
-                    if tracked:
-                        collected_checked = getattr(events, "checked_channels", None)
-                        collected_scanned = getattr(events, "scanned_channels", None)
-                        for scope in (collected_checked, collected_scanned):
-                            if scope is not None and (
-                                not isinstance(scope, (set, frozenset))
-                                or not scope <= collected_scope
-                            ):
-                                raise ValueError("Invalid ingestion channel scope")
-                    if report is not None:
-                        # Only content-free counts cross the API boundary. An
-                        # incomplete pass must remain eligible for the worker.
-                        counts = (
-                            "channels_total",
-                            "channels_scanned",
-                            "messages_seen",
-                            "messages_analyzed",
-                            "messages_cached",
-                            "messages_failed",
-                        )
-                        if (
-                            not isinstance(report, dict)
-                            or type(report.get("partial")) is not bool
-                            or any(
-                                type(report.get(key)) is not int or report[key] < 0
-                                for key in counts
-                            )
-                        ):
-                            raise ValueError("Invalid ingestion report")
-                        ingestion = {key: report[key] for key in counts}
-                        ingestion.update(
-                            partial=report["partial"],
-                            state="partial" if report["partial"] else "completed",
-                        )
-                    if tracked:
-                        # The legacy, non-shared path still owns its initial lease.
-                        token, device = acquire_snapshot(self.tokens, device, self.db)
-                        channels = self.graph.channels(
-                            token, device["object_id"], device["tenant_id"]
-                        )
-                        events = self.db.catalog_events([ch["id"] for ch in channels])
-                        final_scope = {ch["id"] for ch in channels}
-                        if tracked and final_scope != collected_scope:
-                            reset_channels = True
-                            was_partial = bool(report and report.get("partial"))
-                            if collected_checked is None and not was_partial:
-                                collected_checked = collected_scope
-                            report = {
-                                **(report or {}),
-                                "channels_total": len(final_scope),
-                                "partial": was_partial or bool(final_scope - collected_scope),
-                            }
-                            for key, scope in (
-                                ("channels_checked", collected_checked),
-                                ("channels_scanned", collected_scanned),
-                            ):
-                                if scope is None:
-                                    report.pop(key, None)
-                                else:
-                                    report[key] = len(final_scope & scope)
-                            if ingestion is not None:
-                                for key in ("channels_total", "channels_scanned"):
-                                    if key in report:
-                                        ingestion[key] = report[key]
-                                    else:
-                                        ingestion.pop(key, None)
-                                ingestion.update(
-                                    partial=report["partial"],
-                                    state="partial" if report["partial"] else "completed",
-                                )
-                else:
-                    events = self.db.catalog_events([ch["id"] for ch in channels])
-            elif isinstance(self.source, OracleSource):
-                known = self.db.known_oracle_events(user, device["tenant_id"], channels)
-                events = self.source.events(channels, device["tenant_id"], known_events=known)
-            else:
-                events = self.source.events(channels, device["tenant_id"])
-            progress("source", "completed")
-            progress("commit", "started")
-            context = (
-                {
-                    "ingestion": {
-                        "attempt": attempt,
-                        "report": report or {"partial": False},
-                        "reset_channels": reset_channels,
-                    }
-                }
-                if tracked
-                else {}
-            )
-            recorded = self.db.commit_snapshot(
-                device, channels, events, self.settings.access_seconds, lease, **context
-            )
-            progress("commit", "completed")
-            if tracked:
-                attempt_closed = True
-                if not recorded:
-                    return {"state": "busy"}
-            if self.shared_ingestion_enabled and not ingest:
-                # Internal-only handoff. It contains no token and never enters
-                # the API response; queued work revalidates the live device.
-                identity: DeviceIdentity = {
-                    "id_hash": device["id_hash"],
-                    "user_id": device["user_id"],
-                    "tenant_id": device["tenant_id"],
-                    "object_id": device["object_id"],
-                    "version": device["version"],
-                }
-                prepared = cast(
-                    PreparedCollection,
-                    {
-                        "device": identity,
-                        "channels": [dict(ch) for ch in channels],
-                        "valid_until": verified_at + self.settings.access_seconds,
-                    },
-                )
-                # Bounded in-memory route hints; the database proof is checked on
-                # every reuse. Restart, logout, expiry and scope changes invalidate it.
-                if len(self._collection_proofs) >= 128:
-                    self._collection_proofs.clear()
-                self._collection_proofs[device["id_hash"]] = prepared
-                if prepare_collection:
-                    return prepared
-            if (
-                ingest
-                and hasattr(self.source, "collect")
-                and not tracked
-                and not (ingestion and ingestion["partial"])
-            ):
-                # Advance the schedule only after the snapshot was committed;
-                # failed commits and partial collection need a prompt retry.
-                progress("ingest_mark", "started")
-                self.db.mark_ingested(device["id_hash"])
-                progress("ingest_mark", "completed")
-            if ingest:
-                return ingestion
-        except GraphFailure as error:
-            progress("sync", "graph_failure")
-            progress("failure", "started")
-            failure_progress(fail_current(error.state))
-            end_tracking(error.state)
-            if error.state in {"reauth_required", "account_not_allowed"}:
-                self.db.fail_connection(device["id_hash"])
-        except Exception as error:
-            # Never interpolate exception text or traceback locals: they can
-            # contain Graph bodies, SQL parameters, or credential material.
-            try:
-                safe_types = {
-                    "Missing",
-                    "PermissionPending",
-                    "Conflict",
-                    "ValueError",
-                    "TypeError",
-                    "KeyError",
-                    "IndexError",
-                    "RuntimeError",
-                    "TimeoutError",
-                    "ConnectionError",
-                    "IntegrityError",
-                    "OperationalError",
-                    "InterfaceError",
-                    "DataError",
-                    "SerializationFailure",
-                    "DeadlockDetected",
-                    "InvalidToken",
-                    "AssertionError",
-                    "ProgrammingError",
-                    "UndefinedColumn",
-                    "UndefinedTable",
-                    "UniqueViolation",
-                    "ForeignKeyViolation",
-                    "CheckViolation",
-                    "NotNullViolation",
-                    "QueryCanceled",
-                    "AdminShutdown",
-                    "ConnectionDoesNotExist",
-                    "InFailedSqlTransaction",
-                }
-                kind = type(error).__name__
-                kind = kind if kind in safe_types else "OtherError"
-                internal = "unknown"
-                line = 0
-                trace = error.__traceback__
-                directory = Path(__file__).resolve().parent
-                while trace is not None:
-                    filename = Path(trace.tb_frame.f_code.co_filename)
-                    if filename.resolve().parent == directory and filename.suffix == ".py":
-                        internal = filename.name
-                        line = trace.tb_lineno
-                    trace = trace.tb_next
-                sqlstate = getattr(error, "sqlstate", None)
-                if not (
-                    isinstance(sqlstate, str)
-                    and len(sqlstate) == 5
-                    and all("A" <= char <= "Z" or "0" <= char <= "9" for char in sqlstate)
-                ):
-                    sqlstate = "none"
-                logger.info(
-                    "CalendarSync sync exception_type=%s internal_file=%s internal_line=%d sqlstate=%s",
-                    kind,
-                    internal,
-                    line,
-                    sqlstate,
-                )
-            except Exception:
-                pass
-            progress("sync", "source_unavailable")
-            progress("failure", "started")
-            failure_progress(fail_current("source_unavailable"))
-            self.db.audit("sync_failed", user)
-            end_tracking("source_unavailable")
-        finally:
-            end_tracking("interrupted")
-            progress("sync", "finished")
 
     def run_deferred_ingestion(self, device, prepared=None):
         try:
