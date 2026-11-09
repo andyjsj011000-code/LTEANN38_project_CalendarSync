@@ -2,7 +2,6 @@
 
 import base64
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -10,6 +9,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from pydantic import Field, model_validator
 
+from .config import PushConfig
 from .schemas import Input
 from .storage import digest
 
@@ -123,10 +123,12 @@ class PushSender:
             return "retry"
 
 
-def sender_from_env():
-    return PushSender(
-        os.environ.get("WEB_VAPID_PRIVATE_KEY", ""), os.environ.get("WEB_VAPID_SUBJECT", "")
-    )
+def sender_from_config(config: PushConfig) -> PushSender:
+    return PushSender(config.private, config.subject)
+
+
+def sender_from_env(environ=None):
+    return sender_from_config(PushConfig.from_env(environ))
 
 
 class Notifications:

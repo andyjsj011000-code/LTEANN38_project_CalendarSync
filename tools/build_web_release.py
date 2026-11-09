@@ -33,6 +33,7 @@ REQUIRED_FILES = (
     "web_service/beta.py",
     "web_service/calendar_rules.py",
     "web_service/collection_types.py",
+    "web_service/composition.py",
     "web_service/config.py",
     "web_service/connections.py",
     "web_service/direct_source.py",
