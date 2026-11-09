@@ -192,10 +192,10 @@ class TeamsGraph(DelegatedGraph):
             deadline = monotonic() + 80
         with self.client_factory() as client:
             path = BASE + self.message_path(channel, message_id)
-            if complete_replies and monotonic() > deadline:
+            if complete_replies and deadline is not None and monotonic() > deadline:
                 raise GraphFailure("source_unavailable")
             message = self._read(client, token, path, forbidden_missing=False)
-            if complete_replies and monotonic() > deadline:
+            if complete_replies and deadline is not None and monotonic() > deadline:
                 raise GraphFailure("source_unavailable")
             if message is None or message.get("deletedDateTime"):
                 return message
@@ -500,7 +500,7 @@ class DirectSource:
             selected = [c for c in channels if (c["team_id"], c["id"]) in requested]
             if not requested or len(requested) != len(selected):
                 raise GraphFailure("verification_failed")
-        if targeted is not None and len(selected) != 1:
+        if targeted is not None and (not isinstance(selected, list) or len(selected) != 1):
             raise GraphFailure("verification_failed")
         for channel in selected:
             # Broad visits already check the deadline before advancing cursor.
@@ -580,9 +580,10 @@ class DirectSource:
                         )
                     )
                     old = known.get(mid)
+                    context = None
                     if not message.get("deletedDateTime"):
                         try:
-                            text, image_links, processing_version = _message_context(
+                            context = _message_context(
                                 message,
                                 channel,
                                 mid,
@@ -600,6 +601,7 @@ class DirectSource:
                             report["partial"] = True
                             emit_progress()
                             continue
+                        processing_version = context[2]
                         if processing_version:
                             # Only posts whose valid input changed under these
                             # fixes need one new analysis, not the whole catalog.
@@ -639,6 +641,10 @@ class DirectSource:
                             break
                         emit_progress()
                         continue
+                    # Cached and deleted posts have already returned above.
+                    # Only active posts with complete validated content reach AI.
+                    assert context is not None
+                    text, image_links, _ = context
                     try:
                         created = message.get("createdDateTime", "")
                         if created and not old and targeted is None:

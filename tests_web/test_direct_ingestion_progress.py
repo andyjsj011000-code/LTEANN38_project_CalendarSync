@@ -1,95 +1,14 @@
 """Broad ingestion fairness and truthful progress, with no external service calls."""
 
 import json
-from datetime import datetime, timezone
 
 import httpx
 import pytest
+from support.fakes import Cache, Extractor, Graph, channels, message
 
 import web_service.direct_source as module
 from web_service.direct_source import CollectionResult, DirectSource
 from web_service.school_graph import GraphFailure
-
-
-def channels(count):
-    return [
-        {"id": f"channel-{number:02}", "team_id": "team", "name": "Class"}
-        for number in range(count)
-    ]
-
-
-def message(identity, text=None):
-    return {"id": identity, "body": {"content": text or identity}, "replies": []}
-
-
-def event(title):
-    return {
-        "key": "deadline",
-        "title": title,
-        "notes": "",
-        "start_date": "2026-11-07",
-        "end_date": "2026-11-07",
-        "time": None,
-        "kind": "assignment",
-        "cancelled": False,
-    }
-
-
-class Cache:
-    def __init__(self):
-        self.cursor, self.visits, self.values, self.writes = 0, [], {}, []
-
-    def next_channels(self, user, candidates, count):
-        assert count == 1, "Do not reserve channels that may never be visited"
-        selected = sorted(candidates, key=lambda row: row["id"])[self.cursor % len(candidates)]
-        self.cursor = (self.cursor + 1) % len(candidates)
-        self.visits.append(selected["id"])
-        return [selected]
-
-    def cached_messages(self, channel):
-        return dict(self.values.get(channel, {}))
-
-    def cache_analysis(self, key, channel, identity, version, events):
-        self.writes.append((channel, identity))
-        self.values.setdefault(channel, {})[identity] = {"version": version, "events": events}
-
-    def catalog_events(self, candidates):
-        return [
-            item
-            for channel in candidates
-            for cached in self.values.get(channel, {}).values()
-            for item in cached["events"]
-        ]
-
-    def touch_analysis(self, key):
-        pass
-
-    def clock(self):
-        return datetime(2026, 11, 7, tzinfo=timezone.utc).timestamp()
-
-
-class Graph:
-    def __init__(self, values=None, on_read=None):
-        self.values, self.on_read, self.reads = values or {}, on_read, []
-
-    def messages(self, token, channel):
-        self.reads.append(channel["id"])
-        if self.on_read:
-            self.on_read()
-        return list(self.values.get(channel["id"], []))
-
-
-class Extractor:
-    configured = True
-
-    def __init__(self, fail=None):
-        self.fail, self.calls = fail, []
-
-    def extract(self, text, images, previous):
-        self.calls.append((text, previous))
-        if self.fail and "bad-message" in text:
-            raise self.fail
-        return [event(text.splitlines()[-1])]
 
 
 def test_every_verified_channel_can_be_visited_when_the_budget_allows(monkeypatch):

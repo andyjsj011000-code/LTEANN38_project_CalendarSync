@@ -42,6 +42,9 @@ Microsoft Teams 채널 공지사항(텍스트/이미지)을 AI가 분석하여 �
 
 ## 개발 환경과 코드 검사
 
+타입 검사 범위, 공통 테스트 대역과 계약 테스트 실행법은
+[개발 검사 안내](docs/DEVELOPMENT.md)에 정리합니다.
+
 저장소 루트의 `pyproject.toml`에서 Ruff와 pytest 설정을 관리합니다.
 실행용 `requirements*.txt`는 기존 역할을 유지하며, 개발 도구는 별도로 설치합니다.
 아래 명령은 프로젝트 가상환경에서 실행합니다.
@@ -50,6 +53,7 @@ Microsoft Teams 채널 공지사항(텍스트/이미지)을 AI가 분석하여 �
 python -m pip install -r requirements-web.txt -r requirements-dev.txt
 python -m ruff check .
 python -m ruff format --check .
+python -m basedpyright
 python -m pytest
 ```
 
@@ -58,12 +62,12 @@ python -m pytest
 Ruff 버전은 개발 의존성과 설정에서 `0.17.4`로 고정했습니다.
 버전을 올릴 때는 두 설정을 함께 변경하고 검사 결과를 확인합니다.
 
-현재 검사 범위는 `web_service`, `tests_web`, `tools`, `beta`와 루트 Python 스크립트입니다.
+현재 Ruff 검사 범위는 `web_service`, `tests_web`, `tools`, `beta`와 루트 Python 스크립트입니다.
 별도 운영 중인 Oracle 봇 `app/`은 제외하며, 해당 코드의 검증·정리는 별도로 진행합니다.
 pytest fixture를 다른 테스트 모듈에서 가져올 때는 `from module import fixture as fixture`처럼
 명시적으로 다시 내보내 자동 정리로 삭제되지 않도록 합니다.
 
-GitHub Actions의 **Python quality checks**가 푸시와 PR에서 린팅·포맷을 검사합니다.
+GitHub Actions의 **Python quality checks**가 푸시와 PR에서 린팅·포맷·설정된 타입 경계를 검사합니다.
 기존 **CalendarSync PostgreSQL beta checks**는 `oracle` 푸시와 `oracle` 대상 PR에서
 화면 로직·웹 API·임시 PostgreSQL 18 통합 테스트를 실행합니다. 두 검사 모두 배포를 실행하지 않습니다.
 검사 실패를 병합 차단 조건으로 강제하려면 저장소 브랜치 보호 설정에서 해당 검사를 필수로 지정합니다.

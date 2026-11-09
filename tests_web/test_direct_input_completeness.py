@@ -4,8 +4,7 @@ import json
 
 import httpx
 import pytest
-from test_direct_ingestion_progress import Graph, channels, event, message
-from test_direct_shared_ingestion import SharedCache
+from support.fakes import Graph, SharedCache, channels, event, message
 
 from web_service.direct_source import DirectSource, TeamsGraph
 from web_service.school_graph import BASE, GraphFailure

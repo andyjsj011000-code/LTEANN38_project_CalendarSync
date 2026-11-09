@@ -4,64 +4,12 @@ import json
 import threading
 
 import pytest
-from test_direct_ingestion_progress import Cache, Extractor, Graph, channels, message
+from support.fakes import Extractor, Graph, SharedCache, channels, message
 
 import web_service.direct_source as module
 from web_service.direct_source import DirectSource
 from web_service.school_graph import GraphFailure
 from web_service.storage import digest
-
-
-class SharedCache(Cache):
-    shared_ingestion_enabled = True
-
-    def __init__(self):
-        super().__init__()
-        self.leases, self.fresh_until, self.claims, self.finishes, self.cursors = {}, {}, [], [], {}
-        self.sequence = 0
-
-    def next_channels(self, user, candidates, count):
-        assert count == 1
-        index = self.cursors.get(user, 0)
-        selected = sorted(candidates, key=lambda row: row["id"])[index % len(candidates)]
-        self.cursors[user] = (index + 1) % len(candidates)
-        self.visits.append(selected["id"])
-        return [selected]
-
-    def channel_ingestion_fresh(self, channel, freshness_seconds=300):
-        assert isinstance(channel, dict) and channel.get("team_id")
-        return self.fresh_until.get(channel["id"], 0) > self.clock() and freshness_seconds > 0
-
-    def claim_channel_ingestion(self, channel, freshness_seconds=300):
-        assert isinstance(channel, dict) and channel.get("team_id")
-        identity = channel["id"]
-        self.claims.append((identity, freshness_seconds))
-        if identity in self.leases or self.channel_ingestion_fresh(channel, freshness_seconds):
-            return None
-        self.sequence += 1
-        lease = "lease-" + str(self.sequence)
-        self.leases[identity] = lease
-        return lease
-
-    def finish_channel_ingestion(self, channel, lease, success):
-        assert isinstance(channel, dict) and channel.get("team_id")
-        identity = channel["id"]
-        self.finishes.append((identity, lease, success))
-        if self.leases.get(identity) != lease:
-            return False
-        del self.leases[identity]
-        if success:
-            self.fresh_until[identity] = self.clock() + 300
-        return True
-
-    def cache_analysis(self, key, channel, identity, version, events, *, ingestion_lease=None):
-        if self.leases.get(channel) != ingestion_lease:
-            return False
-        super().cache_analysis(key, channel, identity, version, events)
-        return True
-
-    def touch_analysis(self, key, *, ingestion_lease=None):
-        return ingestion_lease in self.leases.values()
 
 
 def test_same_users_devices_cannot_count_duplicate_cursor_visits_as_completion():
