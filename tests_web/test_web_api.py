@@ -3,7 +3,12 @@ from web_service.storage import Database
 
 
 def task_payload(**values):
-    return {"title": "개발 완료하기", "start_date": "2026-10-20", "end_date": "2026-10-24", **values}
+    return {
+        "title": "개발 완료하기",
+        "start_date": "2026-10-20",
+        "end_date": "2026-10-24",
+        **values,
+    }
 
 
 def calendar(client, **query):
@@ -18,7 +23,13 @@ def create_task(client, **values):
 
 def test_unauthenticated_identity_headers_do_not_grant_access(env):
     c = env.client()
-    for path in ("/api/me", "/api/settings", "/api/channels", "/api/today", "/api/calendar?start=2026-10-01&end=2026-10-31"):
+    for path in (
+        "/api/me",
+        "/api/settings",
+        "/api/channels",
+        "/api/today",
+        "/api/calendar?start=2026-10-01&end=2026-10-31",
+    ):
         assert c.get(path, headers={"x-user-id": env.alice}).status_code == 401
 
 
@@ -28,7 +39,10 @@ def test_personal_data_does_not_leak_across_students(env):
     assert b.get(f"/api/tasks/{item['id']}").status_code == 404
     assert calendar(b).json()["items"] == []
     assert b.put(f"/api/tasks/{item['id']}", json=task_payload(version=1)).status_code == 404
-    assert b.patch(f"/api/tasks/{item['id']}/state", json={"version": 1, "hidden": True}).status_code == 404
+    assert (
+        b.patch(f"/api/tasks/{item['id']}/state", json={"version": 1, "hidden": True}).status_code
+        == 404
+    )
     assert b.delete(f"/api/tasks/{item['id']}?version=1").status_code == 404
 
 
@@ -40,7 +54,12 @@ def test_cannot_assign_task_to_someone_else(env):
 def test_task_validation_rejects_invalid_period_and_outside_dates(env):
     c = env.client(env.alice)
     assert c.post("/api/tasks", json=task_payload(end_date="2026-10-19")).status_code == 422
-    assert c.post("/api/tasks", json=task_payload(display_mode="selected", selected_dates=["2026-10-25"])).status_code == 422
+    assert (
+        c.post(
+            "/api/tasks", json=task_payload(display_mode="selected", selected_dates=["2026-10-25"])
+        ).status_code
+        == 422
+    )
     assert c.post("/api/tasks", json=task_payload(title="  ")).status_code == 422
 
 
@@ -58,7 +77,10 @@ def test_final_only_and_daily_agenda_rules(env):
     last = create_task(c, display_mode="final")
     daily = create_task(c, display_mode="daily")
     assert [e["id"] for e in c.get("/api/today?day=2026-10-22").json()["personal"]] == [daily["id"]]
-    assert {e["id"] for e in c.get("/api/today?day=2026-10-24").json()["personal"]} == {last["id"], daily["id"]}
+    assert {e["id"] for e in c.get("/api/today?day=2026-10-24").json()["personal"]} == {
+        last["id"],
+        daily["id"],
+    }
 
 
 def test_unfinished_past_task_is_not_carried_to_today(env):
@@ -86,10 +108,18 @@ def test_completion_keeps_original_order(env):
 def test_hiding_and_restoring_personal_task(env):
     c = env.client(env.alice)
     item = create_task(c)
-    assert c.patch(f"/api/tasks/{item['id']}/state", json={"version": 1, "hidden": True}).status_code == 200
+    assert (
+        c.patch(f"/api/tasks/{item['id']}/state", json={"version": 1, "hidden": True}).status_code
+        == 200
+    )
     assert calendar(c).json()["items"] == []
-    assert c.get("/api/hidden?start=2026-10-01&end=2026-10-31").json()["items"][0]["id"] == item["id"]
-    assert c.patch(f"/api/tasks/{item['id']}/state", json={"version": 2, "hidden": False}).status_code == 200
+    assert (
+        c.get("/api/hidden?start=2026-10-01&end=2026-10-31").json()["items"][0]["id"] == item["id"]
+    )
+    assert (
+        c.patch(f"/api/tasks/{item['id']}/state", json={"version": 2, "hidden": False}).status_code
+        == 200
+    )
     assert len(calendar(c).json()["items"]) == 1
 
 
@@ -98,7 +128,10 @@ def test_stale_update_and_delete_are_rejected(env):
     item = create_task(c)
     url = f"/api/tasks/{item['id']}"
     assert c.put(url, json=task_payload(title="첫 기기의 수정", version=1)).status_code == 200
-    assert c.put(url, json=task_payload(title="두 번째 기기의 오래된 수정", version=1)).status_code == 409
+    assert (
+        c.put(url, json=task_payload(title="두 번째 기기의 오래된 수정", version=1)).status_code
+        == 409
+    )
     assert c.delete(url + "?version=1").status_code == 409
     assert c.get(url).json()["title"] == "첫 기기의 수정"
     assert c.delete(url + "?version=2").status_code == 204
@@ -185,11 +218,15 @@ def test_query_range_and_settings_are_validated(env):
     assert calendar(c, end="2026-09-30").status_code == 422
     assert calendar(c, end="2030-01-01").status_code == 422
     assert c.put("/api/settings", json={"morning_time": "25:00"}).status_code == 422
-    assert c.put("/api/settings", json={"morning_time": "06:30", "morning_enabled": False}).status_code == 200
+    assert (
+        c.put("/api/settings", json={"morning_time": "06:30", "morning_enabled": False}).status_code
+        == 200
+    )
     assert c.get("/api/settings").json()["preferences"]["morning_time"] == "06:30"
 
 
 def test_no_legacy_oracle_or_scheduler_import(env):
     import sys
+
     assert "app.core.dependencies" not in sys.modules
     assert "app.tasks.scheduler" not in sys.modules

@@ -9,6 +9,7 @@ Cache keys must be derived server-side from those verified channel IDs.
 Use only after enforcing the application's single-school tenant boundary;
 multi-tenant support requires tenant-scoped cache keys/schema first.
 """
+
 import time
 
 from .storage import digest
@@ -22,68 +23,81 @@ class PostgresSourceCache:
     @staticmethod
     def _validate_events(events, channel):
         if not isinstance(events, list) or any(
-                not isinstance(event, dict) or event.get('channel_id') != channel
-                for event in events):
-            raise ValueError('Source cache channel mismatch')
+            not isinstance(event, dict) or event.get("channel_id") != channel for event in events
+        ):
+            raise ValueError("Source cache channel mismatch")
         return events
 
     def cached_analysis(self, key, version):
         with self.connect() as db:
-            row = db.execute('''SELECT channel_id,payload_blob FROM web_source_cache
-                WHERE cache_key=%s AND version=%s''', (key, version)).fetchone()
-        return decode_cache_payload(self.unseal(row[1]), row[0])['events'] if row else None
+            row = db.execute(
+                """SELECT channel_id,payload_blob FROM web_source_cache
+                WHERE cache_key=%s AND version=%s""",
+                (key, version),
+            ).fetchone()
+        return decode_cache_payload(self.unseal(row[1]), row[0])["events"] if row else None
 
     def cache_analysis(self, key, channel, message, version, events, *, ingestion_lease=None):
         # Match DirectSource's deterministic key contract, preventing multiple
         # rows for the same source through alternative caller-supplied keys.
-        if key != digest(channel + '|' + message):
-            raise ValueError('Source cache key mismatch')
+        if key != digest(channel + "|" + message):
+            raise ValueError("Source cache key mismatch")
         self._validate_events(events, channel)
         blob = self.seal(events)
         with self.connect() as db:
             if ingestion_lease is not None:
-                if not getattr(self, 'shared_ingestion_enabled', False):
-                    raise ValueError('Shared ingestion is not enabled')
+                if not getattr(self, "shared_ingestion_enabled", False):
+                    raise ValueError("Shared ingestion is not enabled")
                 if not self._active_channel_lease(db, channel, ingestion_lease):
                     return False
-            if getattr(self, 'shared_ingestion_enabled', False):
-                old = db.execute('''SELECT channel_id,message_id,payload_blob FROM web_source_cache
-                    WHERE cache_key=%s FOR UPDATE''', (key,)).fetchone()
+            if getattr(self, "shared_ingestion_enabled", False):
+                old = db.execute(
+                    """SELECT channel_id,message_id,payload_blob FROM web_source_cache
+                    WHERE cache_key=%s FOR UPDATE""",
+                    (key,),
+                ).fetchone()
                 if old:
                     if old[:2] != (channel, message):
-                        raise ValueError('Source cache identity changed')
-                    retired = decode_cache_payload(self.unseal(old[2]), channel)['retired']
-                    active_ids = {event['id'] for event in events}
-                    retired = [item for item in retired if item['id'] not in active_ids]
+                        raise ValueError("Source cache identity changed")
+                    retired = decode_cache_payload(self.unseal(old[2]), channel)["retired"]
+                    active_ids = {event["id"] for event in events}
+                    retired = [item for item in retired if item["id"] not in active_ids]
                     if retired:
-                        blob = self.seal({'events': events, 'retired': retired})
+                        blob = self.seal({"events": events, "retired": retired})
                 # The cache row may have waited behind retention or a snapshot.
                 # Expiry must be rechecked after acquiring that row as well.
-                if ingestion_lease is not None and not self._active_channel_lease(db, channel, ingestion_lease):
+                if ingestion_lease is not None and not self._active_channel_lease(
+                    db, channel, ingestion_lease
+                ):
                     return False
-            row = db.execute('''INSERT INTO web_source_cache
+            row = db.execute(
+                """INSERT INTO web_source_cache
                 (cache_key,channel_id,message_id,version,payload_blob,updated_at)
                 VALUES(%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(cache_key) DO UPDATE SET version=excluded.version,
                 payload_blob=excluded.payload_blob,updated_at=excluded.updated_at
                 WHERE web_source_cache.channel_id=excluded.channel_id
                   AND web_source_cache.message_id=excluded.message_id
-                RETURNING cache_key''',
-                (key, channel, message, version, blob, int(self.clock()))).fetchone()
+                RETURNING cache_key""",
+                (key, channel, message, version, blob, int(self.clock())),
+            ).fetchone()
             if row is None:
-                raise ValueError('Source cache identity changed')
+                raise ValueError("Source cache identity changed")
         return True if ingestion_lease is not None else None
 
     def cached_messages(self, channel):
         with self.connect() as db:
-            rows = db.execute('''SELECT message_id,version,payload_blob FROM web_source_cache
-                WHERE channel_id=%s ORDER BY updated_at ASC,message_id ASC''', (channel,)).fetchall()
+            rows = db.execute(
+                """SELECT message_id,version,payload_blob FROM web_source_cache
+                WHERE channel_id=%s ORDER BY updated_at ASC,message_id ASC""",
+                (channel,),
+            ).fetchall()
         result = {}
         for message, version, blob in rows:
             payload = decode_cache_payload(self.unseal(blob), channel)
-            result[message] = {'version': version, 'events': payload['events']}
-            if payload['retired']:
-                result[message]['retired'] = payload['retired']
+            result[message] = {"version": version, "events": payload["events"]}
+            if payload["retired"]:
+                result[message]["retired"] = payload["retired"]
         return result
 
     def catalog_events(self, channels):
@@ -91,24 +105,32 @@ class PostgresSourceCache:
         result = []
         with self.connect() as db:
             for channel in dict.fromkeys(channels):
-                rows = db.execute('''SELECT payload_blob FROM web_source_cache
-                    WHERE channel_id=%s ORDER BY message_id''', (channel,)).fetchall()
+                rows = db.execute(
+                    """SELECT payload_blob FROM web_source_cache
+                    WHERE channel_id=%s ORDER BY message_id""",
+                    (channel,),
+                ).fetchall()
                 for row in rows:
-                    result.extend(decode_cache_payload(self.unseal(row[0]), channel)['events'])
+                    result.extend(decode_cache_payload(self.unseal(row[0]), channel)["events"])
         return result
 
     def touch_analysis(self, key, *, ingestion_lease=None):
         with self.connect() as db:
             if ingestion_lease is not None:
-                if not getattr(self, 'shared_ingestion_enabled', False):
-                    raise ValueError('Shared ingestion is not enabled')
-                row = db.execute('SELECT channel_id FROM web_source_cache WHERE cache_key=%s', (key,)).fetchone()
+                if not getattr(self, "shared_ingestion_enabled", False):
+                    raise ValueError("Shared ingestion is not enabled")
+                row = db.execute(
+                    "SELECT channel_id FROM web_source_cache WHERE cache_key=%s", (key,)
+                ).fetchone()
                 if not row or not self._active_channel_lease(db, row[0], ingestion_lease):
                     return False
-                locked = db.execute('SELECT channel_id FROM web_source_cache WHERE cache_key=%s FOR UPDATE',
-                                    (key,)).fetchone()
+                locked = db.execute(
+                    "SELECT channel_id FROM web_source_cache WHERE cache_key=%s FOR UPDATE", (key,)
+                ).fetchone()
                 if not locked or not self._active_channel_lease(db, locked[0], ingestion_lease):
                     return False
-            db.execute('UPDATE web_source_cache SET updated_at=%s WHERE cache_key=%s',
-                       (int(self.clock()), key))
+            db.execute(
+                "UPDATE web_source_cache SET updated_at=%s WHERE cache_key=%s",
+                (int(self.clock()), key),
+            )
         return True if ingestion_lease is not None else None

@@ -23,18 +23,40 @@ class FakeIdentity:
         self.claim_overrides = {}
 
     def begin(self):
-        return {"state": "test-state", "nonce": "server-only-nonce", "code_verifier": "server-only-verifier", "auth_uri": "https://login.microsoftonline.com/authorize?state=test-state"}
+        return {
+            "state": "test-state",
+            "nonce": "server-only-nonce",
+            "code_verifier": "server-only-verifier",
+            "auth_uri": "https://login.microsoftonline.com/authorize?state=test-state",
+        }
 
     def finish(self, flow, query):
         if flow["state"] != query.get("state") or query.get("code") != "valid-test-code":
             raise ValueError("Invalid test code or state")
-        return {"tid": TENANT, "oid": ALICE, "sub": "subject-a", "iss": f"https://login.microsoftonline.com/{TENANT}/v2.0", "aud": CLIENT, "exp": self.clock() + 3600, "name": "Alice", "preferred_username": "a@sshs.hs.kr", **self.claim_overrides}
+        return {
+            "tid": TENANT,
+            "oid": ALICE,
+            "sub": "subject-a",
+            "iss": f"https://login.microsoftonline.com/{TENANT}/v2.0",
+            "aud": CLIENT,
+            "exp": self.clock() + 3600,
+            "name": "Alice",
+            "preferred_username": "a@sshs.hs.kr",
+            **self.claim_overrides,
+        }
 
 
 @pytest.fixture
 def env(tmp_path):
     now = [int(datetime(2026, 10, 22, tzinfo=timezone.utc).timestamp())]
-    settings = Settings(database_path=tmp_path / "web.sqlite3", data_key=Fernet.generate_key().decode(), origin="https://calendar.example.test", tenant_id=TENANT, client_id=CLIENT, client_secret="test-only-secret")
+    settings = Settings(
+        database_path=tmp_path / "web.sqlite3",
+        data_key=Fernet.generate_key().decode(),
+        origin="https://calendar.example.test",
+        tenant_id=TENANT,
+        client_id=CLIENT,
+        client_secret="test-only-secret",
+    )
     db = Database(settings.database_path, settings.data_key, clock=lambda: now[0])
     provider = FakeIdentity(settings, db.clock)
     app = create_app(settings, db, provider)
@@ -50,7 +72,16 @@ def env(tmp_path):
             c.headers["x-csrf-token"] = c.get("/api/me").json()["csrf_token"]
         return c
 
-    state = SimpleNamespace(now=now, settings=settings, db=db, identity=provider, app=app, alice=alice, bob=bob, client=client)
+    state = SimpleNamespace(
+        now=now,
+        settings=settings,
+        db=db,
+        identity=provider,
+        app=app,
+        alice=alice,
+        bob=bob,
+        client=client,
+    )
     yield state
     for c in clients:
         c.close()
@@ -60,9 +91,30 @@ def env(tmp_path):
 def shared(env):
     with env.db.connect() as c:
         for channel in ("channel-a", "channel-b"):
-            c.execute("INSERT INTO web_channels VALUES(?,?,?)", (channel, TENANT, env.db.seal({"name": channel})))
+            c.execute(
+                "INSERT INTO web_channels VALUES(?,?,?)",
+                (channel, TENANT, env.db.seal({"name": channel})),
+            )
         for user, channel in ((env.alice, "channel-a"), (env.bob, "channel-b")):
-            c.execute("INSERT INTO web_channel_access VALUES(?,?,?,?)", (user, channel, env.now[0], env.now[0] + 3600))
-        for event, channel, title in (("event-a", "channel-a", "Alice channel deadline"), ("event-b", "channel-b", "Bob channel deadline")):
-            c.execute("INSERT INTO web_events(id,channel_id,start_date,end_date,kind,payload_blob) VALUES(?,?,?,?,?,?)", (event, channel, "2026-10-20", "2026-10-24", "assignment", env.db.seal({"title": title, "notes": "source-private-content", "time": "18:00"})))
+            c.execute(
+                "INSERT INTO web_channel_access VALUES(?,?,?,?)",
+                (user, channel, env.now[0], env.now[0] + 3600),
+            )
+        for event, channel, title in (
+            ("event-a", "channel-a", "Alice channel deadline"),
+            ("event-b", "channel-b", "Bob channel deadline"),
+        ):
+            c.execute(
+                "INSERT INTO web_events(id,channel_id,start_date,end_date,kind,payload_blob) VALUES(?,?,?,?,?,?)",
+                (
+                    event,
+                    channel,
+                    "2026-10-20",
+                    "2026-10-24",
+                    "assignment",
+                    env.db.seal(
+                        {"title": title, "notes": "source-private-content", "time": "18:00"}
+                    ),
+                ),
+            )
     return env

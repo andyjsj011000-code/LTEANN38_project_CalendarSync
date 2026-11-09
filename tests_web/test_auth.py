@@ -12,7 +12,11 @@ from conftest import TENANT, CLIENT
 
 
 def finish_login(c, **params):
-    return c.get("/auth/callback", params={"state": "test-state", "code": "valid-test-code", **params}, follow_redirects=False)
+    return c.get(
+        "/auth/callback",
+        params={"state": "test-state", "code": "valid-test-code", **params},
+        follow_redirects=False,
+    )
 
 
 def test_login_server_flow_and_secure_cookie(env):
@@ -35,14 +39,17 @@ def test_wrong_state_and_direct_identity_are_rejected(env):
     assert c.get("/api/me").status_code == 401
 
 
-@pytest.mark.parametrize("override", [
-    {"tid": "55555555-5555-4555-8555-555555555555"},
-    {"iss": "https://attacker.example/issuer"},
-    {"aud": "55555555-5555-4555-8555-555555555555"},
-    {"oid": "not-a-uuid"},
-    {"sub": ""},
-    {"exp": 1},
-])
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"tid": "55555555-5555-4555-8555-555555555555"},
+        {"iss": "https://attacker.example/issuer"},
+        {"aud": "55555555-5555-4555-8555-555555555555"},
+        {"oid": "not-a-uuid"},
+        {"sub": ""},
+        {"exp": 1},
+    ],
+)
 def test_rejects_wrong_tenant_issuer_audience_or_identity(env, override):
     c = env.client()
     env.identity.claim_overrides = override
@@ -82,9 +89,19 @@ def test_disabled_user_loses_session(env):
 def test_csrf_and_cross_origin_mutations_rejected(env):
     c = env.client(env.alice)
     payload = {"title": "Task", "start_date": "2026-10-22"}
-    assert c.post("/api/tasks", json=payload, headers={"x-csrf-token": "invalid"}).status_code == 403
-    assert c.post("/api/tasks", json=payload, headers={"origin": "https://attacker.example"}).status_code == 403
-    assert c.post("/api/tasks", json=payload, headers={"origin": env.settings.origin}).status_code == 201
+    assert (
+        c.post("/api/tasks", json=payload, headers={"x-csrf-token": "invalid"}).status_code == 403
+    )
+    assert (
+        c.post(
+            "/api/tasks", json=payload, headers={"origin": "https://attacker.example"}
+        ).status_code
+        == 403
+    )
+    assert (
+        c.post("/api/tasks", json=payload, headers={"origin": env.settings.origin}).status_code
+        == 201
+    )
 
 
 def test_relogin_rotates_and_revokes_existing_session(env):
@@ -127,16 +144,25 @@ def test_configuration_rejects_insecure_origin_and_partial_credentials(env):
 
 def test_msal_adapter_delegates_the_full_flow(monkeypatch, env):
     calls = {}
-    flow = {"auth_uri": "https://login.microsoftonline.com/test", "state": "s", "nonce": "n", "code_verifier": "p"}
+    flow = {
+        "auth_uri": "https://login.microsoftonline.com/test",
+        "state": "s",
+        "nonce": "n",
+        "code_verifier": "p",
+    }
+
     class Client:
         def __init__(self, *args, **kwargs):
             calls["construction"] = (args, kwargs)
+
         def initiate_auth_code_flow(self, **kwargs):
             calls["begin"] = kwargs
             return flow
+
         def acquire_token_by_auth_code_flow(self, stored, query):
             calls["finish"] = (stored, query)
             return {"id_token_claims": {"tid": TENANT}}
+
     monkeypatch.setitem(sys.modules, "msal", SimpleNamespace(ConfidentialClientApplication=Client))
     provider = MicrosoftIdentity(env.settings)
     assert provider.begin() == flow

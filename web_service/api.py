@@ -15,14 +15,31 @@ FLOW_COOKIE = "calendarsync_login"
 KST = timezone(timedelta(hours=9))
 
 
-def create_app(settings=None, database=None, identity=None, frontend_directory=None, integration=None, frontend_entry="index.html"):
+def create_app(
+    settings=None,
+    database=None,
+    identity=None,
+    frontend_directory=None,
+    integration=None,
+    frontend_entry="index.html",
+):
     settings = settings or Settings.from_env()
-    session_cookie = "__Host-calendarsync_session" if integration and settings.secure_cookies else SESSION_COOKIE
-    flow_cookie = "__Host-calendarsync_login" if integration and settings.secure_cookies else FLOW_COOKIE
+    session_cookie = (
+        "__Host-calendarsync_session" if integration and settings.secure_cookies else SESSION_COOKIE
+    )
+    flow_cookie = (
+        "__Host-calendarsync_login" if integration and settings.secure_cookies else FLOW_COOKIE
+    )
     db = database or Database(settings.database_path, settings.data_key)
     db.initialize()
     provider = identity or MicrosoftIdentity(settings)
-    app = FastAPI(title="CalendarSync", version="0.2.0", docs_url=None if integration else "/docs", redoc_url=None if integration else "/redoc", openapi_url=None if integration else "/openapi.json")
+    app = FastAPI(
+        title="CalendarSync",
+        version="0.2.0",
+        docs_url=None if integration else "/docs",
+        redoc_url=None if integration else "/redoc",
+        openapi_url=None if integration else "/openapi.json",
+    )
     app.state.database = db
 
     @app.middleware("http")
@@ -39,16 +56,23 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
 
     @app.exception_handler(Conflict)
     async def conflict(_request, _error):
-        return JSONResponse({"detail": "Item changed on another device; reload before editing"}, status_code=409)
+        return JSONResponse(
+            {"detail": "Item changed on another device; reload before editing"}, status_code=409
+        )
 
     @app.exception_handler(PermissionPending)
     async def permission_pending(_request, _error):
-        return JSONResponse({"detail": "Teams 접근 권한을 확인하고 있어요. 잠시 후 다시 시도해 주세요.",
-                             "code": "permission_check_pending",
-                             "connection_state": _error.connection_state,
-                             "retryable": _error.retryable,
-                             "teams_access_unverified": True}, status_code=503,
-                            headers={"Retry-After": "2"})
+        return JSONResponse(
+            {
+                "detail": "Teams 접근 권한을 확인하고 있어요. 잠시 후 다시 시도해 주세요.",
+                "code": "permission_check_pending",
+                "connection_state": _error.connection_state,
+                "retryable": _error.retryable,
+                "teams_access_unverified": True,
+            },
+            status_code=503,
+            headers={"Retry-After": "2"},
+        )
 
     def current_session(request: Request):
         session = db.session(request.cookies.get(session_cookie))
@@ -59,7 +83,9 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
             if origin is not None and origin != settings.origin:
                 raise HTTPException(403, "Invalid request origin")
             supplied = request.headers.get("x-csrf-token", "")
-            if not hmac.compare_digest(supplied.encode("utf-8"), session["csrf_token"].encode("ascii")):
+            if not hmac.compare_digest(
+                supplied.encode("utf-8"), session["csrf_token"].encode("ascii")
+            ):
                 raise HTTPException(403, "A valid CSRF token is required")
         if integration:
             integration.check_request(session, request)
@@ -73,7 +99,15 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
         return operation()
 
     def cookie(response, name, value, max_age):
-        response.set_cookie(name, value, httponly=True, secure=settings.secure_cookies, samesite="lax", max_age=max_age, path="/")
+        response.set_cookie(
+            name,
+            value,
+            httponly=True,
+            secure=settings.secure_cookies,
+            samesite="lax",
+            max_age=max_age,
+            path="/",
+        )
 
     def window(start, end):
         if end < start or (end - start).days > 366:
@@ -88,7 +122,12 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
     def index():
         if frontend_directory is not None:
             return FileResponse(frontend_directory / frontend_entry)
-        return {"service": "CalendarSync Web Foundation", "sign_in": "/auth/login", "api_docs": "/docs", "ui_connected": False}
+        return {
+            "service": "CalendarSync Web Foundation",
+            "sign_in": "/auth/login",
+            "api_docs": "/docs",
+            "ui_connected": False,
+        }
 
     if frontend_directory is not None:
         app.mount("/assets", StaticFiles(directory=frontend_directory), name="web-assets")
@@ -98,7 +137,11 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
         if integration:
             integration.limit_login(request)
         try:
-            flow = integration.begin_login(provider, request) if integration and hasattr(integration, "begin_login") else provider.begin()
+            flow = (
+                integration.begin_login(provider, request)
+                if integration and hasattr(integration, "begin_login")
+                else provider.begin()
+            )
         except Exception:
             # Do not return provider errors, tokens, or credential configuration.
             raise HTTPException(503, "School sign-in is not available yet") from None
@@ -138,11 +181,19 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
         except Exception:
             if raw:
                 db.revoke_session(raw)
-            response = RedirectResponse("/?login=failed", status_code=303) if integration else JSONResponse({"detail": "Sign-in failed; start again"}, status_code=400)
-            response.delete_cookie(flow_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax")
+            response = (
+                RedirectResponse("/?login=failed", status_code=303)
+                if integration
+                else JSONResponse({"detail": "Sign-in failed; start again"}, status_code=400)
+            )
+            response.delete_cookie(
+                flow_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax"
+            )
             return response
         response = RedirectResponse("/", status_code=303)
-        response.delete_cookie(flow_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax")
+        response.delete_cookie(
+            flow_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax"
+        )
         cookie(response, session_cookie, raw, settings.session_seconds)
         if integration and hasattr(integration, "login_response"):
             integration.login_response(response, raw)
@@ -161,27 +212,44 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
         if raw_session:
             db.revoke_session(raw_session)
         response = Response(status_code=204)
-        response.delete_cookie(session_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax")
+        response.delete_cookie(
+            session_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax"
+        )
         if integration and hasattr(integration, "logout_response"):
             integration.logout_response(response)
         return response
 
     @app.get("/api/me")
     def me(session=Depends(current_session)):
-        return {"id": session["user_id"], **db.unseal(session["profile_blob"]), "csrf_token": session["csrf_token"]}
+        return {
+            "id": session["user_id"],
+            **db.unseal(session["profile_blob"]),
+            "csrf_token": session["csrf_token"],
+        }
 
     @app.get("/api/channels")
     def channels(session=Depends(current_session)):
         return teams_read(session, lambda: db.channels(session["user_id"], session["tenant_id"]))
 
     @app.put("/api/channels/{channel_id}/preference")
-    def channel_preference(channel_id: str, body: ChannelPreference, session=Depends(current_session)):
+    def channel_preference(
+        channel_id: str, body: ChannelPreference, session=Depends(current_session)
+    ):
         db.channel_preference(session["user_id"], session["tenant_id"], channel_id, body.enabled)
         return {"id": channel_id, "enabled": body.enabled}
 
     @app.get("/api/settings")
     def preferences(session=Depends(current_session)):
-        return {"preferences": db.preferences(session["user_id"]), "capabilities": {"push_delivery": bool(integration and getattr(integration, "push_enabled", False)), "teams_chat_delivery": False, "calendar_export": False, "live_teams_ingestion": bool(integration and integration.source.configured)}, "connection": integration.status(session) if integration else None}
+        return {
+            "preferences": db.preferences(session["user_id"]),
+            "capabilities": {
+                "push_delivery": bool(integration and getattr(integration, "push_enabled", False)),
+                "teams_chat_delivery": False,
+                "calendar_export": False,
+                "live_teams_ingestion": bool(integration and integration.source.configured),
+            },
+            "connection": integration.status(session) if integration else None,
+        }
 
     @app.put("/api/settings")
     def save_preferences(body: Preferences, session=Depends(current_session)):
@@ -204,7 +272,9 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
 
     @app.patch("/api/tasks/{task_id}/state")
     def task_state(task_id: str, body: TaskState, session=Depends(current_session)):
-        return db.task_state(session["user_id"], task_id, body.model_dump(exclude={"version"}), body.version)
+        return db.task_state(
+            session["user_id"], task_id, body.model_dump(exclude={"version"}), body.version
+        )
 
     @app.delete("/api/tasks/{task_id}", status_code=204)
     def delete_task(task_id: str, version: int = Query(ge=1), session=Depends(current_session)):
@@ -216,23 +286,42 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
 
     @app.patch("/api/events/{event_id}/state")
     def event_state(event_id: str, body: EventState, session=Depends(current_session)):
-        result = db.event_state(session["user_id"], session["tenant_id"], event_id, body.model_dump())
+        result = db.event_state(
+            session["user_id"], session["tenant_id"], event_id, body.model_dump()
+        )
         return {k: v for k, v in result.items() if k != "channel_enabled"}
 
     @app.get("/api/calendar")
     def calendar(start: date, end: date, session=Depends(current_session)):
         lo, hi = window(start, end)
-        return teams_read(session, lambda: {"start": lo, "end": hi, "items": db.calendar(session["user_id"], session["tenant_id"], lo, hi)})
+        return teams_read(
+            session,
+            lambda: {
+                "start": lo,
+                "end": hi,
+                "items": db.calendar(session["user_id"], session["tenant_id"], lo, hi),
+            },
+        )
 
     @app.get("/api/hidden")
     def hidden(start: date, end: date, session=Depends(current_session)):
         lo, hi = window(start, end)
-        return teams_read(session, lambda: {"items": db.calendar(session["user_id"], session["tenant_id"], lo, hi, hidden_only=True)})
+        return teams_read(
+            session,
+            lambda: {
+                "items": db.calendar(
+                    session["user_id"], session["tenant_id"], lo, hi, hidden_only=True
+                )
+            },
+        )
 
     @app.get("/api/today")
     def today(day: date | None = None, session=Depends(current_session)):
         selected = day or datetime.fromtimestamp(db.clock(), KST).date()
-        return teams_read(session, lambda: db.agenda(session["user_id"], session["tenant_id"], selected.isoformat()))
+        return teams_read(
+            session,
+            lambda: db.agenda(session["user_id"], session["tenant_id"], selected.isoformat()),
+        )
 
     @app.get("/api/personal/today")
     def personal_today(day: date | None = None, session=Depends(current_session)):
@@ -242,6 +331,7 @@ def create_app(settings=None, database=None, identity=None, frontend_directory=N
     if getattr(db, "planner_enhancements_enabled", False):
         from .planner_drafts import install_draft_routes
         from .planner_trash import install_trash_routes
+
         install_draft_routes(app, db, current_session)
         install_trash_routes(app, db, current_session)
 

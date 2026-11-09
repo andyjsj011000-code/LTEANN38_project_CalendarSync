@@ -1,4 +1,5 @@
 """Run a local synthetic CalendarSync beta; no school credentials required."""
+
 import argparse
 import importlib.util
 import os
@@ -14,8 +15,14 @@ def main():
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--no-browser", action="store_true")
-    parser.add_argument("--prepare-only", action="store_true", help="Create private test accounts without starting a server")
-    parser.add_argument("--current-python", action="store_true", help="Use an already prepared Python environment")
+    parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Create private test accounts without starting a server",
+    )
+    parser.add_argument(
+        "--current-python", action="store_true", help="Use an already prepared Python environment"
+    )
     args = parser.parse_args()
     if sys.version_info < (3, 11):
         parser.error("Python 3.11 or newer is required")
@@ -35,20 +42,39 @@ def main():
         wanted = requirements.read_text(encoding="utf-8")
         if not marker.exists() or marker.read_text(encoding="utf-8") != wanted:
             print("Installing beta dependencies (first run needs internet)...", flush=True)
-            subprocess.run([str(executable), "-m", "pip", "install", "-r", str(requirements)], check=True)
+            subprocess.run(
+                [str(executable), "-m", "pip", "install", "-r", str(requirements)], check=True
+            )
             marker.write_text(wanted, encoding="utf-8")
         # Re-enter with the private interpreter; avoid changing global packages.
-        command = [str(executable), str(Path(__file__).resolve()), "--current-python", "--port", str(args.port), "--data-dir", str(data_dir)]
+        command = [
+            str(executable),
+            str(Path(__file__).resolve()),
+            "--current-python",
+            "--port",
+            str(args.port),
+            "--data-dir",
+            str(data_dir),
+        ]
         if args.no_browser:
             command.append("--no-browser")
         if args.prepare_only:
             command.append("--prepare-only")
         return subprocess.call(command)
-    missing = [name for name in ("fastapi", "cryptography", "uvicorn") if importlib.util.find_spec(name) is None]
+    missing = [
+        name
+        for name in ("fastapi", "cryptography", "uvicorn")
+        if importlib.util.find_spec(name) is None
+    ]
     if missing:
-        parser.error("Missing packages: " + ", ".join(missing) + ". Run without --current-python to install privately.")
+        parser.error(
+            "Missing packages: "
+            + ", ".join(missing)
+            + ". Run without --current-python to install privately."
+        )
     sys.path.insert(0, str(source_dir))
     from web_service.beta import prepare_beta
+
     origin = f"http://127.0.0.1:{args.port}"
     config, invitations = prepare_beta(data_dir, origin)
     print("\nCalendarSync BETA - synthetic Teams examples, separate test accounts", flush=True)
@@ -66,7 +92,14 @@ def main():
         timer.daemon = True
         timer.start()
     import uvicorn
-    uvicorn.run("web_service.beta:create_beta_app", factory=True, host="127.0.0.1", port=args.port, access_log=False)
+
+    uvicorn.run(
+        "web_service.beta:create_beta_app",
+        factory=True,
+        host="127.0.0.1",
+        port=args.port,
+        access_log=False,
+    )
     return 0
 
 

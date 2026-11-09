@@ -29,7 +29,9 @@ class Settings:
             raise ValueError("WEB_ORIGIN must not contain credentials, path, or query")
         if url.scheme != "https" and url.hostname not in {"localhost", "127.0.0.1", "[::1]", "::1"}:
             raise ValueError("HTTP is allowed only on loopback for local development")
-        if bool(self.tenant_id) != bool(self.client_id) or bool(self.client_id) != bool(self.client_secret):
+        if bool(self.tenant_id) != bool(self.client_id) or bool(self.client_id) != bool(
+            self.client_secret
+        ):
             raise ValueError("Configure all three WEB_ENTRA_* values or none")
         for value in (self.tenant_id, self.client_id):
             if value and str(UUID(value)) != value.lower():
@@ -58,7 +60,9 @@ class Settings:
         if not key:
             raise ValueError("WEB_DATA_KEY is required; generate and persist a Fernet key")
         return cls(
-            database_path=Path(os.environ.get("WEB_DATABASE_PATH", "web_service/var/web-foundation.sqlite3")),
+            database_path=Path(
+                os.environ.get("WEB_DATABASE_PATH", "web_service/var/web-foundation.sqlite3")
+            ),
             data_key=key,
             origin=os.environ.get("WEB_ORIGIN", "http://localhost:8080"),
             tenant_id=os.environ.get("WEB_ENTRA_TENANT_ID", "").lower(),

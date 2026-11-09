@@ -1,4 +1,5 @@
 """SQLite persistence for the single-instance test server. Credentials are encrypted."""
+
 import hashlib
 import json
 import secrets
@@ -9,7 +10,7 @@ from .planner_drafts import SQLiteTaskDrafts
 from .planner_trash import SQLiteTaskTrash
 from .sqlite_ingestion_status import SQLiteIngestionStatus
 
-EXTRA_SCHEMA="""
+EXTRA_SCHEMA = """
 CREATE TABLE IF NOT EXISTS web_connections (
  id_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES web_users(id),credential_blob TEXT NOT NULL,
  token_expires INTEGER NOT NULL,expires_at INTEGER NOT NULL,background INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,
@@ -39,401 +40,831 @@ CREATE TABLE IF NOT EXISTS web_ingest_cursor (user_id TEXT PRIMARY KEY,cursor IN
 CREATE TABLE IF NOT EXISTS web_worker_lock (id INTEGER PRIMARY KEY,owner TEXT NOT NULL,expires_at INTEGER NOT NULL);
 """
 
+
 def source_hash(e):
-    return digest(json.dumps({k:e.get(k) for k in ('title','notes','time','source_url','start_date','end_date','kind','cancelled','source_version')},sort_keys=True,ensure_ascii=False))
+    return digest(
+        json.dumps(
+            {
+                k: e.get(k)
+                for k in (
+                    "title",
+                    "notes",
+                    "time",
+                    "source_url",
+                    "start_date",
+                    "end_date",
+                    "kind",
+                    "cancelled",
+                    "source_version",
+                )
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+    )
+
 
 class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, SchoolDatabase):
-    __test__=False
-    def __init__(self,path,data_key,*,planner_enhancements_enabled=False,**kwargs):
-        super().__init__(path,data_key,**kwargs)
-        self.planner_enhancements_enabled=bool(planner_enhancements_enabled)
+    __test__ = False
+
+    def __init__(self, path, data_key, *, planner_enhancements_enabled=False, **kwargs):
+        super().__init__(path, data_key, **kwargs)
+        self.planner_enhancements_enabled = bool(planner_enhancements_enabled)
 
     def initialize(self):
         super().initialize()
-        with self.connect() as c: c.executescript(EXTRA_SCHEMA)
+        with self.connect() as c:
+            c.executescript(EXTRA_SCHEMA)
         if self.planner_enhancements_enabled:
             from .planner_schema import enable_sqlite_planner_schema
+
             with self.connect() as c:
-                c.execute('BEGIN IMMEDIATE')
+                c.execute("BEGIN IMMEDIATE")
                 enable_sqlite_planner_schema(c)
 
     def planner_maintenance(self):
         if not self.planner_enhancements_enabled:
-            return {'drafts_expired':0,'trash_expired':0}
-        return {'drafts_expired':self.prune_task_drafts(),
-                'trash_expired':self.prune_task_trash()}
+            return {"drafts_expired": 0, "trash_expired": 0}
+        return {
+            "drafts_expired": self.prune_task_drafts(),
+            "trash_expired": self.prune_task_trash(),
+        }
 
-    def teams_read_proof(self,user_id,tenant_id):
+    def teams_read_proof(self, user_id, tenant_id):
         """Read the original permission proof without changing its lifetime."""
-        now=int(self.clock())
+        now = int(self.clock())
         with self.connect() as c:
-            rows=c.execute('''SELECT s.state,s.checked_at,a.channel_id
+            rows = c.execute(
+                """SELECT s.state,s.checked_at,a.channel_id
                 FROM web_users u
                 LEFT JOIN web_school_sync s ON s.user_id=u.id
                 LEFT JOIN web_channel_access a ON a.user_id=u.id AND a.valid_until>?
                     AND EXISTS (SELECT 1 FROM web_channels ch
                         WHERE ch.id=a.channel_id AND ch.tenant_id=u.tenant_id)
                 WHERE u.id=? AND u.tenant_id=? AND u.active=1
-                ORDER BY a.channel_id''',(now,user_id,tenant_id)).fetchall()
-        return {'state':rows[0][0] or 'not_connected' if rows else 'not_connected',
-                'checked_at':rows[0][1] or 0 if rows else 0,
-                'channels':frozenset(row[2] for row in rows if row[2] is not None)}
+                ORDER BY a.channel_id""",
+                (now, user_id, tenant_id),
+            ).fetchall()
+        return {
+            "state": rows[0][0] or "not_connected" if rows else "not_connected",
+            "checked_at": rows[0][1] or 0 if rows else 0,
+            "channels": frozenset(row[2] for row in rows if row[2] is not None),
+        }
 
-    def add_connection(self,raw_session,user_id,token,lifetime,cache='',background=False,*,assignment_access=False):
-        raw=secrets.token_urlsafe(32); now=int(self.clock())
-        expires=now+(30*86400 if background and cache else min(lifetime,3600))
+    def add_connection(
+        self,
+        raw_session,
+        user_id,
+        token,
+        lifetime,
+        cache="",
+        background=False,
+        *,
+        assignment_access=False,
+    ):
+        raw = secrets.token_urlsafe(32)
+        now = int(self.clock())
+        expires = now + (30 * 86400 if background and cache else min(lifetime, 3600))
         with self.connect() as c:
-            c.execute('INSERT INTO web_connections(id_hash,user_id,credential_blob,token_expires,expires_at,background) VALUES(?,?,?,?,?,?)',(digest(raw),user_id,self.seal({'token':token,'cache':cache,**({'assignment_access':True} if assignment_access else {})}),now+lifetime,expires,int(background and bool(cache))))
-            c.execute('INSERT INTO web_session_links VALUES(?,?,?)',(digest(raw_session),digest(raw),now))
-        return raw,expires-now
+            c.execute(
+                "INSERT INTO web_connections(id_hash,user_id,credential_blob,token_expires,expires_at,background) VALUES(?,?,?,?,?,?)",
+                (
+                    digest(raw),
+                    user_id,
+                    self.seal(
+                        {
+                            "token": token,
+                            "cache": cache,
+                            **({"assignment_access": True} if assignment_access else {}),
+                        }
+                    ),
+                    now + lifetime,
+                    expires,
+                    int(background and bool(cache)),
+                ),
+            )
+            c.execute(
+                "INSERT INTO web_session_links VALUES(?,?,?)",
+                (digest(raw_session), digest(raw), now),
+            )
+        return raw, expires - now
 
-    def device(self,device_hash):
+    def device(self, device_hash):
         with self.connect() as c:
-            row=c.execute('SELECT d.*,u.tenant_id,u.object_id FROM web_connections d JOIN web_users u ON u.id=d.user_id WHERE d.id_hash=? AND d.active=1 AND d.expires_at>? AND u.active=1',(device_hash,int(self.clock()))).fetchone()
+            row = c.execute(
+                "SELECT d.*,u.tenant_id,u.object_id FROM web_connections d JOIN web_users u ON u.id=d.user_id WHERE d.id_hash=? AND d.active=1 AND d.expires_at>? AND u.active=1",
+                (device_hash, int(self.clock())),
+            ).fetchone()
         return dict(row) if row else None
 
-    def session_device(self,session):
-        with self.connect() as c: row=c.execute('SELECT device_hash FROM web_session_links WHERE session_hash=?',(session['id_hash'],)).fetchone()
-        device=self.device(row[0]) if row else None
-        if not device or device['user_id']!=session['user_id']: raise Missing()
+    def session_device(self, session):
+        with self.connect() as c:
+            row = c.execute(
+                "SELECT device_hash FROM web_session_links WHERE session_hash=?",
+                (session["id_hash"],),
+            ).fetchone()
+        device = self.device(row[0]) if row else None
+        if not device or device["user_id"] != session["user_id"]:
+            raise Missing()
         return device
 
-    def school_session(self,raw,idle_seconds):
-        session=self.session(raw)
-        if not session: return None
-        try: self.session_device(session)
-        except Missing: return None
+    def school_session(self, raw, idle_seconds):
+        session = self.session(raw)
+        if not session:
+            return None
+        try:
+            self.session_device(session)
+        except Missing:
+            return None
         with self.connect() as c:
-            row=c.execute('SELECT last_seen FROM web_session_links WHERE session_hash=?',(session['id_hash'],)).fetchone()
-            if not row or row[0]+idle_seconds<=self.clock():
-                c.execute('DELETE FROM web_sessions WHERE id_hash=?',(session['id_hash'],)); return None
-            c.execute('UPDATE web_session_links SET last_seen=? WHERE session_hash=?',(int(self.clock()),session['id_hash']))
+            row = c.execute(
+                "SELECT last_seen FROM web_session_links WHERE session_hash=?",
+                (session["id_hash"],),
+            ).fetchone()
+            if not row or row[0] + idle_seconds <= self.clock():
+                c.execute("DELETE FROM web_sessions WHERE id_hash=?", (session["id_hash"],))
+                return None
+            c.execute(
+                "UPDATE web_session_links SET last_seen=? WHERE session_hash=?",
+                (int(self.clock()), session["id_hash"]),
+            )
         return session
 
-    def lock_refresh(self,device_hash):
-        lease=secrets.token_hex(16); now=int(self.clock())
+    def lock_refresh(self, device_hash):
+        lease = secrets.token_hex(16)
+        now = int(self.clock())
         with self.connect() as c:
-            changed=c.execute('UPDATE web_connections SET refresh_lease=?,refresh_until=? WHERE id_hash=? AND active=1 AND expires_at>? AND refresh_until<=?',(lease,now+30,device_hash,now,now)).rowcount
+            changed = c.execute(
+                "UPDATE web_connections SET refresh_lease=?,refresh_until=? WHERE id_hash=? AND active=1 AND expires_at>? AND refresh_until<=?",
+                (lease, now + 30, device_hash, now, now),
+            ).rowcount
         return lease if changed else None
 
-    def save_refresh(self,device_hash,lease,token,lifetime,cache):
+    def save_refresh(self, device_hash, lease, token, lifetime, cache):
         with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE')
-            row=c.execute('SELECT credential_blob FROM web_connections WHERE id_hash=?',(device_hash,)).fetchone()
-            extra={'assignment_access':True} if row and self.unseal(row[0]).get('assignment_access') else {}
-            changed=c.execute("UPDATE web_connections SET credential_blob=?,token_expires=?,refresh_lease=NULL,refresh_until=0,version=version+1,state='connected' WHERE id_hash=? AND refresh_lease=? AND active=1 AND expires_at>?",(self.seal({'token':token,'cache':cache,**extra}),int(self.clock())+lifetime,device_hash,lease,int(self.clock()))).rowcount
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute(
+                "SELECT credential_blob FROM web_connections WHERE id_hash=?", (device_hash,)
+            ).fetchone()
+            extra = (
+                {"assignment_access": True}
+                if row and self.unseal(row[0]).get("assignment_access")
+                else {}
+            )
+            changed = c.execute(
+                "UPDATE web_connections SET credential_blob=?,token_expires=?,refresh_lease=NULL,refresh_until=0,version=version+1,state='connected' WHERE id_hash=? AND refresh_lease=? AND active=1 AND expires_at>?",
+                (
+                    self.seal({"token": token, "cache": cache, **extra}),
+                    int(self.clock()) + lifetime,
+                    device_hash,
+                    lease,
+                    int(self.clock()),
+                ),
+            ).rowcount
         return bool(changed)
 
-    def fail_connection(self,device_hash,lease=None):
+    def fail_connection(self, device_hash, lease=None):
         with self.connect() as c:
-            row=c.execute('SELECT user_id,refresh_lease FROM web_connections WHERE id_hash=?',(device_hash,)).fetchone()
-            if not row or (lease is not None and row[1]!=lease): return
-            c.execute("UPDATE web_connections SET credential_blob=?,token_expires=0,refresh_lease=NULL,refresh_until=0,state='reauth_required' WHERE id_hash=?",(self.seal({}),device_hash))
-            c.execute('DELETE FROM web_channel_access WHERE user_id=?',(row[0],))
-            c.execute('UPDATE web_school_sync SET checked_at=0 WHERE user_id=?',(row[0],))
-            c.execute('DELETE FROM web_sessions WHERE id_hash IN (SELECT session_hash FROM web_session_links WHERE device_hash=?)',(device_hash,))
+            row = c.execute(
+                "SELECT user_id,refresh_lease FROM web_connections WHERE id_hash=?", (device_hash,)
+            ).fetchone()
+            if not row or (lease is not None and row[1] != lease):
+                return
+            c.execute(
+                "UPDATE web_connections SET credential_blob=?,token_expires=0,refresh_lease=NULL,refresh_until=0,state='reauth_required' WHERE id_hash=?",
+                (self.seal({}), device_hash),
+            )
+            c.execute("DELETE FROM web_channel_access WHERE user_id=?", (row[0],))
+            c.execute("UPDATE web_school_sync SET checked_at=0 WHERE user_id=?", (row[0],))
+            c.execute(
+                "DELETE FROM web_sessions WHERE id_hash IN (SELECT session_hash FROM web_session_links WHERE device_hash=?)",
+                (device_hash,),
+            )
 
-    def revoke_device(self,device_hash,user_id=None):
+    def revoke_device(self, device_hash, user_id=None):
         with self.connect() as c:
-            row=c.execute('SELECT user_id FROM web_connections WHERE id_hash=?',(device_hash,)).fetchone()
-            if not row or (user_id and row[0]!=user_id): return
-            c.execute('DELETE FROM web_push_subscriptions WHERE device_hash=?',(device_hash,))
-            c.execute('DELETE FROM web_sessions WHERE id_hash IN (SELECT session_hash FROM web_session_links WHERE device_hash=?)',(device_hash,))
-            c.execute('UPDATE web_connections SET active=0,credential_blob=?,version=version+1 WHERE id_hash=?',(self.seal({}),device_hash))
-            c.execute('DELETE FROM web_channel_access WHERE user_id=?',(row[0],))
-            c.execute('UPDATE web_school_sync SET checked_at=0 WHERE user_id=?',(row[0],))
+            row = c.execute(
+                "SELECT user_id FROM web_connections WHERE id_hash=?", (device_hash,)
+            ).fetchone()
+            if not row or (user_id and row[0] != user_id):
+                return
+            c.execute("DELETE FROM web_push_subscriptions WHERE device_hash=?", (device_hash,))
+            c.execute(
+                "DELETE FROM web_sessions WHERE id_hash IN (SELECT session_hash FROM web_session_links WHERE device_hash=?)",
+                (device_hash,),
+            )
+            c.execute(
+                "UPDATE web_connections SET active=0,credential_blob=?,version=version+1 WHERE id_hash=?",
+                (self.seal({}), device_hash),
+            )
+            c.execute("DELETE FROM web_channel_access WHERE user_id=?", (row[0],))
+            c.execute("UPDATE web_school_sync SET checked_at=0 WHERE user_id=?", (row[0],))
 
-    def delete_task(self,user_id,item_id,version):
-        self.task(user_id,item_id)
+    def delete_task(self, user_id, item_id, version):
+        self.task(user_id, item_id)
         with self.connect() as c:
-            changed=c.execute('DELETE FROM web_personal_tasks WHERE user_id=? AND id=? AND version=?',
-                              (user_id,item_id,version)).rowcount
-            if changed!=1: raise Conflict()
-            c.execute("DELETE FROM web_reminder_rules WHERE user_id=? AND item_id=? AND source='personal'",
-                      (user_id,item_id))
+            changed = c.execute(
+                "DELETE FROM web_personal_tasks WHERE user_id=? AND id=? AND version=?",
+                (user_id, item_id, version),
+            ).rowcount
+            if changed != 1:
+                raise Conflict()
+            c.execute(
+                "DELETE FROM web_reminder_rules WHERE user_id=? AND item_id=? AND source='personal'",
+                (user_id, item_id),
+            )
 
-    def revoke_all(self,user_id):
-        with self.connect() as c: ids=[r[0] for r in c.execute('SELECT id_hash FROM web_connections WHERE user_id=?',(user_id,))]
-        for device_hash in ids: self.revoke_device(device_hash,user_id)
+    def revoke_all(self, user_id):
+        with self.connect() as c:
+            ids = [
+                r[0]
+                for r in c.execute(
+                    "SELECT id_hash FROM web_connections WHERE user_id=?", (user_id,)
+                )
+            ]
+        for device_hash in ids:
+            self.revoke_device(device_hash, user_id)
         super().revoke_all(user_id)
 
-    def due_devices(self,limit=5):
+    def due_devices(self, limit=5):
         with self.connect() as c:
-            rows=c.execute("SELECT id_hash FROM web_connections WHERE active=1 AND expires_at>? AND next_sync<=? AND state<>'reauth_required' ORDER BY next_sync LIMIT ?",(int(self.clock()),int(self.clock()),limit)).fetchall()
-        return [d for r in rows if (d:=self.device(r[0]))]
+            rows = c.execute(
+                "SELECT id_hash FROM web_connections WHERE active=1 AND expires_at>? AND next_sync<=? AND state<>'reauth_required' ORDER BY next_sync LIMIT ?",
+                (int(self.clock()), int(self.clock()), limit),
+            ).fetchall()
+        return [d for r in rows if (d := self.device(r[0]))]
 
-    def defer_device(self,device_hash,seconds=300):
-        with self.connect() as c: c.execute('UPDATE web_connections SET next_sync=? WHERE id_hash=?',(int(self.clock())+seconds,device_hash))
-
-    def worker_lock(self,owner):
+    def defer_device(self, device_hash, seconds=300):
         with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE'); c.execute("INSERT OR IGNORE INTO web_worker_lock VALUES(1,'',0)")
-            return bool(c.execute('UPDATE web_worker_lock SET owner=?,expires_at=? WHERE id=1 AND expires_at<=?',(owner,int(self.clock())+600,int(self.clock()))).rowcount)
+            c.execute(
+                "UPDATE web_connections SET next_sync=? WHERE id_hash=?",
+                (int(self.clock()) + seconds, device_hash),
+            )
 
-    def worker_unlock(self,owner):
-        with self.connect() as c: c.execute('UPDATE web_worker_lock SET expires_at=0 WHERE id=1 AND owner=?',(owner,))
+    def worker_lock(self, owner):
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("INSERT OR IGNORE INTO web_worker_lock VALUES(1,'',0)")
+            return bool(
+                c.execute(
+                    "UPDATE web_worker_lock SET owner=?,expires_at=? WHERE id=1 AND expires_at<=?",
+                    (owner, int(self.clock()) + 600, int(self.clock())),
+                ).rowcount
+            )
 
-    def cached_analysis(self,key,version):
-        with self.connect() as c: row=c.execute('SELECT payload_blob FROM web_source_cache WHERE cache_key=? AND version=?',(key,version)).fetchone()
+    def worker_unlock(self, owner):
+        with self.connect() as c:
+            c.execute("UPDATE web_worker_lock SET expires_at=0 WHERE id=1 AND owner=?", (owner,))
+
+    def cached_analysis(self, key, version):
+        with self.connect() as c:
+            row = c.execute(
+                "SELECT payload_blob FROM web_source_cache WHERE cache_key=? AND version=?",
+                (key, version),
+            ).fetchone()
         return self.unseal(row[0]) if row else None
 
-    def cache_analysis(self,key,channel,message,version,events):
+    def cache_analysis(self, key, channel, message, version, events):
         with self.connect() as c:
-            c.execute('INSERT INTO web_source_cache VALUES(?,?,?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET version=excluded.version,payload_blob=excluded.payload_blob,updated_at=excluded.updated_at',(key,channel,message,version,self.seal(events),int(self.clock())))
+            c.execute(
+                "INSERT INTO web_source_cache VALUES(?,?,?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET version=excluded.version,payload_blob=excluded.payload_blob,updated_at=excluded.updated_at",
+                (key, channel, message, version, self.seal(events), int(self.clock())),
+            )
 
-    def _publish_cached_events(self,c,user,allowed,events,now):
+    def _publish_cached_events(self, c, user, allowed, events, now):
         for e in events:
-            if e['channel_id'] not in allowed: raise ValueError('Source channel mismatch')
-            event_id=e['id'] if e['id'].startswith('direct:') else 'oracle:'+e['id']
-            fields={k:e.get(k) for k in ('title','notes','time','source_url','start_date','end_date','kind','source_version')}; fields['cancelled']=bool(e.get('cancelled',False))
-            version=source_hash(fields)
-            old=c.execute('SELECT channel_id FROM web_events WHERE id=?',(event_id,)).fetchone()
-            if old and old[0]!=e['channel_id']: raise ValueError('Event channel changed')
+            if e["channel_id"] not in allowed:
+                raise ValueError("Source channel mismatch")
+            event_id = e["id"] if e["id"].startswith("direct:") else "oracle:" + e["id"]
+            fields = {
+                k: e.get(k)
+                for k in (
+                    "title",
+                    "notes",
+                    "time",
+                    "source_url",
+                    "start_date",
+                    "end_date",
+                    "kind",
+                    "source_version",
+                )
+            }
+            fields["cancelled"] = bool(e.get("cancelled", False))
+            version = source_hash(fields)
+            old = c.execute("SELECT channel_id FROM web_events WHERE id=?", (event_id,)).fetchone()
+            if old and old[0] != e["channel_id"]:
+                raise ValueError("Event channel changed")
             if not old:
-                c.execute('INSERT INTO web_events(id,channel_id,start_date,end_date,kind,payload_blob,cancelled) VALUES(?,?,?,?,?,?,?)',(event_id,e['channel_id'],e['start_date'],e['end_date'],e['kind'],self.seal(fields),int(fields['cancelled'])))
-            seen=c.execute('SELECT seen_hash FROM web_user_source_versions WHERE user_id=? AND event_id=?',(user,event_id)).fetchone()
+                c.execute(
+                    "INSERT INTO web_events(id,channel_id,start_date,end_date,kind,payload_blob,cancelled) VALUES(?,?,?,?,?,?,?)",
+                    (
+                        event_id,
+                        e["channel_id"],
+                        e["start_date"],
+                        e["end_date"],
+                        e["kind"],
+                        self.seal(fields),
+                        int(fields["cancelled"]),
+                    ),
+                )
+            seen = c.execute(
+                "SELECT seen_hash FROM web_user_source_versions WHERE user_id=? AND event_id=?",
+                (user, event_id),
+            ).fetchone()
             if not seen:
-                c.execute('INSERT INTO web_user_source_versions VALUES(?,?,?)',(user,event_id,version))
+                c.execute(
+                    "INSERT INTO web_user_source_versions VALUES(?,?,?)", (user, event_id, version)
+                )
                 # First discovery shows the current source, even if another user saw an older version.
-                c.execute('INSERT INTO web_event_states(user_id,event_id,override_blob) VALUES(?,?,?) ON CONFLICT(user_id,event_id) DO UPDATE SET override_blob=excluded.override_blob',(user,event_id,self.seal(fields)))
-            elif seen[0]!=version:
-                change_id=digest(user+'|'+event_id+'|'+version)
-                c.execute("UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND source_hash<>? AND status='pending'",(user,event_id,version))
+                c.execute(
+                    "INSERT INTO web_event_states(user_id,event_id,override_blob) VALUES(?,?,?) ON CONFLICT(user_id,event_id) DO UPDATE SET override_blob=excluded.override_blob",
+                    (user, event_id, self.seal(fields)),
+                )
+            elif seen[0] != version:
+                change_id = digest(user + "|" + event_id + "|" + version)
+                c.execute(
+                    "UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND source_hash<>? AND status='pending'",
+                    (user, event_id, version),
+                )
                 # Reopen a revision only when it differs from the last source the user decided on.
-                c.execute("INSERT INTO web_changes(id,user_id,event_id,source_hash,payload_blob,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_blob=excluded.payload_blob,created_at=CASE WHEN web_changes.status='pending' THEN web_changes.created_at ELSE excluded.created_at END,status='pending'",(change_id,user,event_id,version,self.seal(fields),now))
+                c.execute(
+                    "INSERT INTO web_changes(id,user_id,event_id,source_hash,payload_blob,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_blob=excluded.payload_blob,created_at=CASE WHEN web_changes.status='pending' THEN web_changes.created_at ELSE excluded.created_at END,status='pending'",
+                    (change_id, user, event_id, version, self.seal(fields), now),
+                )
             else:
-                c.execute("UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND status='pending'",(user,event_id))
+                c.execute(
+                    "UPDATE web_changes SET status='superseded' WHERE user_id=? AND event_id=? AND status='pending'",
+                    (user, event_id),
+                )
 
-    def _progress_device(self,c,device,now):
-        if type(device.get('version')) is not int: raise Missing()
-        current=c.execute('''SELECT d.expires_at,d.ingest_at FROM web_connections d
+    def _progress_device(self, c, device, now):
+        if type(device.get("version")) is not int:
+            raise Missing()
+        current = c.execute(
+            """SELECT d.expires_at,d.ingest_at FROM web_connections d
             JOIN web_users u ON u.id=d.user_id WHERE d.id_hash=? AND d.user_id=?
             AND u.tenant_id=? AND d.version=? AND d.active=1 AND u.active=1
-            AND d.expires_at>? AND d.state<>'reauth_required' ''',
-            (device['id_hash'],device['user_id'],device['tenant_id'],device['version'],now)).fetchone()
-        if current is None: raise Missing()
+            AND d.expires_at>? AND d.state<>'reauth_required' """,
+            (device["id_hash"], device["user_id"], device["tenant_id"], device["version"], now),
+        ).fetchone()
+        if current is None:
+            raise Missing()
         return current
 
-    def materialize_cached_events(self,device):
-        if not getattr(self,'shared_ingestion_enabled',False): return 0
-        user=device['user_id']; tenant=device['tenant_id']
+    def materialize_cached_events(self, device):
+        if not getattr(self, "shared_ingestion_enabled", False):
+            return 0
+        user = device["user_id"]
+        tenant = device["tenant_id"]
         with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE')
-            now=int(self.clock())
-            current=self._progress_device(c,device,now)
-            status=c.execute('SELECT state FROM web_school_sync WHERE user_id=?',(user,)).fetchone()
-            if status is None or status[0] not in {'connected','checking'}: return 0
-            proofs=c.execute('''SELECT a.channel_id,a.valid_until FROM web_channel_access a
-                JOIN web_channels ch ON ch.id=a.channel_id WHERE a.user_id=? AND ch.tenant_id=?
-                ORDER BY a.channel_id''',(user,tenant)).fetchall()
-            allowed={row[0] for row in proofs if row[1]>now}
-            if not allowed:
-                if proofs: raise PermissionPending()
+            c.execute("BEGIN IMMEDIATE")
+            now = int(self.clock())
+            current = self._progress_device(c, device, now)
+            status = c.execute(
+                "SELECT state FROM web_school_sync WHERE user_id=?", (user,)
+            ).fetchone()
+            if status is None or status[0] not in {"connected", "checking"}:
                 return 0
-            expiry=min(row[1] for row in proofs if row[0] in allowed)
-            events=[]
+            proofs = c.execute(
+                """SELECT a.channel_id,a.valid_until FROM web_channel_access a
+                JOIN web_channels ch ON ch.id=a.channel_id WHERE a.user_id=? AND ch.tenant_id=?
+                ORDER BY a.channel_id""",
+                (user, tenant),
+            ).fetchall()
+            allowed = {row[0] for row in proofs if row[1] > now}
+            if not allowed:
+                if proofs:
+                    raise PermissionPending()
+                return 0
+            expiry = min(row[1] for row in proofs if row[0] in allowed)
+            events = []
             # Read inside the same write transaction; publication never renews permission.
-            for row in c.execute('''SELECT s.channel_id,s.payload_blob FROM web_source_cache s
+            for row in c.execute(
+                """SELECT s.channel_id,s.payload_blob FROM web_source_cache s
                 JOIN web_channel_access a ON a.channel_id=s.channel_id
                 JOIN web_channels ch ON ch.id=a.channel_id
                 WHERE a.user_id=? AND ch.tenant_id=? AND a.valid_until>?
-                ORDER BY s.cache_key''',(user,tenant,now)):
-                payload=self.unseal(row[1])
-                if not isinstance(payload,list) or any(not isinstance(e,dict) or e.get('channel_id')!=row[0] for e in payload):
-                    raise ValueError('Source cache channel mismatch')
+                ORDER BY s.cache_key""",
+                (user, tenant, now),
+            ):
+                payload = self.unseal(row[1])
+                if not isinstance(payload, list) or any(
+                    not isinstance(e, dict) or e.get("channel_id") != row[0] for e in payload
+                ):
+                    raise ValueError("Source cache channel mismatch")
                 events.extend(payload)
-            self._publish_cached_events(c,user,allowed,events,now)
-            finished=int(self.clock())
-            if current[0]<=finished: raise Missing()
-            if expiry<=finished: raise PermissionPending()
+            self._publish_cached_events(c, user, allowed, events, now)
+            finished = int(self.clock())
+            if current[0] <= finished:
+                raise Missing()
+            if expiry <= finished:
+                raise PermissionPending()
         return len(events)
 
-    def ingestion_pending(self,device):
-        if not getattr(self,'shared_ingestion_enabled',False): return False
+    def ingestion_pending(self, device):
+        if not getattr(self, "shared_ingestion_enabled", False):
+            return False
         with self.connect() as c:
-            now=int(self.clock())
-            try: current=self._progress_device(c,device,now)
-            except Missing: return False
-            status=c.execute('SELECT state FROM web_school_sync WHERE user_id=?',(device['user_id'],)).fetchone()
-            if status and status[0] not in {'connected','checking','not_connected'}: return False
+            now = int(self.clock())
+            try:
+                current = self._progress_device(c, device, now)
+            except Missing:
+                return False
+            status = c.execute(
+                "SELECT state FROM web_school_sync WHERE user_id=?", (device["user_id"],)
+            ).fetchone()
+            if status and status[0] not in {"connected", "checking", "not_connected"}:
+                return False
             # This local adapter has no shared channel ingestion lease table.
-            return current[1]<=now
+            return current[1] <= now
 
-    def commit_snapshot(self,device,channels,events,ttl,lease,*,ingestion=None):
-        now=int(self.clock()); user=device['user_id']; tenant=device['tenant_id']; allowed={ch['id'] for ch in channels}
+    def commit_snapshot(self, device, channels, events, ttl, lease, *, ingestion=None):
+        now = int(self.clock())
+        user = device["user_id"]
+        tenant = device["tenant_id"]
+        allowed = {ch["id"] for ch in channels}
         with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE')
-            active=c.execute('SELECT 1 FROM web_connections d JOIN web_users u ON u.id=d.user_id WHERE d.id_hash=? AND d.active=1 AND d.expires_at>? AND u.active=1',(device['id_hash'],now)).fetchone()
-            proof=c.execute('SELECT lease_until FROM web_school_sync WHERE user_id=?',(user,)).fetchone()
-            if not active or not proof or proof[0]!=lease or lease<=now: raise Missing()
-            c.execute('DELETE FROM web_channel_access WHERE user_id=?',(user,))
+            c.execute("BEGIN IMMEDIATE")
+            active = c.execute(
+                "SELECT 1 FROM web_connections d JOIN web_users u ON u.id=d.user_id WHERE d.id_hash=? AND d.active=1 AND d.expires_at>? AND u.active=1",
+                (device["id_hash"], now),
+            ).fetchone()
+            proof = c.execute(
+                "SELECT lease_until FROM web_school_sync WHERE user_id=?", (user,)
+            ).fetchone()
+            if not active or not proof or proof[0] != lease or lease <= now:
+                raise Missing()
+            c.execute("DELETE FROM web_channel_access WHERE user_id=?", (user,))
             for ch in channels:
-                prior=c.execute('SELECT tenant_id FROM web_channels WHERE id=?',(ch['id'],)).fetchone()
-                if prior and prior[0]!=tenant: raise ValueError('Tenant mismatch')
-                c.execute('INSERT INTO web_channels VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET label_blob=excluded.label_blob',(ch['id'],tenant,self.seal({'name':ch['name']})))
-                c.execute('INSERT INTO web_channel_access VALUES(?,?,?,?)',(user,ch['id'],now,now+ttl))
-            self._publish_cached_events(c,user,allowed,events,now)
-            finished_status=None
+                prior = c.execute(
+                    "SELECT tenant_id FROM web_channels WHERE id=?", (ch["id"],)
+                ).fetchone()
+                if prior and prior[0] != tenant:
+                    raise ValueError("Tenant mismatch")
+                c.execute(
+                    "INSERT INTO web_channels VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET label_blob=excluded.label_blob",
+                    (ch["id"], tenant, self.seal({"name": ch["name"]})),
+                )
+                c.execute(
+                    "INSERT INTO web_channel_access VALUES(?,?,?,?)",
+                    (user, ch["id"], now, now + ttl),
+                )
+            self._publish_cached_events(c, user, allowed, events, now)
+            finished_status = None
             if self.planner_enhancements_enabled and ingestion is not None:
-                finished_status=self.finish_ingestion_snapshot_in(c,device,ingestion)
-                finished=int(self.clock())
-                self._progress_device(c,device,finished)
-                if lease<=finished or now+ttl<=finished: raise Missing()
-                if finished_status is True and ingestion['_attempt_until']<=finished: raise Missing()
-            c.execute("UPDATE web_school_sync SET checked_at=?,state='connected',lease_until=0 WHERE user_id=?",(now,user))
+                finished_status = self.finish_ingestion_snapshot_in(c, device, ingestion)
+                finished = int(self.clock())
+                self._progress_device(c, device, finished)
+                if lease <= finished or now + ttl <= finished:
+                    raise Missing()
+                if finished_status is True and ingestion["_attempt_until"] <= finished:
+                    raise Missing()
+            c.execute(
+                "UPDATE web_school_sync SET checked_at=?,state='connected',lease_until=0 WHERE user_id=?",
+                (now, user),
+            )
             return finished_status
 
-    def _shared(self,user_id,tenant_id):
-        items=super()._shared(user_id,tenant_id)
-        with self.connect() as c: overrides={r[0]:self.unseal(r[1]) for r in c.execute('SELECT event_id,override_blob FROM web_event_states WHERE user_id=? AND override_blob IS NOT NULL',(user_id,))}
-        return [{**e,**{k:v for k,v in overrides.get(e['id'],{}).items() if k in {'title','notes','time','source_url','start_date','end_date','kind','cancelled'}}} for e in items]
-
-    def known_oracle_events(self,user,tenant,channels):
-        # Graph has just verified these channels; do not rely on expired cached ACLs.
-        allowed={ch['id'] for ch in channels}
-        if not allowed: return []
-        today=datetime.fromtimestamp(self.clock(),timezone(timedelta(hours=9))).date().isoformat()
+    def _shared(self, user_id, tenant_id):
+        items = super()._shared(user_id, tenant_id)
         with self.connect() as c:
-            rows=c.execute("SELECT e.*,s.override_blob FROM web_events e JOIN web_channels ch ON ch.id=e.channel_id JOIN web_user_source_versions v ON v.event_id=e.id AND v.user_id=? LEFT JOIN web_event_states s ON s.event_id=e.id AND s.user_id=v.user_id WHERE ch.tenant_id=? AND e.id LIKE 'oracle:%'",(user,tenant)).fetchall()
-        events=[]
-        fields={'title','notes','time','source_url','start_date','end_date','kind','cancelled','source_version'}
+            overrides = {
+                r[0]: self.unseal(r[1])
+                for r in c.execute(
+                    "SELECT event_id,override_blob FROM web_event_states WHERE user_id=? AND override_blob IS NOT NULL",
+                    (user_id,),
+                )
+            }
+        return [
+            {
+                **e,
+                **{
+                    k: v
+                    for k, v in overrides.get(e["id"], {}).items()
+                    if k
+                    in {
+                        "title",
+                        "notes",
+                        "time",
+                        "source_url",
+                        "start_date",
+                        "end_date",
+                        "kind",
+                        "cancelled",
+                    }
+                },
+            }
+            for e in items
+        ]
+
+    def known_oracle_events(self, user, tenant, channels):
+        # Graph has just verified these channels; do not rely on expired cached ACLs.
+        allowed = {ch["id"] for ch in channels}
+        if not allowed:
+            return []
+        today = (
+            datetime.fromtimestamp(self.clock(), timezone(timedelta(hours=9))).date().isoformat()
+        )
+        with self.connect() as c:
+            rows = c.execute(
+                "SELECT e.*,s.override_blob FROM web_events e JOIN web_channels ch ON ch.id=e.channel_id JOIN web_user_source_versions v ON v.event_id=e.id AND v.user_id=? LEFT JOIN web_event_states s ON s.event_id=e.id AND s.user_id=v.user_id WHERE ch.tenant_id=? AND e.id LIKE 'oracle:%'",
+                (user, tenant),
+            ).fetchall()
+        events = []
+        fields = {
+            "title",
+            "notes",
+            "time",
+            "source_url",
+            "start_date",
+            "end_date",
+            "kind",
+            "cancelled",
+            "source_version",
+        }
         for row in rows:
-            if row['channel_id'] not in allowed: continue
-            payload=self.unseal(row['payload_blob'])
-            if row['override_blob']: payload.update({k:v for k,v in self.unseal(row['override_blob']).items() if k in fields})
-            if payload.get('cancelled',False) or payload['end_date']<today: continue
-            events.append({**{k:payload.get(k) for k in fields},'id':row['id'][len('oracle:'):],'channel_id':row['channel_id']})
+            if row["channel_id"] not in allowed:
+                continue
+            payload = self.unseal(row["payload_blob"])
+            if row["override_blob"]:
+                payload.update(
+                    {k: v for k, v in self.unseal(row["override_blob"]).items() if k in fields}
+                )
+            if payload.get("cancelled", False) or payload["end_date"] < today:
+                continue
+            events.append(
+                {
+                    **{k: payload.get(k) for k in fields},
+                    "id": row["id"][len("oracle:") :],
+                    "channel_id": row["channel_id"],
+                }
+            )
         return events
 
-    def changes(self,user,tenant):
-        accessible={e['id']:e for e in self._shared(user,tenant)}
-        with self.connect() as c: rows=c.execute("SELECT * FROM web_changes WHERE user_id=? AND status='pending' ORDER BY created_at DESC",(user,)).fetchall()
-        return [{'id':r['id'],'event_id':r['event_id'],'before':accessible[r['event_id']],'after':self.unseal(r['payload_blob']),'created_at':r['created_at']} for r in rows if r['event_id'] in accessible]
-
-    def resolve_change(self,user,tenant,change_id,accept):
-        allowed={e['id'] for e in self._shared(user,tenant)}
+    def changes(self, user, tenant):
+        accessible = {e["id"]: e for e in self._shared(user, tenant)}
         with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE')
-            row=c.execute("SELECT * FROM web_changes WHERE id=? AND user_id=? AND status='pending'",(change_id,user)).fetchone()
-            if not row or row['event_id'] not in allowed: raise Missing()
-            if accept: c.execute('UPDATE web_event_states SET override_blob=? WHERE user_id=? AND event_id=?',(row['payload_blob'],user,row['event_id']))
-            c.execute('UPDATE web_user_source_versions SET seen_hash=? WHERE user_id=? AND event_id=?',(row['source_hash'],user,row['event_id']))
-            c.execute("UPDATE web_changes SET status=? WHERE id=?",('accepted' if accept else 'kept',change_id))
+            rows = c.execute(
+                "SELECT * FROM web_changes WHERE user_id=? AND status='pending' ORDER BY created_at DESC",
+                (user,),
+            ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "event_id": r["event_id"],
+                "before": accessible[r["event_id"]],
+                "after": self.unseal(r["payload_blob"]),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+            if r["event_id"] in accessible
+        ]
 
-    def save_feedback(self,user,message):
-        key=secrets.token_hex(16)
-        with self.connect() as c: c.execute('INSERT INTO web_feedback VALUES(?,?,?,?)',(key,user,self.seal({'message':message}),int(self.clock())))
+    def resolve_change(self, user, tenant, change_id, accept):
+        allowed = {e["id"] for e in self._shared(user, tenant)}
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute(
+                "SELECT * FROM web_changes WHERE id=? AND user_id=? AND status='pending'",
+                (change_id, user),
+            ).fetchone()
+            if not row or row["event_id"] not in allowed:
+                raise Missing()
+            if accept:
+                c.execute(
+                    "UPDATE web_event_states SET override_blob=? WHERE user_id=? AND event_id=?",
+                    (row["payload_blob"], user, row["event_id"]),
+                )
+            c.execute(
+                "UPDATE web_user_source_versions SET seen_hash=? WHERE user_id=? AND event_id=?",
+                (row["source_hash"], user, row["event_id"]),
+            )
+            c.execute(
+                "UPDATE web_changes SET status=? WHERE id=?",
+                ("accepted" if accept else "kept", change_id),
+            )
+
+    def save_feedback(self, user, message):
+        key = secrets.token_hex(16)
+        with self.connect() as c:
+            c.execute(
+                "INSERT INTO web_feedback VALUES(?,?,?,?)",
+                (key, user, self.seal({"message": message}), int(self.clock())),
+            )
         return key
 
-    def rules(self,user,item_id,source):
-        with self.connect() as c: row=c.execute('SELECT payload_blob FROM web_reminder_rules WHERE user_id=? AND item_id=? AND source=?',(user,item_id,source)).fetchone()
-        return self.unseal(row[0]) if row else {'offsets':[-1440,-60],'custom_times':[]}
-
-    def save_rules(self,user,item_id,source,values):
-        with self.connect() as c: c.execute('INSERT INTO web_reminder_rules VALUES(?,?,?,?) ON CONFLICT(user_id,item_id,source) DO UPDATE SET payload_blob=excluded.payload_blob',(user,item_id,source,self.seal(values)))
-
-    def subscribe(self,device,subscription):
-        endpoint=digest(subscription['endpoint']); key=secrets.token_hex(16)
+    def rules(self, user, item_id, source):
         with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE')
-            active=c.execute("SELECT 1 FROM web_connections d JOIN web_users u ON u.id=d.user_id WHERE d.id_hash=? AND d.user_id=? AND d.active=1 AND d.expires_at>? AND d.background=1 AND d.state<>'reauth_required' AND u.active=1",(device['id_hash'],device['user_id'],int(self.clock()))).fetchone()
-            if not active: raise Missing()
-            old=c.execute('SELECT id,device_hash FROM web_push_subscriptions WHERE endpoint_hash=?',(endpoint,)).fetchone()
-            if old and old[1]!=device['id_hash']: raise Conflict()
+            row = c.execute(
+                "SELECT payload_blob FROM web_reminder_rules WHERE user_id=? AND item_id=? AND source=?",
+                (user, item_id, source),
+            ).fetchone()
+        return self.unseal(row[0]) if row else {"offsets": [-1440, -60], "custom_times": []}
+
+    def save_rules(self, user, item_id, source, values):
+        with self.connect() as c:
+            c.execute(
+                "INSERT INTO web_reminder_rules VALUES(?,?,?,?) ON CONFLICT(user_id,item_id,source) DO UPDATE SET payload_blob=excluded.payload_blob",
+                (user, item_id, source, self.seal(values)),
+            )
+
+    def subscribe(self, device, subscription):
+        endpoint = digest(subscription["endpoint"])
+        key = secrets.token_hex(16)
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            active = c.execute(
+                "SELECT 1 FROM web_connections d JOIN web_users u ON u.id=d.user_id WHERE d.id_hash=? AND d.user_id=? AND d.active=1 AND d.expires_at>? AND d.background=1 AND d.state<>'reauth_required' AND u.active=1",
+                (device["id_hash"], device["user_id"], int(self.clock())),
+            ).fetchone()
+            if not active:
+                raise Missing()
+            old = c.execute(
+                "SELECT id,device_hash FROM web_push_subscriptions WHERE endpoint_hash=?",
+                (endpoint,),
+            ).fetchone()
+            if old and old[1] != device["id_hash"]:
+                raise Conflict()
             if old:
-                c.execute('UPDATE web_push_subscriptions SET subscription_blob=? WHERE id=?',(self.seal(subscription),old[0])); return old[0]
-            if c.execute('SELECT count(*) FROM web_push_subscriptions WHERE device_hash=?',(device['id_hash'],)).fetchone()[0]>=3: raise Conflict()
-            c.execute('INSERT INTO web_push_subscriptions VALUES(?,?,?,?,?)',(key,device['id_hash'],endpoint,self.seal(subscription),int(self.clock())))
+                c.execute(
+                    "UPDATE web_push_subscriptions SET subscription_blob=? WHERE id=?",
+                    (self.seal(subscription), old[0]),
+                )
+                return old[0]
+            if (
+                c.execute(
+                    "SELECT count(*) FROM web_push_subscriptions WHERE device_hash=?",
+                    (device["id_hash"],),
+                ).fetchone()[0]
+                >= 3
+            ):
+                raise Conflict()
+            c.execute(
+                "INSERT INTO web_push_subscriptions VALUES(?,?,?,?,?)",
+                (key, device["id_hash"], endpoint, self.seal(subscription), int(self.clock())),
+            )
         return key
 
-    def subscriptions(self,device_hash):
-        with self.connect() as c: rows=c.execute('SELECT * FROM web_push_subscriptions WHERE device_hash=?',(device_hash,)).fetchall()
-        return [{**dict(r),'subscription':self.unseal(r['subscription_blob'])} for r in rows]
-
-    def unsubscribe(self,device_hash):
-        with self.connect() as c: c.execute('DELETE FROM web_push_subscriptions WHERE device_hash=?',(device_hash,))
-
-    def unsubscribe_subscription(self,device_hash,subscription_id):
-        with self.connect() as c: c.execute('DELETE FROM web_push_subscriptions WHERE id=? AND device_hash=?',(subscription_id,device_hash))
-
-    def claim_delivery(self,key,subscription_id):
-        now=int(self.clock())
+    def subscriptions(self, device_hash):
         with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE')
-            current=c.execute("SELECT 1 FROM web_push_subscriptions s JOIN web_connections d ON d.id_hash=s.device_hash JOIN web_users u ON u.id=d.user_id WHERE s.id=? AND d.active=1 AND d.expires_at>? AND d.background=1 AND d.state<>'reauth_required' AND u.active=1",(subscription_id,now)).fetchone()
-            if not current: return False
-            c.execute('DELETE FROM web_deliveries WHERE created_at<?',(now-35*86400,))
-            c.execute('INSERT OR IGNORE INTO web_deliveries(id,subscription_id,created_at) VALUES(?,?,?)',(key,subscription_id,now))
-            return bool(c.execute("UPDATE web_deliveries SET lease_until=?,attempts=attempts+1 WHERE id=? AND state='pending' AND attempts<5 AND next_attempt<=? AND lease_until<=?",(now+30,key,now,now)).rowcount)
+            rows = c.execute(
+                "SELECT * FROM web_push_subscriptions WHERE device_hash=?", (device_hash,)
+            ).fetchall()
+        return [{**dict(r), "subscription": self.unseal(r["subscription_blob"])} for r in rows]
 
-    def finish_delivery(self,key,success):
-        with self.connect() as c: c.execute('UPDATE web_deliveries SET state=?,lease_until=0,next_attempt=? WHERE id=?',('sent' if success else 'pending',int(self.clock())+60,key))
-
-    def next_channels(self,user,channels,count):
-        if not channels: return []
-        channels=sorted(channels,key=lambda ch:ch['id'])
+    def unsubscribe(self, device_hash):
         with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE'); c.execute('INSERT OR IGNORE INTO web_ingest_cursor VALUES(?,0)',(user,))
-            offset=c.execute('SELECT cursor FROM web_ingest_cursor WHERE user_id=?',(user,)).fetchone()[0]%len(channels)
-            selected=[channels[(offset+i)%len(channels)] for i in range(min(count,len(channels)))]
-            c.execute('UPDATE web_ingest_cursor SET cursor=? WHERE user_id=?',((offset+len(selected))%len(channels),user))
+            c.execute("DELETE FROM web_push_subscriptions WHERE device_hash=?", (device_hash,))
+
+    def unsubscribe_subscription(self, device_hash, subscription_id):
+        with self.connect() as c:
+            c.execute(
+                "DELETE FROM web_push_subscriptions WHERE id=? AND device_hash=?",
+                (subscription_id, device_hash),
+            )
+
+    def claim_delivery(self, key, subscription_id):
+        now = int(self.clock())
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute(
+                "SELECT 1 FROM web_push_subscriptions s JOIN web_connections d ON d.id_hash=s.device_hash JOIN web_users u ON u.id=d.user_id WHERE s.id=? AND d.active=1 AND d.expires_at>? AND d.background=1 AND d.state<>'reauth_required' AND u.active=1",
+                (subscription_id, now),
+            ).fetchone()
+            if not current:
+                return False
+            c.execute("DELETE FROM web_deliveries WHERE created_at<?", (now - 35 * 86400,))
+            c.execute(
+                "INSERT OR IGNORE INTO web_deliveries(id,subscription_id,created_at) VALUES(?,?,?)",
+                (key, subscription_id, now),
+            )
+            return bool(
+                c.execute(
+                    "UPDATE web_deliveries SET lease_until=?,attempts=attempts+1 WHERE id=? AND state='pending' AND attempts<5 AND next_attempt<=? AND lease_until<=?",
+                    (now + 30, key, now, now),
+                ).rowcount
+            )
+
+    def finish_delivery(self, key, success):
+        with self.connect() as c:
+            c.execute(
+                "UPDATE web_deliveries SET state=?,lease_until=0,next_attempt=? WHERE id=?",
+                ("sent" if success else "pending", int(self.clock()) + 60, key),
+            )
+
+    def next_channels(self, user, channels, count):
+        if not channels:
+            return []
+        channels = sorted(channels, key=lambda ch: ch["id"])
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("INSERT OR IGNORE INTO web_ingest_cursor VALUES(?,0)", (user,))
+            offset = c.execute(
+                "SELECT cursor FROM web_ingest_cursor WHERE user_id=?", (user,)
+            ).fetchone()[0] % len(channels)
+            selected = [
+                channels[(offset + i) % len(channels)] for i in range(min(count, len(channels)))
+            ]
+            c.execute(
+                "UPDATE web_ingest_cursor SET cursor=? WHERE user_id=?",
+                ((offset + len(selected)) % len(channels), user),
+            )
         return selected
 
-    def cached_messages(self,channel):
-        with self.connect() as c: rows=c.execute('SELECT message_id,version,payload_blob FROM web_source_cache WHERE channel_id=? ORDER BY updated_at ASC',(channel,)).fetchall()
-        return {r[0]:{'version':r[1],'events':self.unseal(r[2])} for r in rows}
+    def cached_messages(self, channel):
+        with self.connect() as c:
+            rows = c.execute(
+                "SELECT message_id,version,payload_blob FROM web_source_cache WHERE channel_id=? ORDER BY updated_at ASC",
+                (channel,),
+            ).fetchall()
+        return {r[0]: {"version": r[1], "events": self.unseal(r[2])} for r in rows}
 
-    def catalog_events(self,channels):
+    def catalog_events(self, channels):
         # The bounded recheck queue must not truncate the authoritative catalog.
-        result=[]
+        result = []
         with self.connect() as c:
             for channel in dict.fromkeys(channels):
-                for row in c.execute('SELECT payload_blob FROM web_source_cache WHERE channel_id=? ORDER BY message_id',(channel,)):
+                for row in c.execute(
+                    "SELECT payload_blob FROM web_source_cache WHERE channel_id=? ORDER BY message_id",
+                    (channel,),
+                ):
                     result.extend(self.unseal(row[0]))
         return result
 
-    def begin_sync(self,user_id,ttl,*,preserve_access=False):
-        if type(preserve_access) is not bool or (preserve_access and not getattr(self,'shared_ingestion_enabled',False)):
-            raise ValueError('Shared ingestion is required to preserve access')
-        now=int(self.clock())
+    def begin_sync(self, user_id, ttl, *, preserve_access=False):
+        if type(preserve_access) is not bool or (
+            preserve_access and not getattr(self, "shared_ingestion_enabled", False)
+        ):
+            raise ValueError("Shared ingestion is required to preserve access")
+        now = int(self.clock())
         with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE'); c.execute('INSERT OR IGNORE INTO web_school_sync(user_id) VALUES(?)',(user_id,))
-            row=c.execute('SELECT checked_at,lease_until FROM web_school_sync WHERE user_id=?',(user_id,)).fetchone()
-            if row[1]>now or row[0]+ttl>now: return False
-            lease=now+300
-            c.execute("UPDATE web_school_sync SET lease_until=?,state='checking' WHERE user_id=?",(lease,user_id))
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("INSERT OR IGNORE INTO web_school_sync(user_id) VALUES(?)", (user_id,))
+            row = c.execute(
+                "SELECT checked_at,lease_until FROM web_school_sync WHERE user_id=?", (user_id,)
+            ).fetchone()
+            if row[1] > now or row[0] + ttl > now:
+                return False
+            lease = now + 300
+            c.execute(
+                "UPDATE web_school_sync SET lease_until=?,state='checking' WHERE user_id=?",
+                (lease, user_id),
+            )
             if not preserve_access:
-                c.execute('DELETE FROM web_channel_access WHERE user_id=?',(user_id,))
+                c.execute("DELETE FROM web_channel_access WHERE user_id=?", (user_id,))
         return lease
 
-    def mark_ingested(self,device_hash):
-        with self.connect() as c: c.execute('UPDATE web_connections SET ingest_at=? WHERE id_hash=?',(int(self.clock())+300,device_hash))
-
-    def request_ingestion(self,device_hash):
-        now=int(self.clock())
+    def mark_ingested(self, device_hash):
         with self.connect() as c:
-            changed=bool(c.execute('''UPDATE web_connections SET ingest_at=0,next_sync=?
+            c.execute(
+                "UPDATE web_connections SET ingest_at=? WHERE id_hash=?",
+                (int(self.clock()) + 300, device_hash),
+            )
+
+    def request_ingestion(self, device_hash):
+        now = int(self.clock())
+        with self.connect() as c:
+            changed = bool(
+                c.execute(
+                    """UPDATE web_connections SET ingest_at=0,next_sync=?
                 WHERE id_hash=? AND active=1 AND expires_at>? AND state<>'reauth_required'
-                AND EXISTS(SELECT 1 FROM web_users u WHERE u.id=web_connections.user_id AND u.active=1)''',
-                (now,device_hash,now)).rowcount)
+                AND EXISTS(SELECT 1 FROM web_users u WHERE u.id=web_connections.user_id AND u.active=1)""",
+                    (now, device_hash, now),
+                ).rowcount
+            )
             if changed and self.planner_enhancements_enabled:
-                self._queue_ingestion_in(c,device_hash,now)
+                self._queue_ingestion_in(c, device_hash, now)
             return changed
 
-    def has_pending_change(self,user,event):
-        with self.connect() as c: return bool(c.execute("SELECT 1 FROM web_changes WHERE user_id=? AND event_id=? AND status='pending'",(user,event)).fetchone())
+    def has_pending_change(self, user, event):
+        with self.connect() as c:
+            return bool(
+                c.execute(
+                    "SELECT 1 FROM web_changes WHERE user_id=? AND event_id=? AND status='pending'",
+                    (user, event),
+                ).fetchone()
+            )
 
-    def touch_analysis(self,key):
-        with self.connect() as c: c.execute('UPDATE web_source_cache SET updated_at=? WHERE cache_key=?',(int(self.clock()),key))
+    def touch_analysis(self, key):
+        with self.connect() as c:
+            c.execute(
+                "UPDATE web_source_cache SET updated_at=? WHERE cache_key=?",
+                (int(self.clock()), key),
+            )
 
     def maintenance(self):
-        now=int(self.clock())
+        now = int(self.clock())
         with self.connect() as c:
-            expired=[r[0] for r in c.execute('SELECT id_hash FROM web_connections WHERE active=1 AND expires_at<=?',(now,))]
-        for device_hash in expired: self.revoke_device(device_hash)
+            expired = [
+                r[0]
+                for r in c.execute(
+                    "SELECT id_hash FROM web_connections WHERE active=1 AND expires_at<=?", (now,)
+                )
+            ]
+        for device_hash in expired:
+            self.revoke_device(device_hash)
         with self.connect() as c:
-            c.execute('DELETE FROM web_sessions WHERE expires_at<=?',(now,))
-            c.execute('DELETE FROM web_auth_flows WHERE expires_at<=?',(now,))
-            c.execute('DELETE FROM web_security_audit WHERE at<?',(now-7*86400,))
-            c.execute('DELETE FROM web_source_cache WHERE updated_at<?',(now-90*86400,))
-
+            c.execute("DELETE FROM web_sessions WHERE expires_at<=?", (now,))
+            c.execute("DELETE FROM web_auth_flows WHERE expires_at<=?", (now,))
+            c.execute("DELETE FROM web_security_audit WHERE at<?", (now - 7 * 86400,))
+            c.execute("DELETE FROM web_source_cache WHERE updated_at<?", (now - 90 * 86400,))

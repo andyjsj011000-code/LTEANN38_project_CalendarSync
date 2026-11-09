@@ -1,4 +1,5 @@
 """Microsoft sign-in adapter. Browser-provided identity claims are never trusted."""
+
 from uuid import UUID
 
 
@@ -28,7 +29,9 @@ class MicrosoftIdentity:
     def begin(self):
         # MSAL generates state, nonce, and the PKCE verifier. Keep the entire flow
         # encrypted on the server; only a random reference goes into the browser.
-        flow = self._application().initiate_auth_code_flow(scopes=[], redirect_uri=self.settings.callback_url)
+        flow = self._application().initiate_auth_code_flow(
+            scopes=[], redirect_uri=self.settings.callback_url
+        )
         if not flow.get("auth_uri") or not flow.get("state"):
             raise Unavailable("Microsoft sign-in could not be started")
         return flow

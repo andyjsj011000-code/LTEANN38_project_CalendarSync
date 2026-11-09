@@ -1,4 +1,5 @@
 """Build a deterministic, source-only beta ZIP without runtime secrets or data."""
+
 from hashlib import sha256
 from pathlib import Path
 import zipfile
@@ -8,10 +9,27 @@ def build(release_directory=None):
     beta = Path(__file__).resolve().parent
     repo = beta.parent
     source = repo / "web_service"
-    allowed_web = ["__init__.py", "api.py", "beta.py", "config.py", "identity.py", "schemas.py", "storage.py", "schema.sql"]
-    files = {name: beta / name for name in ("start_beta.py", "start_beta.cmd", "requirements-beta.txt", "README.md")}
+    allowed_web = [
+        "__init__.py",
+        "api.py",
+        "beta.py",
+        "config.py",
+        "identity.py",
+        "schemas.py",
+        "storage.py",
+        "schema.sql",
+    ]
+    files = {
+        name: beta / name
+        for name in ("start_beta.py", "start_beta.cmd", "requirements-beta.txt", "README.md")
+    }
     files.update({"web_service/" + name: source / name for name in allowed_web})
-    files.update({"web_service/static/" + name: source / "static" / name for name in ("index.html", "beta.css", "beta-calendar.js", "beta.js")})
+    files.update(
+        {
+            "web_service/static/" + name: source / "static" / name
+            for name in ("index.html", "beta.css", "beta-calendar.js", "beta.js")
+        }
+    )
     files["LICENSE"] = repo / "LICENSE"
     release_dir = Path(release_directory) if release_directory is not None else beta / "releases"
     release_dir.mkdir(parents=True, exist_ok=True)
@@ -19,7 +37,9 @@ def build(release_directory=None):
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name, path in sorted(files.items()):
             assert path.is_file() and path.resolve().is_relative_to(repo.resolve())
-            assert not any(part in {"var", ".env", "__pycache__", ".test-tmp"} for part in path.parts)
+            assert not any(
+                part in {"var", ".env", "__pycache__", ".test-tmp"} for part in path.parts
+            )
             info = zipfile.ZipInfo(name, date_time=(2026, 10, 22, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
@@ -32,9 +52,14 @@ def build(release_directory=None):
         assert archive.testzip() is None
         assert set(archive.namelist()) == set(files)
     checksum = sha256(target.read_bytes()).hexdigest()
-    checksums = ''.join(f"{sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in sorted(release_dir.glob('CalendarSync_Beta_*.zip')))
+    checksums = "".join(
+        f"{sha256(p.read_bytes()).hexdigest()}  {p.name}\n"
+        for p in sorted(release_dir.glob("CalendarSync_Beta_*.zip"))
+    )
     (release_dir / "SHA256SUMS.txt").write_text(checksums, encoding="ascii")
-    print(f"Built {target.name}: {target.stat().st_size} bytes, {len(files)} files, SHA256 {checksum}")
+    print(
+        f"Built {target.name}: {target.stat().st_size} bytes, {len(files)} files, SHA256 {checksum}"
+    )
     return target
 
 
