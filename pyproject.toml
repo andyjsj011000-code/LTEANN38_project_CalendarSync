@@ -36,6 +36,9 @@ include = [
     "web_service/source_updates.py",
     "web_service/connections.py",
     "web_service/direct_source.py",
+    "web_service/personal_routes.py",
+    "web_service/request_dependencies.py",
+    "web_service/settings_routes.py",
     "tests_web/support/fakes.py",
     "tests_web/typing_contracts.py",
 ]
