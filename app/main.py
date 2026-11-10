@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 
+# 설정에 따른 DB 초기화 후 스케줄러를 시작하고 앱이 종료될 때 스케줄러도 중지한다.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.RESET_DB:

@@ -30,6 +30,7 @@ class ServerComponents:
     sender: Any = field(repr=False)
 
 
+# 환경 설정으로 기본 어댑터를 선택하되 명시적으로 주입한 객체는 유지하며 DB 초기화는 하지 않는다.
 def compose_server(
     settings=None,
     database=None,

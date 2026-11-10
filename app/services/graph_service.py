@@ -55,6 +55,7 @@ class GraphService:
             "Content-Type": "application/json"
         }
 
+    # 동시 요청 수를 제한하고 요청 제한·첫 인증 실패·네트워크 오류에 맞춰 Graph 요청을 재시도한다.
     async def _request_with_retry(
         self, 
         method: str, 
@@ -112,6 +113,7 @@ class GraphService:
             logger.error(f"[Graph API] 조회 중 알 수 없는 에러: {e}")
             return None
         
+    # Graph의 다음 페이지 링크가 끝날 때까지 조회해 전체 항목을 하나의 목록으로 모은다.
     async def _get_all_pages(self, url: str) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
 

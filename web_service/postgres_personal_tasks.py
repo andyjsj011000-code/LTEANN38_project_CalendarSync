@@ -91,6 +91,7 @@ class PostgresPersonalTasks:
             raise Missing()
         raise Conflict()
 
+    # 사용자 잠금과 일정 버전을 확인해 본인의 일정만 수정하고 항목 부재와 수정 충돌을 구분한다.
     def update_task(
         self, user_id: str, item_id: str, payload: TaskPayload, version: int
     ) -> PersonalTask:
@@ -113,6 +114,7 @@ class PostgresPersonalTasks:
                 self._missing_or_conflict(db, user_id, item_id)
             return self._value(row)
 
+    # 명시된 완료·숨김 필드만 갱신하며 버전이 바뀐 일정에는 이전 화면의 상태를 덮어쓰지 않는다.
     def task_state(
         self, user_id: str, item_id: str, values: TaskChanges, version: int
     ) -> PersonalTask:

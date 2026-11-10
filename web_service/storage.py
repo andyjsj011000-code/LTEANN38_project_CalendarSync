@@ -155,6 +155,7 @@ class Database:
             )
         return raw
 
+    # 인증 흐름을 조회하면서 즉시 삭제해 같은 로그인 응답이 두 번 사용되지 않게 한다.
     def consume_flow(self, raw):
         if not raw or len(raw) > 128:
             raise Missing()
@@ -254,6 +255,7 @@ class Database:
             ).fetchall()
         return personal_agenda_result([self._task_value(row) for row in rows], day)
 
+    # 소유자를 확인하고 전달된 버전이 현재 값과 같을 때만 개인 일정 내용을 수정한다.
     def update_task(
         self, user_id: str, item_id: str, payload: TaskPayload, version: int
     ) -> PersonalTask:
@@ -274,6 +276,7 @@ class Database:
                 raise Conflict()
         return self.task(user_id, item_id)
 
+    # 전달된 완료·숨김 값만 반영하며 다른 화면에서 먼저 수정한 경우 버전 충돌을 반환한다.
     def task_state(
         self, user_id: str, item_id: str, values: TaskChanges, version: int
     ) -> PersonalTask:
@@ -301,6 +304,7 @@ class Database:
             if cursor.rowcount != 1:
                 raise Conflict()
 
+    # 아직 유효한 사용자별 채널 권한 범위에서만 공용 일정을 읽고 개인 표시 상태를 합친다.
     def _shared(self, user_id, tenant_id):
         with self.connect() as c:
             rows = c.execute(

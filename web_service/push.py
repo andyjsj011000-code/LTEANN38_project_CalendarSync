@@ -136,6 +136,7 @@ class Notifications:
     def __init__(self, db, sender):
         self.db, self.sender = db, sender
 
+    # 아침 알림과 종료 시각 기준 예약 알림 후보를 계산하며 완료·취소·변경 검토 중인 항목을 제외한다.
     def due(self, user, tenant, *, only_key=None):
         now = datetime.fromtimestamp(self.db.clock(), KST)
         today = now.date().isoformat()
@@ -204,6 +205,7 @@ class Notifications:
                         )
         return candidates
 
+    # 발송 처리권 확보 후 장치·일정·현재 구독을 다시 확인하고 전송 결과에 따라 재시도나 구독 정리를 수행한다.
     def dispatch(self, device):
         if not self.sender.configured or not self.db.device(device["id_hash"]):
             return 0

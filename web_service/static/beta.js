@@ -40,6 +40,7 @@
     const el = $('#toast'); el.textContent = message; el.className = 'toast' + (error ? ' error' : ''); el.hidden = false;
     clearTimeout(toastTimer); toastTimer = setTimeout(() => {el.hidden = true;}, 6000);
   }
+  // CSRF 헤더·취소·시간 제한을 공통 적용하며, 쓰기 시간 초과는 서버 처리 실패로 단정하지 않는다.
   async function api(path, options = {}) {
     const {body, signal, timeout, ...rest} = options;
     const read = ['GET', 'HEAD'].includes((rest.method || 'GET').toUpperCase());
@@ -136,6 +137,7 @@
     if (S.connection?.teams_verified === true && S.connection?.state === 'connected') return false;
     return S.connection?.retryable === true || S.connection?.state === 'checking';
   }
+  // Teams 데이터와 관련 팝업만 제거해 사용자의 개인 일정은 화면에 남긴다.
   function redactTeams(unverified = true) {
     S.teamsSnapshotPending = false;
     if (unverified) S.teamsUnverified = true;
@@ -146,6 +148,7 @@
     if (dialogContainsTeams && modal.open) {dialogEpoch++; modal.close(); modal.replaceChildren();}
     if (detailItem?.source === 'teams') detailItem = null;
   }
+  // 권한 확인이 지연되면 서버가 허용한 범위에서 현재 세션에 이미 표시한 일정만 임시 유지한다.
   function suspendTeams(retain, channels) {
     if (!retain || ['not_connected','reauth_required','account_not_allowed','source_not_configured'].includes(S.connection?.state)) {redactTeams(); return;}
     // Retain only the already-rendered schedules in this signed-in session.
@@ -220,6 +223,7 @@
       finally {if (activeView(epoch)) {ingestionRefresh = false; scheduleIngestionRefresh();}}
     }, 3000);
   }
+  // 개인 일정을 별도로 불러오고, 현재 로그인·수정 세대와 맞는 조회 결과만 화면에 반영한다.
   async function load({background = false, afterSync = false, checkingRetry = false, ingestionRetry = false, mutationVersion} = {}) {
     if (!S.me) return;
     if (S.syncing && !afterSync) {if (!S.busy) toast('Teams 공지를 가져온 뒤 화면을 갱신해요. 현재 일정은 계속 볼 수 있어요.'); return;}
@@ -633,6 +637,7 @@
     const status = $('#mutation-status');
     if (status && modal.open && epoch === dialogEpoch) {status.textContent = message; status.hidden = !message; status.setAttribute('role', error ? 'alert' : 'status');}
   }
+  // 저장 이전에 시작한 목록·월별 조회를 무효화해 늦은 응답이 최신 화면을 덮어쓰지 못하게 한다.
   function invalidateDataReads() {
     S.epoch++; activeLoad?.abort(); activeLoad = null;
     monthEpoch++; monthRequest?.abort(); monthRequest = null; if (!S.syncing) S.pendingMonth = '';
@@ -641,6 +646,7 @@
   function lockWriteControls() {
     document.querySelectorAll('button,input,select,textarea').forEach(el => {if (!el.disabled && !['close', 'logout', 'disconnect-device', 'logout-all'].includes(el.dataset.action)) {el.disabled = true; el.dataset.locked = '1';}});
   }
+  // 중복 저장을 막고 수정 세대를 갱신하며, 저장 실패와 저장 후 화면 갱신 실패를 구분해 안내한다.
   async function mutate(operation, message, clearQuick = false, onSaved, pendingMessage = '저장 중…') {
     if (S.busy) return;
     S.busy = true;
@@ -855,6 +861,7 @@
       return mutate(() => api(testServer() ? '/api/feedback' : '/api/beta/feedback', {method: 'POST', body: {message}}), '의견을 이 베타 서버에 저장했어요.');
     }
   });
+  // 서비스 설정과 로그인 사용자를 확인한 뒤 해당 세션의 초기 일정 화면을 불러온다.
   async function boot() {
     const epoch = authEpoch;
     if (location.protocol === 'file:') {root.innerHTML = '<section class="login-wrap"><div class="login-card"><h1>실행 파일로 시작해 주세요</h1><p>압축을 푼 뒤 start_beta.cmd를 실행하면 브라우저가 열려요. HTML 파일만 열면 데이터를 저장할 서버가 실행되지 않아요.</p></div></section>'; return;}
@@ -872,6 +879,7 @@
       clearPrivate(); root.innerHTML = '<section class="login-wrap"><div class="login-card" role="alert"><h1>연결을 확인하지 못했어요</h1><p>서버 응답이 늦거나 연결이 불안정할 수 있어요. 잠시 후 다시 연결해 주세요.</p><button class="primary" data-action="retry-boot">다시 연결</button></div></section>';
     }
   }
+  // 수동 수집을 요청하고 진행 중인 저장이 정리된 뒤 최신 목록을 다시 불러온다.
   async function syncTeams() {
     if (!testServer() || S.syncing) return;
     const epoch = authEpoch;
@@ -966,6 +974,7 @@
     idleTimer = setTimeout(expireIdle, delay);
     if (S.me && Date.now() - lastSessionCheckAt >= 60000) checkResumedSession();
   }
+  // 화면 복귀 시 자동 조회를 잠시 멈추고 로그인 사용자와 CSRF 토큰이 같은 세션인지 재확인한다.
   async function checkResumedSession() {
     if (!S.me || resumeCheck) return;
     const check = {epoch: authEpoch, id: S.me.id, csrf: S.me.csrf_token};

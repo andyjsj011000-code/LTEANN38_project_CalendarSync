@@ -24,6 +24,7 @@ SessionDependency = Callable[[Request], SessionIdentity]
 def create_session_dependency(settings, db, session_cookie, integration=None) -> SessionDependency:
     """Bind one application's collaborators without storing request state."""
 
+    # 세션·학교 테넌트를 확인하고 쓰기 요청의 Origin·CSRF 검사 후 앱별 추가 검사를 실행한다.
     def current_session(request: Request) -> SessionIdentity:
         session = db.session(request.cookies.get(session_cookie))
         if not session or (settings.tenant_id and session["tenant_id"] != settings.tenant_id):

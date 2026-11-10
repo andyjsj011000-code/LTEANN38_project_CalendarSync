@@ -37,6 +37,7 @@ class _History:
     def plan(self, feature: str | None = None) -> dict:
         return schema_plan(self.profile, feature)
 
+    # 실제 스키마와 기록된 체크섬·의존 관계를 비교해 누락되거나 임의로 바뀐 변경 이력을 확인한다.
     def _inspect(self, db) -> dict:
         names = table_names(db, self.backend)
         if "web_schema_version" not in names or [
@@ -128,6 +129,7 @@ class _History:
     def upgrade(self, feature: str, *, expected_sha256: str) -> dict:
         return self._change(feature, expected_sha256)
 
+    # 검토한 계획의 해시가 일치할 때만 기존 스키마 기준선을 기록하거나 선택 기능 스키마를 추가한다.
     def _change(self, feature: str | None, expected_sha256: str) -> dict:
         plan = self.plan(feature)
         if (

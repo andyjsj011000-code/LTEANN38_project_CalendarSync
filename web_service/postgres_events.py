@@ -87,6 +87,7 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
         if user is None or user[0] != tenant_id or not user[1]:
             raise Missing()
 
+    # 일정과 접근 권한을 잠근 후 만료를 다시 확인하며, 권한 갱신 필요와 항목 부재를 구분한다.
     def _lock_event_access(self, db, user_id, tenant_id, event_id):
         self._lock_user(db, user_id, tenant_id)
         proof = db.execute(
@@ -231,6 +232,7 @@ class PostgresEvents(PostgresPersonalTasks, PostgresChannels):
             if row[1] in accessible
         ]
 
+    # 현재 변경 건의 권한·대기 상태를 재확인해 다른 화면의 결정이나 새 변경을 잘못 덮어쓰지 않게 한다.
     def resolve_change(self, user_id, tenant_id, change_id, accept):
         from .storage import Conflict
 

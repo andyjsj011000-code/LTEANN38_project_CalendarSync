@@ -114,6 +114,7 @@ class SyncService:
         raw_str = f"{formatted_title}|{action.start_datetime}|{action.end_datetime}|{action.location}|{action.description}"
         return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
+    # AI가 결정한 작업을 분류해 채널 사용자들의 일정 생성·수정·삭제 처리로 연결한다.
     async def process_rag_actions(
         self,
         db: Session,
@@ -192,6 +193,7 @@ class SyncService:
             logger.error(f"캘린더 CREATE Fan-out 실패: {e}")
             return None
 
+    # 날짜와 내용 중복을 확인해 마스터 일정을 만든 뒤 대상 사용자들의 일정과 동기화 기록을 저장한다.
     async def _handle_create(
         self,
         db: Session,
@@ -310,6 +312,7 @@ class SyncService:
                     return None
         return None
 
+    # 기존 마스터 일정을 갱신하고 사용자별 기존 Outlook 일정 ID에 맞춰 변경을 전달한다.
     async def _handle_update(
         self,
         db: Session,

@@ -50,6 +50,7 @@ def source_display_fields(values: Any) -> dict[str, Any]:
     return {key: value for key, value in values.items() if key in SOURCE_EVENT_FIELDS}
 
 
+# 개인 편집은 표시 가능한 필드에만 덮어써 원본 식별자·상태·버전이 바뀌지 않게 한다.
 def apply_personal_override(item: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
     """Personal display edits never replace identities, state or source versions."""
     return {
@@ -88,6 +89,7 @@ def validate_event_override(fields: Mapping[str, Any]) -> None:
         raise ValueError("Invalid event kind or cancellation")
 
 
+# 원본의 식별자·기간·채널 소속을 검사하고 잠금 순서를 일정하게 정렬한다. 접근 권한 검사는 저장소가 맡는다.
 def validate_source_snapshot(
     channels: Iterable[Mapping[str, Any]], events: Iterable[Mapping[str, Any]]
 ) -> tuple[list[Mapping[str, Any]], list[tuple[str, Mapping[str, Any]]]]:
@@ -125,6 +127,7 @@ def validate_source_snapshot(
     return sorted(channels, key=lambda row: row["id"]), sorted(result, key=lambda row: row[0])
 
 
+# 개인 편집이 없으면 원본을 자동 반영하고, 편집 충돌이 있더라도 취소 상태는 원본에 맞춘다.
 def automatic_source_update(
     current: Mapping[str, Any] | None,
     seen_hash: str,

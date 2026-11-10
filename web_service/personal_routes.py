@@ -15,6 +15,7 @@ from .request_dependencies import SessionDependency, SessionIdentity
 from .schemas import TaskInput, TaskState, TaskUpdate
 
 
+# 개인 일정은 공통 로그인 검사를 사용하며 소유권·버전 검사와 저장은 저장소에 맡긴다.
 def install_personal_routes(
     app: FastAPI, db: PersonalTaskStore, require_session: SessionDependency
 ) -> None:
@@ -41,6 +42,7 @@ def install_personal_routes(
     ):
         return db.task_state(session["user_id"], task_id, body.to_changes(), body.version)
 
+    # planner 기능이 켜져 있으면 휴지통으로 보내고, 그렇지 않으면 기존 삭제 경로를 사용한다.
     @app.delete("/api/tasks/{task_id}", status_code=204)
     def delete_task(
         task_id: str,

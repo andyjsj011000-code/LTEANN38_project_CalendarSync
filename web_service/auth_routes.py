@@ -20,6 +20,7 @@ def install_auth_routes(
             path="/",
         )
 
+    # 일회용 로그인 흐름을 저장하고 그 흐름을 식별하는 쿠키와 함께 학교 인증 화면으로 이동시킨다.
     @app.get("/auth/login")
     def login(request: Request):
         if integration:
@@ -38,6 +39,7 @@ def install_auth_routes(
         cookie(response, flow_cookie, raw, 600)
         return response
 
+    # 일회용 인증 흐름과 계정 정보를 검증해 세션을 만들고, 실패하면 생성 중인 세션과 쿠키를 정리한다.
     @app.get("/auth/callback")
     def callback(request: Request):
         raw = None
@@ -87,6 +89,7 @@ def install_auth_routes(
             integration.login_response(response, raw)
         return response
 
+    # 통합 서버의 장치 연결과 조회 세션을 해제하고 브라우저의 로그인 쿠키를 지운다.
     @app.post("/auth/logout", status_code=204)
     def logout(request: Request):
         if integration and hasattr(integration, "logout_request"):
