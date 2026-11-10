@@ -1,0 +1,507 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "로그인과 일정 요청 · 권한 경계",
+    "locale": "ko",
+    "output": "docs/architecture/requests.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/andyjsj011000-code/LTEANN38_project_CalendarSync.git",
+      "revision": "5108a33b61c436a31a56322299d773715c72acd1"
+    }
+  },
+  "lanes": [
+    {
+      "id": "signin",
+      "label": "학교 로그인"
+    },
+    {
+      "id": "login_error",
+      "label": "로그인 실패",
+      "variant": "exception"
+    },
+    {
+      "id": "request",
+      "label": "인증된 요청 · Teams"
+    },
+    {
+      "id": "teams_error",
+      "label": "Teams 확인 대기",
+      "variant": "exception"
+    },
+    {
+      "id": "personal",
+      "label": "개인 일정·설정"
+    },
+    {
+      "id": "error",
+      "label": "요청·편집 거부",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "request",
+    "session",
+    "kind",
+    "permission",
+    "shared",
+    "response"
+  ],
+  "nodes": [
+    {
+      "id": "login",
+      "lane": "signin",
+      "col": 0,
+      "type": "frontend",
+      "label": "로그인 시작",
+      "sublabel": "/auth/login",
+      "sources": [
+        {
+          "path": "web_service/auth_routes.py",
+          "line": 24,
+          "end_line": 39
+        }
+      ]
+    },
+    {
+      "id": "provider",
+      "lane": "signin",
+      "col": 1,
+      "type": "external",
+      "label": "학교 Entra 인증",
+      "sublabel": "인증 후 콜백 반환",
+      "sources": [
+        {
+          "path": "web_service/auth_routes.py",
+          "line": 24,
+          "end_line": 39
+        },
+        {
+          "path": "web_service/identity.py",
+          "line": 40,
+          "end_line": 46
+        }
+      ]
+    },
+    {
+      "id": "claims",
+      "lane": "signin",
+      "col": 2,
+      "type": "security",
+      "label": "콜백·학교 계정 확인",
+      "sublabel": "일회성 flow · ID · Graph",
+      "sources": [
+        {
+          "path": "web_service/auth_routes.py",
+          "line": 41,
+          "end_line": 66
+        },
+        {
+          "path": "web_service/identity.py",
+          "line": 49,
+          "end_line": 66
+        },
+        {
+          "path": "web_service/school.py",
+          "line": 60,
+          "end_line": 66
+        }
+      ]
+    },
+    {
+      "id": "cookie",
+      "lane": "signin",
+      "col": 3,
+      "type": "database",
+      "label": "세션·장치 연결",
+      "sublabel": "브라우저에는 참조 쿠키",
+      "sources": [
+        {
+          "path": "web_service/auth_routes.py",
+          "line": 57,
+          "end_line": 88
+        },
+        {
+          "path": "web_service/server.py",
+          "line": 87,
+          "end_line": 104
+        },
+        {
+          "path": "web_service/test_storage.py",
+          "line": 98,
+          "end_line": 134
+        }
+      ]
+    },
+    {
+      "id": "request",
+      "lane": "request",
+      "col": 0,
+      "type": "frontend",
+      "label": "일정 API 요청",
+      "sublabel": "저장된 세션 쿠키 사용",
+      "sources": [
+        {
+          "path": "web_service/static/beta.js",
+          "line": 55,
+          "end_line": 66
+        },
+        {
+          "path": "web_service/shared_routes.py",
+          "line": 41,
+          "end_line": 71
+        }
+      ]
+    },
+    {
+      "id": "session",
+      "lane": "request",
+      "col": 1,
+      "type": "security",
+      "label": "세션·요청 검사",
+      "sublabel": "학교 · CSRF · 유휴 제한",
+      "sources": [
+        {
+          "path": "web_service/request_dependencies.py",
+          "line": 24,
+          "end_line": 44
+        },
+        {
+          "path": "web_service/server.py",
+          "line": 296,
+          "end_line": 313
+        }
+      ]
+    },
+    {
+      "id": "kind",
+      "lane": "request",
+      "col": 2,
+      "type": "backend",
+      "label": "요청 대상 분기",
+      "sublabel": "해당 기능 라우트",
+      "sources": [
+        {
+          "path": "web_service/server.py",
+          "line": 304,
+          "end_line": 328
+        },
+        {
+          "path": "web_service/personal_routes.py",
+          "line": 18,
+          "end_line": 63
+        }
+      ]
+    },
+    {
+      "id": "permission",
+      "lane": "request",
+      "col": 3,
+      "type": "security",
+      "label": "Teams 접근 확인",
+      "sublabel": "권한 확인용 run_sync",
+      "sources": [
+        {
+          "path": "web_service/server.py",
+          "line": 304,
+          "end_line": 328
+        }
+      ]
+    },
+    {
+      "id": "shared",
+      "lane": "request",
+      "col": 4,
+      "type": "backend",
+      "label": "공유 일정·검토 조회",
+      "sublabel": "공유 모드: 조회 전후 검사",
+      "sources": [
+        {
+          "path": "web_service/shared_routes.py",
+          "line": 11,
+          "end_line": 71
+        },
+        {
+          "path": "web_service/server.py",
+          "line": 282,
+          "end_line": 294
+        },
+        {
+          "path": "web_service/review_routes.py",
+          "line": 12,
+          "end_line": 32
+        }
+      ]
+    },
+    {
+      "id": "response",
+      "lane": "request",
+      "col": 5,
+      "type": "frontend",
+      "label": "허용된 결과 응답",
+      "sublabel": "캘린더·목록·저장 결과",
+      "sources": [
+        {
+          "path": "web_service/shared_routes.py",
+          "line": 41,
+          "end_line": 71
+        },
+        {
+          "path": "web_service/personal_routes.py",
+          "line": 24,
+          "end_line": 63
+        }
+      ]
+    },
+    {
+      "id": "personal",
+      "lane": "personal",
+      "col": 3,
+      "type": "backend",
+      "label": "개인·설정 라우트",
+      "sublabel": "Teams 권한에 독립적",
+      "sources": [
+        {
+          "path": "web_service/personal_routes.py",
+          "line": 18,
+          "end_line": 63
+        },
+        {
+          "path": "web_service/settings_routes.py",
+          "line": 10,
+          "end_line": 41
+        }
+      ]
+    },
+    {
+      "id": "write",
+      "lane": "personal",
+      "col": 4,
+      "type": "database",
+      "label": "읽기·검증·저장",
+      "sublabel": "개인 편집은 버전 검사",
+      "sources": [
+        {
+          "path": "web_service/storage.py",
+          "line": 235,
+          "end_line": 291
+        },
+        {
+          "path": "web_service/personal_routes.py",
+          "line": 24,
+          "end_line": 42
+        }
+      ]
+    },
+    {
+      "id": "denied",
+      "lane": "error",
+      "col": 1,
+      "type": "security",
+      "label": "거부·다시 확인",
+      "sublabel": "원인별 고정 오류 응답",
+      "sources": [
+        {
+          "path": "web_service/request_dependencies.py",
+          "line": 28,
+          "end_line": 42
+        },
+        {
+          "path": "web_service/api.py",
+          "line": 55,
+          "end_line": 83
+        },
+        {
+          "path": "web_service/auth_routes.py",
+          "line": 67,
+          "end_line": 80
+        }
+      ]
+    },
+    {
+      "id": "conflict",
+      "lane": "error",
+      "col": 4,
+      "type": "security",
+      "label": "편집 거부",
+      "sublabel": "소유권 404 · 버전 충돌 409",
+      "sources": [
+        {
+          "path": "web_service/storage.py",
+          "line": 235,
+          "end_line": 291
+        },
+        {
+          "path": "web_service/api.py",
+          "line": 55,
+          "end_line": 63
+        }
+      ]
+    },
+    {
+      "id": "login_failed",
+      "lane": "login_error",
+      "col": 2,
+      "type": "security",
+      "label": "로그인 실패 응답",
+      "sublabel": "세션 정리 · 고정 실패 안내",
+      "sources": [
+        {
+          "path": "web_service/auth_routes.py",
+          "line": 67,
+          "end_line": 80
+        }
+      ]
+    },
+    {
+      "id": "pending",
+      "lane": "teams_error",
+      "col": 3,
+      "type": "security",
+      "label": "Teams 결과 보류",
+      "sublabel": "권한 미검증 · 재확인 안내",
+      "sources": [
+        {
+          "path": "web_service/api.py",
+          "line": 65,
+          "end_line": 83
+        },
+        {
+          "path": "web_service/server.py",
+          "line": 267,
+          "end_line": 294
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "login-provider",
+      "from": "login",
+      "to": "provider"
+    },
+    {
+      "id": "provider-claims",
+      "from": "provider",
+      "to": "claims",
+      "label": "콜백"
+    },
+    {
+      "id": "claims-cookie",
+      "from": "claims",
+      "to": "cookie",
+      "label": "검증 성공"
+    },
+    {
+      "id": "claims-login_failed",
+      "from": "claims",
+      "to": "login_failed",
+      "label": "실패",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "request-session",
+      "from": "request",
+      "to": "session"
+    },
+    {
+      "id": "session-kind",
+      "from": "session",
+      "to": "kind",
+      "label": "통과"
+    },
+    {
+      "id": "session-denied",
+      "from": "session",
+      "to": "denied",
+      "label": "실패",
+      "role": "error",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight"
+    },
+    {
+      "id": "kind-permission",
+      "from": "kind",
+      "to": "permission",
+      "label": "Teams"
+    },
+    {
+      "id": "kind-personal",
+      "from": "kind",
+      "to": "personal",
+      "label": "개인·설정",
+      "role": "branch",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "permission-shared",
+      "from": "permission",
+      "to": "shared",
+      "label": "확인됨"
+    },
+    {
+      "id": "permission-pending",
+      "from": "permission",
+      "to": "pending",
+      "label": "미검증",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "shared-response",
+      "from": "shared",
+      "to": "response",
+      "label": "허용 범위"
+    },
+    {
+      "id": "personal-write",
+      "from": "personal",
+      "to": "write"
+    },
+    {
+      "id": "write-response",
+      "from": "write",
+      "to": "response"
+    },
+    {
+      "id": "write-conflict",
+      "from": "write",
+      "to": "conflict",
+      "label": "충돌·소유권",
+      "role": "error",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "두 진입점을 읽는 방법",
+      "items": [
+        "위쪽은 로그인 시작부터 쿠키 발급까지, 가운데는 이미 로그인한 사용자의 API 요청입니다. 두 흐름을 시간상 하나의 HTTP 요청으로 묶은 그림이 아닙니다.",
+        "학교 서버 기준의 주요 경계입니다. 개별 정적 파일·모든 오류 코드·선택 과제 기능은 펼쳐 그리지 않았습니다.",
+        "로그인 flow와 자격 증명은 웹 서버가 보관합니다. 브라우저는 토큰 원문 대신 세션·장치의 임의 참조 쿠키를 사용합니다."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "개인 일정과 Teams 조회의 차이",
+      "items": [
+        "개인 일정·설정은 Teams 권한이 확인 중이어도 사용자 세션과 소유권을 만족하면 처리합니다. 개인 편집의 버전 충돌은 409로 응답합니다.",
+        "공유 모드의 Teams 조회는 시작과 끝의 권한·채널 범위를 비교합니다. 만료·범위 변화가 있으면 새 조회 결과를 내보내지 않습니다. 기존 화면 유지 안내는 같은 세션의 UI 정책이며 만료 권한으로 새 데이터를 허용하는 정책이 아닙니다."
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "편집·로그아웃",
+      "items": [
+        "공유 일정의 상태/override/변경 검토는 별도 라우트에서 저장소 메서드를 호출합니다. SQLite override도 라우트가 아닌 저장소에서 SQL을 실행합니다.",
+        "로그아웃은 세션 참조와 장치 연결을 정리합니다. 보기 세션 만료와 장치 연결의 수명은 서로 다르며, 만료 후 장치 해제를 위한 전용 경로도 유지합니다."
+      ]
+    }
+  ]
+}

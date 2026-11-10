@@ -1,0 +1,413 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "서버 동기화 · 권한 확인과 수집의 분리",
+    "locale": "ko",
+    "output": "docs/architecture/sync.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/andyjsj011000-code/LTEANN38_project_CalendarSync.git",
+      "revision": "5108a33b61c436a31a56322299d773715c72acd1"
+    }
+  },
+  "lanes": [
+    {
+      "id": "entry",
+      "label": "수동 동기화 요청"
+    },
+    {
+      "id": "proof",
+      "label": "공유 모드 · 권한과 응답"
+    },
+    {
+      "id": "collect",
+      "label": "공유 모드 · 수집 작업"
+    },
+    {
+      "id": "legacy",
+      "label": "공유 미사용 경로"
+    },
+    {
+      "id": "recover",
+      "label": "경합·실패 처리",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "manual",
+    "mode",
+    "proof",
+    "schedule",
+    "queued"
+  ],
+  "nodes": [
+    {
+      "id": "manual",
+      "lane": "entry",
+      "col": 0,
+      "type": "frontend",
+      "label": "수동 동기화",
+      "sublabel": "POST /api/teams/sync",
+      "sources": [
+        {
+          "path": "web_service/server_routes.py",
+          "line": 57,
+          "end_line": 61
+        }
+      ]
+    },
+    {
+      "id": "mode",
+      "lane": "entry",
+      "col": 1,
+      "type": "backend",
+      "label": "공유 수집 사용?",
+      "sublabel": "DB 선택 기능 + collect",
+      "sources": [
+        {
+          "path": "web_service/server.py",
+          "line": 58,
+          "end_line": 61
+        },
+        {
+          "path": "web_service/server.py",
+          "line": 212,
+          "end_line": 234
+        }
+      ]
+    },
+    {
+      "id": "proof",
+      "lane": "proof",
+      "col": 2,
+      "type": "security",
+      "label": "권한 증명 준비",
+      "sublabel": "재사용 또는 검증·먼저 저장",
+      "sources": [
+        {
+          "path": "web_service/server.py",
+          "line": 63,
+          "end_line": 77
+        },
+        {
+          "path": "web_service/server.py",
+          "line": 212,
+          "end_line": 221
+        },
+        {
+          "path": "web_service/test_storage.py",
+          "line": 476,
+          "end_line": 521
+        }
+      ]
+    },
+    {
+      "id": "schedule",
+      "lane": "proof",
+      "col": 3,
+      "type": "database",
+      "label": "수집 요청 기록",
+      "sublabel": "재시작 후에도 재시도 가능",
+      "sources": [
+        {
+          "path": "web_service/server.py",
+          "line": 221,
+          "end_line": 228
+        },
+        {
+          "path": "web_service/test_storage.py",
+          "line": 813,
+          "end_line": 826
+        }
+      ]
+    },
+    {
+      "id": "queued",
+      "lane": "proof",
+      "col": 4,
+      "type": "frontend",
+      "label": "먼저 queued 응답",
+      "sublabel": "수집 완료와 다른 상태",
+      "sources": [
+        {
+          "path": "web_service/server.py",
+          "line": 218,
+          "end_line": 229
+        }
+      ]
+    },
+    {
+      "id": "worker",
+      "lane": "collect",
+      "col": 3,
+      "type": "backend",
+      "label": "수집 작업 시작",
+      "sublabel": "응답 후 작업 / 정기 worker",
+      "sources": [
+        {
+          "path": "web_service/server.py",
+          "line": 201,
+          "end_line": 210
+        },
+        {
+          "path": "web_service/server.py",
+          "line": 224,
+          "end_line": 228
+        },
+        {
+          "path": "web_service/server.py",
+          "line": 330,
+          "end_line": 347
+        }
+      ]
+    },
+    {
+      "id": "collect",
+      "lane": "collect",
+      "col": 4,
+      "type": "backend",
+      "label": "현재 장치로 수집",
+      "sublabel": "현재 토큰 · 수집 임대 · 분석",
+      "sources": [
+        {
+          "path": "web_service/shared_collection.py",
+          "line": 31,
+          "end_line": 82
+        }
+      ]
+    },
+    {
+      "id": "finish",
+      "lane": "collect",
+      "col": 5,
+      "type": "database",
+      "label": "권한별 반영·완료",
+      "sublabel": "만료면 반영 보류 · 부분 재시도",
+      "sources": [
+        {
+          "path": "web_service/shared_collection.py",
+          "line": 83,
+          "end_line": 104
+        },
+        {
+          "path": "web_service/postgres_ingestion_status.py",
+          "line": 182,
+          "end_line": 207
+        }
+      ]
+    },
+    {
+      "id": "read",
+      "lane": "legacy",
+      "col": 2,
+      "type": "backend",
+      "label": "권한·소스 읽기",
+      "sublabel": "토큰 · Graph · 원본/캐시",
+      "sources": [
+        {
+          "path": "web_service/sync_workflow.py",
+          "line": 67,
+          "end_line": 114
+        },
+        {
+          "path": "web_service/sync_workflow.py",
+          "line": 115,
+          "end_line": 169
+        }
+      ]
+    },
+    {
+      "id": "commit",
+      "lane": "legacy",
+      "col": 3,
+      "type": "database",
+      "label": "스냅샷 저장",
+      "sublabel": "추적 수집은 ACL 재검증",
+      "sources": [
+        {
+          "path": "web_service/sync_workflow.py",
+          "line": 115,
+          "end_line": 178
+        },
+        {
+          "path": "web_service/test_storage.py",
+          "line": 476,
+          "end_line": 521
+        }
+      ]
+    },
+    {
+      "id": "done",
+      "lane": "legacy",
+      "col": 4,
+      "type": "frontend",
+      "label": "실행 결과 응답",
+      "sublabel": "완료 / 부분 / busy",
+      "sources": [
+        {
+          "path": "web_service/server.py",
+          "line": 230,
+          "end_line": 234
+        },
+        {
+          "path": "web_service/sync_workflow.py",
+          "line": 179,
+          "end_line": 244
+        }
+      ]
+    },
+    {
+      "id": "retry",
+      "lane": "recover",
+      "col": 5,
+      "type": "backend",
+      "label": "경합·실패 기록",
+      "sublabel": "busy 또는 분류된 오류",
+      "sources": [
+        {
+          "path": "web_service/shared_collection.py",
+          "line": 49,
+          "end_line": 60
+        },
+        {
+          "path": "web_service/shared_collection.py",
+          "line": 99,
+          "end_line": 127
+        },
+        {
+          "path": "web_service/sync_workflow.py",
+          "line": 229,
+          "end_line": 244
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "manual-mode",
+      "from": "manual",
+      "to": "mode"
+    },
+    {
+      "id": "mode-proof",
+      "from": "mode",
+      "to": "proof",
+      "label": "사용"
+    },
+    {
+      "id": "mode-read",
+      "from": "mode",
+      "to": "read",
+      "label": "미사용",
+      "role": "branch"
+    },
+    {
+      "id": "proof-schedule",
+      "from": "proof",
+      "to": "schedule",
+      "label": "연결 확인"
+    },
+    {
+      "id": "proof-retry",
+      "from": "proof",
+      "to": "retry",
+      "label": "확인 실패",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "schedule-queued",
+      "from": "schedule",
+      "to": "queued",
+      "label": "HTTP 응답"
+    },
+    {
+      "id": "schedule-worker",
+      "from": "schedule",
+      "to": "worker",
+      "label": "비동기",
+      "role": "async",
+      "variant": "dashed"
+    },
+    {
+      "id": "worker-collect",
+      "from": "worker",
+      "to": "collect"
+    },
+    {
+      "id": "collect-finish",
+      "from": "collect",
+      "to": "finish",
+      "label": "보고 검증"
+    },
+    {
+      "id": "collect-retry",
+      "from": "collect",
+      "to": "retry",
+      "label": "임대 경합",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "finish-retry",
+      "from": "finish",
+      "to": "retry",
+      "label": "완료 거부",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "read-commit",
+      "from": "read",
+      "to": "commit"
+    },
+    {
+      "id": "commit-done",
+      "from": "commit",
+      "to": "done"
+    },
+    {
+      "id": "read-retry",
+      "from": "read",
+      "to": "retry",
+      "label": "읽기 실패",
+      "role": "error",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "기본 선택과 실행 의미",
+      "items": [
+        "공유 수집은 저장소의 선택 기능이 켜져 있고 source가 collect를 제공할 때만 사용합니다. 수동 요청에서 queued는 예약 성공을 뜻하며 수집 완료를 뜻하지 않습니다.",
+        "정기 worker는 수동 요청 없이도 due 장치를 실행합니다. worker가 활성화된 서버의 일반 경로를 나타내며 웹훅 runtime 주입 모드의 타이머 대체 동작은 생략했습니다."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "권한과 분석 성공은 독립적",
+      "items": [
+        "공유 모드의 준비 데이터에는 장치 식별자·채널·원래 만료 시각만 있고 토큰이 없습니다. 실제 수집 때는 현재 장치와 토큰을 다시 읽습니다.",
+        "분석 완료나 부분 실패가 권한 증명의 만료를 연장하지 않습니다. 허가된 캐시 반영이 만료로 보류돼도 독립 수집 상태는 별도로 마무리할 수 있습니다. 원본 분석 실패만으로 확인된 ACL을 폐기하지 않습니다."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "direct와 oracle",
+      "items": [
+        "direct의 권한 확인용 읽기는 기존 카탈로그를 사용하며, ingest 때 공지/답글/이미지·AI 분석과 캐시 갱신을 수행합니다. 공유 경로는 direct collector가 있는 경우에만 해당합니다.",
+        "oracle 소스는 Graph로 확인한 채널에 대해 기존 master_calendars를 읽기 전용으로 가져옵니다. SQLite/PG는 웹 데이터 저장소 선택이며 원본 Oracle 소스와는 다른 축입니다."
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "범위와 결과",
+      "items": [
+        "그림은 서버 동기화의 큰 실행 단계를 요약합니다. 채널별 lease, 개별 메시지 증분 처리, 원본 취소와 개인 편집 조정은 해당 단계 안의 세부 동작입니다.",
+        "실패 원인에 따라 busy, 부분 완료, 재인증 필요, source_unavailable 등이 구분됩니다. 종료 시 추적 시도를 닫고 이후 요청/worker가 재시도할 수 있게 합니다."
+      ]
+    }
+  ]
+}

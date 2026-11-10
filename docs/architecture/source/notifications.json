@@ -1,0 +1,279 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "알림 발송 · 후보 계산과 최종 재검증",
+    "locale": "ko",
+    "output": "docs/architecture/notifications.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/andyjsj011000-code/LTEANN38_project_CalendarSync.git",
+      "revision": "5108a33b61c436a31a56322299d773715c72acd1"
+    }
+  },
+  "lanes": [
+    {
+      "id": "select",
+      "label": "대상·알림 후보 선택"
+    },
+    {
+      "id": "send",
+      "label": "발송 경계"
+    },
+    {
+      "id": "skip",
+      "label": "제외·중단",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "tick",
+    "enabled",
+    "candidate",
+    "claim",
+    "fresh",
+    "push",
+    "outcome"
+  ],
+  "nodes": [
+    {
+      "id": "tick",
+      "lane": "select",
+      "col": 0,
+      "type": "backend",
+      "label": "정기 worker",
+      "sublabel": "유효한 due 장치",
+      "sources": [
+        {
+          "path": "web_service/server.py",
+          "line": 330,
+          "end_line": 347
+        }
+      ]
+    },
+    {
+      "id": "enabled",
+      "lane": "select",
+      "col": 1,
+      "type": "security",
+      "label": "발송 가능?",
+      "sublabel": "sender 설정 · 활성 장치",
+      "sources": [
+        {
+          "path": "web_service/push.py",
+          "line": 207,
+          "end_line": 215
+        }
+      ]
+    },
+    {
+      "id": "candidate",
+      "lane": "select",
+      "col": 2,
+      "type": "backend",
+      "label": "알림 후보 계산",
+      "sublabel": "시간 구간 · 표시/검토 상태",
+      "sources": [
+        {
+          "path": "web_service/push.py",
+          "line": 139,
+          "end_line": 205
+        },
+        {
+          "path": "web_service/reminder_rules.py",
+          "line": 9,
+          "end_line": 28
+        }
+      ]
+    },
+    {
+      "id": "claim",
+      "lane": "send",
+      "col": 2,
+      "type": "database",
+      "label": "중복 발송 임대",
+      "sublabel": "구독과 알림 key별 claim",
+      "sources": [
+        {
+          "path": "web_service/push.py",
+          "line": 213,
+          "end_line": 223
+        },
+        {
+          "path": "web_service/postgres_push.py",
+          "line": 152,
+          "end_line": 193
+        }
+      ]
+    },
+    {
+      "id": "fresh",
+      "lane": "send",
+      "col": 3,
+      "type": "security",
+      "label": "발송 직전 재확인",
+      "sublabel": "장치 · due · 현재 구독",
+      "sources": [
+        {
+          "path": "web_service/push.py",
+          "line": 224,
+          "end_line": 262
+        }
+      ]
+    },
+    {
+      "id": "push",
+      "lane": "send",
+      "col": 4,
+      "type": "external",
+      "label": "Web Push 전송",
+      "sublabel": "현재 구독 · 제한된 payload",
+      "sources": [
+        {
+          "path": "web_service/push.py",
+          "line": 94,
+          "end_line": 124
+        },
+        {
+          "path": "web_service/push.py",
+          "line": 263,
+          "end_line": 266
+        }
+      ]
+    },
+    {
+      "id": "outcome",
+      "lane": "send",
+      "col": 5,
+      "type": "database",
+      "label": "전송 결과 처리",
+      "sublabel": "sent / retry / expired",
+      "sources": [
+        {
+          "path": "web_service/push.py",
+          "line": 263,
+          "end_line": 275
+        },
+        {
+          "path": "web_service/postgres_push.py",
+          "line": 195,
+          "end_line": 229
+        }
+      ]
+    },
+    {
+      "id": "skip",
+      "lane": "skip",
+      "col": 1,
+      "type": "backend",
+      "label": "후보 건너뛰기",
+      "sublabel": "미설정·경합·유효 대상 없음",
+      "sources": [
+        {
+          "path": "web_service/push.py",
+          "line": 207,
+          "end_line": 223
+        }
+      ]
+    },
+    {
+      "id": "discard",
+      "lane": "skip",
+      "col": 3,
+      "type": "security",
+      "label": "후보 제외·중단",
+      "sublabel": "변경·구독 해제·로그아웃",
+      "sources": [
+        {
+          "path": "web_service/push.py",
+          "line": 224,
+          "end_line": 262
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "tick-enabled",
+      "from": "tick",
+      "to": "enabled"
+    },
+    {
+      "id": "enabled-candidate",
+      "from": "enabled",
+      "to": "candidate",
+      "label": "가능"
+    },
+    {
+      "id": "enabled-skip",
+      "from": "enabled",
+      "to": "skip",
+      "label": "불가",
+      "role": "branch"
+    },
+    {
+      "id": "candidate-claim",
+      "from": "candidate",
+      "to": "claim",
+      "label": "구독별 후보"
+    },
+    {
+      "id": "claim-fresh",
+      "from": "claim",
+      "to": "fresh",
+      "label": "획득"
+    },
+    {
+      "id": "claim-skip",
+      "from": "claim",
+      "to": "skip",
+      "label": "미획득",
+      "role": "branch"
+    },
+    {
+      "id": "fresh-push",
+      "from": "fresh",
+      "to": "push",
+      "label": "여전히 유효"
+    },
+    {
+      "id": "fresh-discard",
+      "from": "fresh",
+      "to": "discard",
+      "label": "변경됨",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "id": "push-outcome",
+      "from": "push",
+      "to": "outcome"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "리마인더 계산 규칙",
+      "items": [
+        "기간 종료일과 지정 시각을 기준으로 계산하며 시각이 없으면 KST 23:59를 사용합니다. 발생 시각부터 10분 미만인 후보만 대상으로 합니다.",
+        "아침 알림의 Teams/개인 그룹은 별개입니다. 완료·취소·변경 검토 중인 항목은 제외합니다. 사용자 지정 시각·오프셋 계산은 reminder_rules의 순수 함수이며 DB 조회와 발송은 push.py가 담당합니다."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "계산 시점과 발송 시점의 차이",
+      "items": [
+        "후보를 만든 뒤에도 로그인·일정·리마인더·구독 상태가 바뀔 수 있어 claim 후 다시 확인합니다. 최종 확인은 Graph를 매번 새로 호출한다는 뜻이 아니라 현재 DB 권한 아래 due와 장치/구독을 다시 읽는 동작입니다.",
+        "SQLite의 기존 claim과 PostgreSQL의 fencing lease 경로를 공통 단계로 요약했습니다. 획득하지 못한 후보는 보내지 않으며 후보를 만들었다는 이유로 발송 완료로 기록하지 않습니다."
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "결과와 예외",
+      "items": [
+        "sent는 성공으로 마무리합니다. retry는 실패로 기록해 재시도 조건에 따르며 expired는 만료 구독을 해제합니다. 구독 해제와 장치 무효화도 전송을 막습니다.",
+        "이 그림은 정기 Notifications.dispatch 경로입니다. 사용자가 누르는 테스트 알림과 선택 웹훅 notification runtime은 별도 경로입니다."
+      ]
+    }
+  ]
+}

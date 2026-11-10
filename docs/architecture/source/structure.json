@@ -1,0 +1,284 @@
+{
+  "schema_version": 1,
+  "diagram_type": "tree",
+  "meta": {
+    "title": "oracle 최종 코드 · 역할별 구조",
+    "locale": "ko",
+    "output": "docs/architecture/structure.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/andyjsj011000-code/LTEANN38_project_CalendarSync.git",
+      "revision": "5108a33b61c436a31a56322299d773715c72acd1"
+    }
+  },
+  "layout": {
+    "direction": "right"
+  },
+  "nodes": [
+    {
+      "id": "calendar",
+      "label": "CalendarSync oracle",
+      "sublabel": "PR #9 병합본 · 코드 역할 분류",
+      "sources": [
+        {
+          "path": "docs/LTEANN_PORT_REVIEW.md",
+          "line": 39,
+          "end_line": 54
+        }
+      ]
+    },
+    {
+      "id": "assembly",
+      "label": "실행·객체 조립",
+      "sublabel": "config.py · composition.py",
+      "sources": [
+        {
+          "path": "web_service/composition.py",
+          "line": 33,
+          "end_line": 80
+        },
+        {
+          "path": "web_service/__main__.py",
+          "line": 67,
+          "end_line": 117
+        }
+      ],
+      "parent": "calendar"
+    },
+    {
+      "id": "screens",
+      "label": "브라우저 화면",
+      "sublabel": "static/beta.js · school.html",
+      "sources": [
+        {
+          "path": "web_service/static/beta.js",
+          "line": 55,
+          "end_line": 66
+        },
+        {
+          "path": "web_service/static/beta.js",
+          "line": 875,
+          "end_line": 888
+        }
+      ],
+      "parent": "calendar"
+    },
+    {
+      "id": "http",
+      "label": "웹 경계·기능별 라우트",
+      "sublabel": "api · server · *_routes",
+      "sources": [
+        {
+          "path": "web_service/api.py",
+          "line": 85,
+          "end_line": 112
+        },
+        {
+          "path": "web_service/server.py",
+          "line": 397,
+          "end_line": 455
+        },
+        {
+          "path": "web_service/request_dependencies.py",
+          "line": 24,
+          "end_line": 44
+        }
+      ],
+      "parent": "calendar"
+    },
+    {
+      "id": "usecases",
+      "label": "업무 흐름·알림 발송",
+      "sublabel": "동기화 실행 · Notifications",
+      "sources": [
+        {
+          "path": "web_service/sync_workflow.py",
+          "line": 22,
+          "end_line": 114
+        },
+        {
+          "path": "web_service/shared_collection.py",
+          "line": 28,
+          "end_line": 104
+        },
+        {
+          "path": "web_service/push.py",
+          "line": 207,
+          "end_line": 275
+        }
+      ],
+      "parent": "calendar"
+    },
+    {
+      "id": "pure",
+      "label": "순수 업무 규칙",
+      "sublabel": "calendar_rules · source_updates · reminder_rules",
+      "sources": [
+        {
+          "path": "web_service/calendar_rules.py",
+          "line": 1,
+          "end_line": 74
+        },
+        {
+          "path": "web_service/source_updates.py",
+          "line": 1,
+          "end_line": 35
+        },
+        {
+          "path": "web_service/reminder_rules.py",
+          "line": 1,
+          "end_line": 43
+        }
+      ],
+      "parent": "calendar"
+    },
+    {
+      "id": "contracts",
+      "label": "내부 데이터·역할 계약",
+      "sublabel": "collection/personal_types · *_ports",
+      "sources": [
+        {
+          "path": "web_service/collection_types.py",
+          "line": 1,
+          "end_line": 39
+        },
+        {
+          "path": "web_service/sync_ports.py",
+          "line": 29,
+          "end_line": 131
+        },
+        {
+          "path": "tests_web/typing_contracts.py",
+          "line": 78,
+          "end_line": 101
+        }
+      ],
+      "parent": "calendar"
+    },
+    {
+      "id": "providers",
+      "label": "외부 연동 어댑터",
+      "sublabel": "Graph · MSAL · AI · Oracle",
+      "sources": [
+        {
+          "path": "web_service/composition.py",
+          "line": 68,
+          "end_line": 80
+        },
+        {
+          "path": "web_service/direct_source.py",
+          "line": 355,
+          "end_line": 376
+        },
+        {
+          "path": "web_service/oracle_source.py",
+          "line": 95,
+          "end_line": 136
+        }
+      ],
+      "parent": "calendar"
+    },
+    {
+      "id": "stores",
+      "label": "웹 데이터 저장소",
+      "sublabel": "SQLite / PostgreSQL 중 명시적 선택",
+      "sources": [
+        {
+          "path": "web_service/composition.py",
+          "line": 55,
+          "end_line": 67
+        },
+        {
+          "path": "web_service/test_storage.py",
+          "line": 476,
+          "end_line": 521
+        },
+        {
+          "path": "web_service/postgres_database.py",
+          "line": 29,
+          "end_line": 88
+        }
+      ],
+      "parent": "calendar"
+    },
+    {
+      "id": "operations",
+      "label": "이력·품질 검증",
+      "sublabel": "schema_history · tests_web · CI",
+      "sources": [
+        {
+          "path": "web_service/schema_history.py",
+          "line": 1,
+          "end_line": 25
+        },
+        {
+          "path": "tests_web/typing_contracts.py",
+          "line": 1,
+          "end_line": 35
+        },
+        {
+          "path": ".github/workflows/quality.yml",
+          "line": 33,
+          "end_line": 49
+        }
+      ],
+      "parent": "calendar"
+    },
+    {
+      "id": "legacy",
+      "label": "별도 기존 Oracle 봇",
+      "sublabel": "app/main.py · scheduler · webhook",
+      "sources": [
+        {
+          "path": "app/main.py",
+          "line": 1,
+          "end_line": 39
+        }
+      ],
+      "parent": "calendar"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "그림의 범위",
+      "items": [
+        "실제 디렉터리 트리나 호출 그래프가 아니라 코드를 역할별로 묶은 모듈 지도입니다. 웹의 주요 동작은 함께 제공한 요청·동기화·알림 흐름도에 나눠 그렸습니다.",
+        "기준은 oracle의 PR #9 병합본입니다. 노드의 파일 근거는 모두 같은 고정 커밋을 가리킵니다. 기능 추가 제안이나 향후 설계가 아닙니다."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "웹 계층을 찾는 순서",
+      "items": [
+        "api.py는 기본 앱, server.py는 학교 테스트 서버와 worker를 조립합니다. auth/shared/server/review/reminder/push_routes와 기존 personal/settings_routes가 HTTP 기능을 나눕니다.",
+        "request_dependencies와 SecurityBoundary가 세션·학교 테넌트·Origin·CSRF·요청 제한의 경계입니다. 브라우저와 서버의 사용자별 상태를 전역 객체로 공유하지 않습니다."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "규칙·흐름·I/O의 구분",
+      "items": [
+        "calendar_rules는 표시·정렬, source_updates는 원본 변경과 개인 편집 조정, reminder_rules는 알림 시간 계산을 담당합니다. 순수 규칙이 직접 DB나 외부 API를 호출하지 않습니다.",
+        "동기화 업무 흐름은 호출 순서를 결정하고 저장소 어댑터가 SQL·암호화·소유권·버전·트랜잭션을 담당합니다. sync_results와 sync_diagnostics는 응답 검증·내용 없는 진단을 맡습니다.",
+        "push.py의 Notifications는 후보 조회·발송 직전 재검증·전송을 조율합니다. reminder_rules의 시간 계산과 실제 Web Push 전송은 서로 다른 책임입니다."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "모드와 선택 기능",
+      "items": [
+        "direct는 위임 Graph와 설정된 AI로 공지를 분석합니다. oracle은 기존 master_calendars를 읽기 전용으로 가져옵니다. 웹 저장소의 SQLite/PG 선택과 원본의 direct/oracle 선택은 서로 다른 축입니다.",
+        "과제·초안·휴지통·웹훅 notification runtime은 명시적 선택 기능입니다. 별도 기존 app/ 봇의 실행을 웹 서버의 기본 실행 경로로 해석하면 안 됩니다."
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "원본 이식 정리 완료",
+      "items": [
+        "이전 비교에서 확정한 구조 개선은 PR #9까지 반영했습니다. 세부 반영·제외 근거는 docs/LTEANN_PORT_REVIEW.md에 있습니다.",
+        "schema history는 명시적으로 확인·기록·추가 업그레이드하며 앱 시작 시 자동 변경으로 바꾸지 않았습니다. 이 결과물은 코드 설명이며 배포 상태나 운영 부하를 측정한 그림은 아닙니다."
+      ]
+    }
+  ]
+}
