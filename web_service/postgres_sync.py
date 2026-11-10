@@ -67,6 +67,7 @@ class PostgresSync:
             "channels": frozenset(row[2] for row in rows if row[2] is not None),
         }
 
+    # 사용자별 동기화 실행권을 확보하며 공유 수집 모드에서는 기존 접근 권한을 유지할 수 있다.
     def begin_sync(self, user_id, ttl, *, preserve_access=False):
         self._seconds(ttl, allow_zero=True)
         if type(preserve_access) is not bool or (
@@ -170,6 +171,7 @@ class PostgresSync:
             ).fetchone()
         return bool(row and (row[0] <= now or row[1]))
 
+    # 장치·권한·캐시를 잠금 안에서 재확인해 완료된 분석만 반영하며 권한을 새로 발급하지 않는다.
     def materialize_cached_events(self, device):
         """Publish completed analysis under existing ACLs without renewing them.
 
@@ -240,6 +242,7 @@ class PostgresSync:
                 raise PermissionPending()
             return len(events)
 
+    # 장치 정보와 동기화 처리권의 유효성을 잠금 안에서 확인한 뒤 권한과 일정 결과를 함께 반영한다.
     def commit_snapshot(self, device, channels, events, ttl, lease, *, ingestion=None):
         self._seconds(ttl)
         channels, events = self._snapshot(channels, events)

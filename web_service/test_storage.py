@@ -95,6 +95,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             "channels": frozenset(row[2] for row in rows if row[2] is not None),
         }
 
+    # 토큰·갱신 캐시를 암호화해 장치 연결을 만들고 조회용 로그인 세션과 연결한다.
     def add_connection(
         self,
         raw_session,
@@ -184,6 +185,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             ).rowcount
         return lease if changed else None
 
+    # 현재 갱신 처리권과 일치하는 활성 연결에만 새 자격증명을 저장하고 장치 버전을 올린다.
     def save_refresh(self, device_hash, lease, token, lifetime, cache):
         with self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -406,6 +408,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             raise Missing()
         return current
 
+    # 현재 접근 권한으로 이미 분석된 캐시를 일정에 반영하되 권한 유효기간은 연장하지 않는다.
     def materialize_cached_events(self, device):
         if not getattr(self, "shared_ingestion_enabled", False):
             return 0
@@ -473,6 +476,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             # This local adapter has no shared channel ingestion lease table.
             return current[1] <= now
 
+    # 활성 장치와 동기화 처리권을 확인한 뒤 채널 권한·일정·진행 상태를 같은 트랜잭션에 반영한다.
     def commit_snapshot(self, device, channels, events, ttl, lease, *, ingestion=None):
         now = int(self.clock())
         user = device["user_id"]
@@ -595,6 +599,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
             if r["event_id"] in accessible
         ]
 
+    # 현재 볼 수 있는 일정의 변경만 승인·유지 처리하고 사용자가 확인한 원본 버전을 함께 기록한다.
     def resolve_change(self, user, tenant, change_id, accept):
         allowed = {e["id"] for e in self._shared(user, tenant)}
         with self.connect() as c:
@@ -712,6 +717,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
                 (subscription_id, device_hash),
             )
 
+    # 유효한 장치·구독에 한해 발송 처리권을 얻고 중복 전송과 재시도 횟수를 제한한다.
     def claim_delivery(self, key, subscription_id):
         now = int(self.clock())
         with self.connect() as c:
@@ -810,6 +816,7 @@ class TestDatabase(SQLiteTaskDrafts, SQLiteTaskTrash, SQLiteIngestionStatus, Sch
                 (int(self.clock()) + 300, device_hash),
             )
 
+    # 활성 장치의 다음 수집 시각을 앞당겨 응답 유실이나 재시작 후에도 수집 요청이 남게 한다.
     def request_ingestion(self, device_hash):
         now = int(self.clock())
         with self.connect() as c:

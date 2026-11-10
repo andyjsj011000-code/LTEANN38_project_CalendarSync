@@ -21,6 +21,7 @@ class PostgresChannelIngestion:
         if type(value) is not int or not 0 <= value <= 86400:
             raise ValueError("Invalid channel freshness interval")
 
+    # 채널의 최근 수집 결과와 실행 중인 작업을 확인해 중복 수집을 막는 처리권을 발급한다.
     def claim_channel_ingestion(self, channel, freshness_seconds=300):
         self._freshness(freshness_seconds)
         identity, team = self._ingestion_identity(channel)
@@ -70,6 +71,7 @@ class PostgresChannelIngestion:
         ).fetchone()
         return bool(row and row[0] == lease and row[1] > int(self.clock()))
 
+    # 현재 처리권으로 끝난 작업만 정리하고 채널 전체 수집이 성공한 경우에만 최근 완료 시각을 갱신한다.
     def finish_channel_ingestion(self, channel, lease, success):
         identity, _ = self._ingestion_identity(channel)
         if type(success) is not bool:

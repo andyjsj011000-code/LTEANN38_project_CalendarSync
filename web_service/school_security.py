@@ -10,6 +10,7 @@ class SecurityBoundary:
         self.app = app
         self.settings = settings
 
+    # 허용한 호스트·요청 출처·본문 크기를 검사하고 응답마다 공통 브라우저 보안 헤더를 적용한다.
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)

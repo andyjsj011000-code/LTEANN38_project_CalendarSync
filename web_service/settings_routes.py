@@ -34,6 +34,7 @@ def install_settings_routes(
             "connection": integration.status(session) if integration else None,
         }
 
+    # 아직 연결되지 않은 외부 전송 기능은 켤 수 없게 하고 검증된 사용자 설정만 저장한다.
     @app.put("/api/settings")
     def save_preferences(body: Preferences, session: SessionIdentity = Depends(require_session)):
         if body.calendar_sync_enabled or body.teams_chat_enabled:

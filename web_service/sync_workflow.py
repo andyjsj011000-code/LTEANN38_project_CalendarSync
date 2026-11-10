@@ -19,6 +19,8 @@ from .sync_ports import (
 from .sync_results import checked_report, summarize_report
 
 
+# 장치 자격증명과 채널 권한을 확인한 뒤 원본 조회·수집과 스냅샷 반영을 조율한다.
+# 공유 수집은 별도 흐름에 맡기고, 동시 실행 제어와 실패·진행 상태 정리는 여기서 연결한다.
 def run_sync(
     integration: SyncContext,
     device: DeviceSnapshot,

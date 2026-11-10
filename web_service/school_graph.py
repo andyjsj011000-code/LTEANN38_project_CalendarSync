@@ -90,6 +90,7 @@ class DelegatedGraph:
             return False
         return not self._retry_wait(delay, stopped)
 
+    # Graph 주소와 응답 크기·시간을 제한하고 인증 실패·접근 거부·요청 제한을 구분해 읽는다.
     def _read(
         self,
         client,
@@ -174,6 +175,7 @@ class DelegatedGraph:
                     return None
                 raise GraphFailure()
 
+    # 같은 조회 경로의 다음 페이지를 따라가되 순환·페이지 수·전체 항목 수 초과는 실패로 처리한다.
     def _pages(self, client, token, path, deadline):
         url = BASE + path
         expected_path = urlsplit(url).path
@@ -237,6 +239,7 @@ class DelegatedGraph:
                 break
         return False
 
+    # 목록에 나온 채널의 공지를 실제로 읽을 수 있는지 병렬 확인해 허용된 채널 경로만 남긴다.
     def _permitted_channels(self, token, candidate_groups, deadline):
         if not candidate_groups:
             return []
@@ -308,6 +311,7 @@ class DelegatedGraph:
                 raise
         return [permitted[index] for index in sorted(permitted)]
 
+    # 같은 학교 테넌트의 채널 후보를 모으고 실제 읽기 권한을 확인한 결과를 반환한다.
     def channels(self, token, object_id, tenant_id):
         deadline = monotonic() + 80
         with self.client_factory() as client:

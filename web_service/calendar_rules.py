@@ -30,6 +30,7 @@ def calendar_sort_key(item: Item) -> tuple[str, str, str]:
     return item.get("time") or "99:99", item["source"], item["id"]
 
 
+# 날짜·종류·채널 설정으로 표시할 일정을 고르되 숨김 복원 목록에는 비활성 설정을 적용하지 않는다.
 def calendar_result(
     personal: list[Item],
     shared: Iterable[Item],
@@ -72,6 +73,7 @@ def agenda_result(items: Iterable[Item], day: str) -> dict[str, Any]:
     }
 
 
+# Teams 권한 확인 상태와 무관하게 사용자 자신의 오늘 할 일을 골라 시간순으로 정렬한다.
 def personal_agenda_result(items: Iterable[PersonalTask], day: str) -> PersonalAgenda:
     """Personal-only path: a pending Teams proof must not hide a user's tasks."""
     visible = [item for item in items if not item["hidden"] and personal_task_appears(item, day)]

@@ -18,6 +18,8 @@ from .sync_results import COUNTS as COUNTS
 from .sync_results import BusyResult, IngestionSummary, checked_report, summarize_report
 
 
+# 유효한 권한 증명과 현재 장치 정보로 공유 카탈로그를 수집하고 진행·완료 상태를 기록한다.
+# 수집 결과를 사용자에게 반영할 때 기존 접근 권한을 다시 확인하며 그 유효기간은 늘리지 않는다.
 def collect_shared(
     integration: SyncContext,
     device: DeviceSnapshot,

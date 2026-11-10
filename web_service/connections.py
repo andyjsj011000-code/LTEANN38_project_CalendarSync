@@ -37,6 +37,7 @@ class PersistentIdentity(SchoolIdentity):
         flow["assignments_requested"] = bool(assignments)
         return flow
 
+    # 인증 응답의 계정·동의 범위를 확인하고 장치 연결에 저장할 토큰과 선택적 갱신 캐시를 준비한다.
     def finish(self, flow, query):
         from msal import SerializableTokenCache
 
@@ -73,6 +74,7 @@ class PersistentIdentity(SchoolIdentity):
             },
         }
 
+    # 캐시에서 같은 사용자·테넌트의 계정만 골라 토큰을 갱신하고 재시도 가능한 실패를 구분한다.
     def refresh(
         self, serialized: str, oid: str, tenant: str, *, assignments: bool = False
     ) -> tuple[str, int, str]:
@@ -116,6 +118,7 @@ class ConnectionTokens:
     def __init__(self, db: ConnectionStore, identity: TokenRefresher) -> None:
         self.db, self.identity = db, identity
 
+    # 유효한 토큰은 재사용하고 만료가 가까우면 갱신 처리권을 얻어 한 번에 한 요청만 갱신하게 한다.
     def acquire(self, device: DeviceSnapshot) -> str:
         current = self.db.device(device["id_hash"])
         if not current:

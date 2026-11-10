@@ -15,6 +15,7 @@ SESSION_COOKIE = "calendarsync_session"
 FLOW_COOKIE = "calendarsync_login"
 
 
+# DB와 공통 세션 의존성을 준비하고 예외 응답·정적 화면·기능별 라우트를 하나의 앱에 연결한다.
 def create_app(
     settings=None,
     database=None,
@@ -60,6 +61,7 @@ def create_app(
             {"detail": "Item changed on another device; reload before editing"}, status_code=409
         )
 
+    # 권한 확인 지연을 별도 응답으로 알려 클라이언트가 재시도와 기존 화면 보존 여부를 판단하게 한다.
     @app.exception_handler(PermissionPending)
     async def permission_pending(_request, _error):
         return JSONResponse(

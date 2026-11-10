@@ -314,6 +314,7 @@ class AIExtractor:
     def configured(self) -> bool:
         return bool(self.key)
 
+    # 공지·이미지와 이전 추출 결과를 AI에 전달하고 응답 형식·중복 key를 검증한 일정만 반환한다.
     def extract(
         self, text: str, images: list[str], previous: Sequence[SourceEvent | RetiredEvent]
     ) -> list[EventDraft]:
@@ -399,6 +400,8 @@ class DirectSource:
 
     supports_progress = True
 
+    # 허용된 채널의 공지를 순회하며 이전 분석은 재사용하고 변경된 내용에서 일정을 다시 추출한다.
+    # 시간 제한·일부 실패·공유 수집 처리권을 추적해 완료된 범위와 재시도가 필요한 범위를 구분한다.
     def collect(
         self,
         token: str,

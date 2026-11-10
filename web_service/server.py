@@ -60,6 +60,7 @@ class ServerIntegration(SchoolIntegration):
             getattr(self.db, "shared_ingestion_enabled", False) and hasattr(self.source, "collect")
         )
 
+    # 장치 정보와 DB의 권한 증명이 여전히 유효할 때만 이전 채널 경로를 재사용한다.
     def collection_proof(self, device: DeviceSnapshot) -> PreparedCollection | None:
         """Reuse verified routes only within the original permission lifetime."""
         prepared = self._collection_proofs.get(device["id_hash"])
@@ -84,6 +85,7 @@ class ServerIntegration(SchoolIntegration):
             options["assignments"] = True
         return provider.begin(**options)
 
+    # 이 브라우저의 이전 장치 연결을 해제하고 새 로그인 세션과 장치 연결을 묶는다.
     def complete_sign_in(self, raw, user, claims, request):
         old = request.cookies.get(self.device_cookie)
         if old:
@@ -124,6 +126,7 @@ class ServerIntegration(SchoolIntegration):
             samesite="lax",
         )
 
+    # 세션·전용 헤더 조건을 확인해 조회 세션이 만료된 뒤에도 장치 연결을 해제할 수 있게 한다.
     def logout_request(self, request):
         session = self.db.session(request.cookies.get(self.session_cookie))
         if request.headers.get("x-calendarsync-logout") != "1":
@@ -198,6 +201,7 @@ class ServerIntegration(SchoolIntegration):
             self, device, ingest, force, prepare_collection=prepare_collection, prepared=prepared
         )
 
+    # 응답 후 수집을 실행하며, 실패해도 이미 보낸 응답 대신 다음 worker 재시도로 이어지게 한다.
     def run_deferred_ingestion(self, device, prepared=None):
         try:
             self.run_sync(device, ingest=True, prepared=prepared)
@@ -209,6 +213,7 @@ class ServerIntegration(SchoolIntegration):
             except Exception:
                 pass
 
+    # 공유 모드는 권한 확인과 수집 예약 후 먼저 응답하고, 그 외 모드는 수집 결과까지 받아 응답한다.
     def sync(self, session, background_tasks=None):
         if self.shared_ingestion_enabled:
             device = self.db.session_device(session)
@@ -233,6 +238,7 @@ class ServerIntegration(SchoolIntegration):
             result["ingestion"] = ingestion
         return result
 
+    # 기존 권한 증명의 유효기간과 채널 범위를 읽어 확인 상태를 계산하며 권한을 연장하지 않는다.
     def _teams_readiness(self, session) -> PermissionReadiness:
         """Read the original proof without creating or extending access."""
         if hasattr(self.db, "teams_read_proof"):
@@ -280,6 +286,7 @@ class ServerIntegration(SchoolIntegration):
         if not readiness["verified"]:
             self._raise_unverified(readiness)
 
+    # 조회 전후의 권한과 채널 범위를 비교해 조회 도중 권한이 바뀐 결과는 반환하지 않는다.
     def read_teams(self, session, operation):
         """Never publish a read that crossed proof expiry or a scope change."""
         if not self.shared_ingestion_enabled:
@@ -293,6 +300,7 @@ class ServerIntegration(SchoolIntegration):
             self._raise_unverified(after)
         return result
 
+    # 요청의 세션·빈도를 검사하고 Teams 경로에만 별도의 권한 확인을 적용한다.
     def check_request(self, session, request):
         checked = self.db.school_session(
             request.cookies.get(self.session_cookie), self.settings.idle_seconds
@@ -327,6 +335,7 @@ class ServerIntegration(SchoolIntegration):
                 except PermissionPending:
                     self._raise_unverified(self._teams_readiness(session))
 
+    # worker 실행권을 얻은 프로세스가 정리 작업, 예정된 동기화와 알림 발송을 차례로 수행한다.
     def tick(self):
         owner = secrets.token_hex(16)
         if not self.db.worker_lock(owner):
@@ -347,6 +356,7 @@ class ServerIntegration(SchoolIntegration):
             self.db.worker_unlock(owner)
 
 
+# 서버 구성 요소와 기능별 라우트를 조립하고 앱 수명에 맞춰 주기 작업을 시작·종료한다.
 def create_test_server(
     settings=None,
     database=None,

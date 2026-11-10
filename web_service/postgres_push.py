@@ -149,6 +149,7 @@ class PostgresPush:
                     (subscription_id, device_hash),
                 )
 
+    # 활성 구독과 발송 기록을 잠그고 중복·재시도 조건을 통과한 요청에만 새 발송 처리권을 준다.
     def claim_delivery_lease(self, key, subscription_id):
         if (
             not isinstance(key, str)
@@ -192,6 +193,7 @@ class PostgresPush:
             )
         return lease
 
+    # 같은 발송 처리권이 아직 유효할 때만 결과를 저장해 만료되거나 교체된 작업의 결과를 막는다.
     def finish_delivery_lease(self, key, lease, success):
         if not isinstance(lease, str) or not lease:
             return False

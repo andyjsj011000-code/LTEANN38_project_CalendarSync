@@ -5,6 +5,7 @@ from .ports import ConnectionStore, TokenProvider
 from .school_graph import GraphFailure
 
 
+# 토큰 갱신 후 장치 정보를 다시 읽어 이후 저장 검사가 최신 자격증명 세대를 사용하게 한다.
 def acquire_snapshot(
     tokens: TokenProvider, device: DeviceSnapshot, db: ConnectionStore
 ) -> tuple[str, DeviceSnapshot]:
