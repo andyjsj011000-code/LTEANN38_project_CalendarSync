@@ -25,6 +25,37 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
 }});
 
 (async () => {
+  // Channel search must preserve unsaved checkboxes, including rows outside the result.
+  {
+    const channels = [{id:'a',name:'물리 공지',enabled:true},{id:'b',name:'English ＡＢＣ',enabled:false},{id:'c',name:'물리 과제',enabled:true}];
+    const h = harness({overrides:{'/api/channels':() => response(channels)}}); await settle();
+    await h.click({action:'filters'});
+    assert.match(h.elements.modal.innerHTML, /type="search"[^>]*data-channel-query/);
+    const rows = channels.map(ch => ({textContent:ch.name,hidden:false,checkbox:{value:ch.id,checked:ch.enabled}}));
+    const status = {textContent:''};
+    const form = {id:'filters-form',querySelectorAll:selector => selector === '[data-channel-row]' ? rows : selector === '[name=channel]' ? rows.map(row => row.checkbox) : ['assignment','application','event'].map(value => ({value,checked:true})),querySelector:() => status};
+    const field = {dataset:{channelQuery:''},value:'물리 공지',closest:() => form};
+    const before = h.requests.length;
+    h.input(field);
+    assert.deepEqual(rows.map(row => row.hidden),[false,true,true]);
+    rows[0].checkbox.checked = false;
+    field.value = ' abc '; h.input(field);
+    assert.deepEqual(rows.map(row => row.hidden),[true,false,true]);
+    field.value = '없는 채널'; h.input(field);
+    assert.deepEqual(rows.map(row => row.hidden),[true,true,true]);
+    assert.match(status.textContent,/검색 결과가 없어요/);
+    field.value = '  '; h.input(field);
+    assert.deepEqual(rows.map(row => row.hidden),[false,false,false]);
+    assert.equal(rows[0].checkbox.checked,false);
+    assert.equal(rows[1].checkbox.checked,false);
+    assert.equal(h.requests.length,before);
+    field.value = 'English'; h.input(field);
+    h.overrides['/api/channels/a/preference'] = () => response({});
+    await h.submit(form);
+    assert.equal(writes(h).length,1);
+    assert.equal(writes(h)[0].url,'/api/channels/a/preference');
+    assert.equal(JSON.parse(writes(h)[0].options.body).enabled,false);
+  }
   // A slow manual collection never consumes navigation or replaces an open draft.
   {
     const pending = deferred(), h = harness(); await settle();
@@ -1308,6 +1339,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
     click(data) {return listeners.click({preventDefault() {}, target: {closest() {return {dataset: data, disabled: false};}}});},
     submit(form) {return listeners.submit({preventDefault() {}, target: form});},
     change(target) {return listeners.change({target});},
+    input(target) {return listeners.input({target});},
     escape() {listeners.cancel?.({target:elements.modal}); elements.modal.close();},
     visibility(hidden) {context.document.hidden = hidden; return listeners.visibilitychange();},
     activity(type = 'pointerdown') {return listeners[type]({});},
