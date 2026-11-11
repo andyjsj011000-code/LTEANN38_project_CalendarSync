@@ -6,6 +6,7 @@
   let activeLoad = null, monthRequest = null, monthEpoch = 0;
   let mutationSettled = Promise.resolve(), mutationRevision = 0;
   let dialogEpoch = 0, dialogRequestId = 0, lastRenderKey = null, dialogContainsTeams = false;
+  const pausedFilters = new WeakMap();
   let ingestionTimer = null, ingestionAttempts = 0, ingestionDeadline = 0, ingestionRefresh = false, ingestionFinalNeeded = false;
   let checkingTimer = null, checkingAttempts = 0, checkingDeadline = 0, checkingRefresh = false, teamsAccessRevision = 0;
   const readRequests = new Set();
@@ -137,6 +138,24 @@
     if (S.connection?.teams_verified === true && S.connection?.state === 'connected') return false;
     return S.connection?.retryable === true || S.connection?.state === 'checking';
   }
+  function teamsConnectionEnded() {
+    return ['not_connected','reauth_required','account_not_allowed','source_not_configured'].includes(S.connection?.state);
+  }
+  function protectTeamsDialog() {
+    if (!modal.open) return;
+    const form = $('#filters-form');
+    if (form && permissionRetryNeeded() && !teamsConnectionEnded()) {
+      if (!pausedFilters.has(form)) {
+        const changed = [...form.querySelectorAll('[name=channel]')].filter(input => input.checked !== input.defaultChecked);
+        pausedFilters.set(form, new Map(changed.map(input => [input.value,input.checked])));
+        form.querySelector('#filter-channel-list').replaceChildren();
+      }
+      const apply = form.querySelector('button[type=submit]');
+      apply.disabled = true; delete apply.dataset.locked;
+      form.querySelector('#filter-channel-retry').hidden = false;
+      form.querySelector('#channel-search-status').textContent = 'Teams 권한을 다시 확인하고 있어요. 검색어와 체크는 유지돼요.';
+    } else if (dialogContainsTeams || form) closeDialog();
+  }
   // Teams 데이터와 관련 팝업만 제거해 사용자의 개인 일정은 화면에 남긴다.
   function redactTeams(unverified = true) {
     S.teamsSnapshotPending = false;
@@ -145,12 +164,12 @@
     if (S.today) S.today = {...S.today,teams:[]};
     S.items = S.items.filter(item => item.source === 'personal'); S.upcoming = S.upcoming.filter(item => item.source === 'personal');
     S.channels = []; reviewItems = []; hiddenItems = hiddenItems.filter(item => item.source === 'personal'); reviewDialogItems.clear(); dialogRequestId++;
-    if (dialogContainsTeams && modal.open) {dialogEpoch++; modal.close(); modal.replaceChildren();}
+    protectTeamsDialog();
     if (detailItem?.source === 'teams') detailItem = null;
   }
   // 권한 확인이 지연되면 서버가 허용한 범위에서 현재 세션에 이미 표시한 일정만 임시 유지한다.
   function suspendTeams(retain, channels) {
-    if (!retain || ['not_connected','reauth_required','account_not_allowed','source_not_configured'].includes(S.connection?.state)) {redactTeams(); return;}
+    if (!retain || teamsConnectionEnded()) {redactTeams(); return;}
     // Retain only the already-rendered schedules in this signed-in session.
     // New reads and writes still require the server's unchanged permission proof.
     S.teamsUnverified = true; S.teamsSnapshotPending = true; teamsAccessRevision++;
@@ -160,7 +179,7 @@
       S.items = S.items.filter(visible); S.upcoming = S.upcoming.filter(visible); hiddenItems = hiddenItems.filter(visible);
     }
     S.channels = []; reviewItems = []; reviewDialogItems.clear(); dialogRequestId++;
-    if (dialogContainsTeams && modal.open) {dialogEpoch++; modal.close(); modal.replaceChildren();}
+    protectTeamsDialog();
     if (detailItem?.source === 'teams') detailItem = null;
   }
   function presentPermissionPending(error) {
@@ -256,6 +275,10 @@
         if (!publishable() || controller.signal.aborted) return;
         if (apply(value) === false) return;
         S.ready[name] = true; applied.add(name); delete S.partErrors[name];
+        if ((name === 'channels' || name === 'settings') && applied.has('channels') && applied.has('settings') &&
+            accessRevision === teamsAccessRevision && !teamsRejected && !S.teamsUnverified && !permissionRetryNeeded() && !connectionRejectsTeams()) {
+          restoreFilterChannels();
+        }
         if (S.today) render();
         return value;
       } catch (error) {
@@ -466,7 +489,7 @@
     });
   }
   function connectionRejectsTeams() {
-    if (['not_connected','reauth_required','account_not_allowed','source_not_configured'].includes(S.connection?.state)) return true;
+    if (teamsConnectionEnded()) return true;
     if (S.teamsSnapshotPending && S.permissionPending) return false;
     return S.connection?.teams_verified === false || ['source_unavailable','verification_failed'].includes(S.connection?.state);
   }
@@ -730,8 +753,39 @@
       throw error;
     }
   }
+  function filterChannelRows(form, query) {
+    if (pausedFilters.has(form)) return;
+    const normalize = text => text.normalize('NFKC').toLocaleLowerCase('ko-KR');
+    const words = normalize(query).trim().split(/\s+/).filter(Boolean);
+    const rows = form.querySelectorAll('[data-channel-row]');
+    let matched = 0;
+    for (const row of rows) {
+      row.hidden = !words.every(word => normalize(row.textContent).includes(word));
+      if (!row.hidden) matched++;
+    }
+    form.querySelector('#channel-search-status').textContent = !rows.length ? '표시할 Teams 채널이 없어요.' : matched ? `${rows.length}개 중 ${matched}개 채널 표시` : '검색 결과가 없어요. 다른 채널 이름으로 검색해 주세요.';
+  }
+  function filterChannelMarkup() {
+    return S.channels.map(ch => `<label class="toggle-row" data-channel-row><span>${esc(ch.name)}</span><input type="checkbox" name="channel" value="${esc(ch.id)}" ${ch.enabled ? 'checked' : ''}></label>`).join('');
+  }
+  function restoreFilterChannels() {
+    const form = modal.open && $('#filters-form');
+    const checks = form && pausedFilters.get(form);
+    if (!checks) return;
+    form.querySelector('#filter-channel-list').innerHTML = filterChannelMarkup();
+    for (const input of form.querySelectorAll('[name=channel]')) {
+      if (checks.has(input.value)) input.checked = checks.get(input.value);
+    }
+    pausedFilters.delete(form);
+    form.querySelector('#filter-channel-retry').hidden = true;
+    const apply = form.querySelector('button[type=submit]');
+    apply.disabled = S.busy;
+    if (S.busy) apply.dataset.locked = '1';
+    filterChannelRows(form, form.querySelector('[data-channel-query]').value);
+  }
   function filters() {
-    openDialog('표시 설정', `<form id="filters-form"><h3>Teams 채널</h3><label class="field"><span class="field-label">채널 검색</span><input type="search" data-channel-query placeholder="채널 이름으로 검색" autocomplete="off" aria-describedby="channel-search-status"></label><p id="channel-search-status" class="fine muted" role="status">${S.channels.length ? `${S.channels.length}개 채널 표시` : '표시할 Teams 채널이 없어요.'}</p>${S.channels.map(ch => `<label class="toggle-row" data-channel-row><span>${esc(ch.name)}</span><input type="checkbox" name="channel" value="${esc(ch.id)}" ${ch.enabled ? 'checked' : ''}></label>`).join('')}<h3>일정 종류</h3>${Object.entries(kindName).filter(([key]) => key !== 'personal').map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" name="kind" value="${key}" ${S.prefs.disabled_kinds.includes(key) ? '' : 'checked'}></label>`).join('')}<p class="fine muted">설정은 내 계정에만 적용돼요.</p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">적용</button></div></form>`, '', S.channels.length > 0);
+    openDialog('표시 설정', `<form id="filters-form"><h3>Teams 채널</h3><label class="field"><span class="field-label">채널 검색</span><input type="search" data-channel-query placeholder="채널 이름으로 검색" autocomplete="off" aria-describedby="channel-search-status"></label><p id="channel-search-status" class="fine muted" role="status">${S.channels.length ? `${S.channels.length}개 채널 표시` : '표시할 Teams 채널이 없어요.'}</p><button id="filter-channel-retry" type="button" class="secondary small" data-action="refresh" hidden>다시 확인</button><div id="filter-channel-list">${filterChannelMarkup()}</div><h3>일정 종류</h3>${Object.entries(kindName).filter(([key]) => key !== 'personal').map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" name="kind" value="${key}" ${S.prefs.disabled_kinds.includes(key) ? '' : 'checked'}></label>`).join('')}<p class="fine muted">설정은 내 계정에만 적용돼요.</p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">적용</button></div></form>`, '', S.channels.length > 0);
+    if (S.teamsUnverified && permissionRetryNeeded()) protectTeamsDialog();
   }
   let hiddenItems = [];
   async function hidden() {
@@ -812,16 +866,7 @@
     const el = event.target;
     if (el.dataset.channelQuery !== undefined) {
       const form = el.closest('#filters-form');
-      if (!form) return;
-      const normalize = text => text.normalize('NFKC').toLocaleLowerCase('ko-KR');
-      const words = normalize(el.value).trim().split(/\s+/).filter(Boolean);
-      const rows = [...form.querySelectorAll('[data-channel-row]')];
-      let matched = 0;
-      for (const row of rows) {
-        row.hidden = !words.every(word => normalize(row.textContent).includes(word));
-        if (!row.hidden) matched++;
-      }
-      form.querySelector('#channel-search-status').textContent = !rows.length ? '표시할 Teams 채널이 없어요.' : matched ? `${rows.length}개 중 ${matched}개 채널 표시` : '검색 결과가 없어요. 다른 채널 이름으로 검색해 주세요.';
+      if (form) filterChannelRows(form, el.value);
     }
     if (plannerEnabled() && el.closest?.('#task-form')) draftInputChanged();
   });
@@ -856,6 +901,7 @@
       return mutate(async () => {const epoch = authEpoch, dialog = dialogEpoch; const draftResult = plannerEnabled() ? await taskDrafts?.flush() : null; if (!activeView(epoch) || dialog !== dialogEpoch || (plannerEnabled() && (autoReadsPaused || resumeCheck))) throw new Error('로그인 상태를 확인한 뒤 다시 저장해 주세요.'); const result = await api(e ? `/api/tasks/${encodeURIComponent(e.id)}` : '/api/tasks',{method:e ? 'PUT' : 'POST',body:{...data,...(e ? {version:e.version} : {})}}); if (activeView(epoch) && plannerEnabled()) await taskDrafts?.clearConfirmed(draftResult); return result;}, '할 일을 저장했어요.', false, result => applyConfirmedState({hidden:false,completed:false,...e,...data,id:e?.id || result.id,source:'personal'}, {}, result));
     }
     if (form.id === 'filters-form') {
+      if (pausedFilters.has(form)) return;
       const channels = Object.fromEntries([...form.querySelectorAll('[name=channel]')].map(el => [el.value, el.checked]));
       const disabled_kinds = [...form.querySelectorAll('[name=kind]')].filter(el => !el.checked).map(el => el.value);
       if (SCHOOL) {

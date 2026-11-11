@@ -1244,6 +1244,57 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     assert.doesNotMatch(h.elements.app.innerHTML,/Fixture assignment|마지막으로 확인한 일정을 유지/);
     assert.equal(writes(h).length,0);
   }
+  // A permission recheck keeps unsaved display settings and only restores freshly allowed channels.
+  for (const retain of [true, false]) {
+    let channels = [{id:'a',name:'학급 공지',enabled:true},{id:'revoked',name:'Revoked private channel',enabled:true}];
+    const h = harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(true),'/api/channels':()=>response(channels)}});
+    await settle(); await h.click({action:'filters'});
+    const view = displaySettingsForm(h);
+    view.query.value = '학급'; h.input(view.query);
+    view.rows[0].input.checked = false; view.rows[1].input.checked = false;
+    view.kinds[0].checked = false;
+    h.overrides['/api/today'] = () => response({code:'permission_check_pending',teams_access_unverified:true,
+      connection_state:'checking',retryable:true,retain_teams_snapshot:retain},503);
+    await h.click({action:'refresh'});
+    assert.equal(h.elements.modal.open,true,'a retryable permission check must keep the settings dialog open');
+    assert.equal(view.rows.length,0); assert.equal(view.apply.disabled,true);
+    assert.equal(view.query.value,'학급'); assert.equal(view.kinds[0].checked,false);
+    await h.submit(view.form); assert.equal(writes(h).length,0);
+
+    view.query.value = '학급 새'; h.input(view.query);
+    assert.match(view.status.textContent,/권한.*확인/);
+    channels = [{id:'a',name:'학급 새 공지',enabled:true},{id:'new',name:'New allowed channel',enabled:false}];
+    const settings = deferred();
+    h.overrides['/api/today'] = () => response(h.today);
+    h.overrides['/api/settings'] = () => settings.promise;
+    const recovery = h.click({action:'refresh'}); await settle();
+    assert.equal(view.rows.length,0,'channel response must wait for current permission metadata');
+    settings.resolve(accessSettings(true)); await recovery;
+    assert.equal(h.elements.modal.open,true); assert.equal(view.apply.disabled,false);
+    assert.equal(view.query.value,'학급 새'); assert.equal(view.kinds[0].checked,false);
+    assert.deepEqual(view.rows.map(row=>[row.input.value,row.input.checked,row.hidden]),[['a',false,false],['new',false,true]]);
+    assert.doesNotMatch(view.list.innerHTML,/Revoked private channel/);
+    h.overrides['/api/channels/a/preference'] = () => response({});
+    h.overrides['/api/settings'] = () => accessSettings(true);
+    await h.submit(view.form);
+    assert.deepEqual(writes(h).map(write=>write.url),['/api/channels/a/preference','/api/settings']);
+    assert.equal(JSON.parse(writes(h)[0].options.body).enabled,false);
+    assert.deepEqual(JSON.parse(writes(h)[1].options.body).disabled_kinds,['assignment']);
+  }
+  // A recheck that ends in required sign-in must not keep the channel settings draft open.
+  {
+    const h = harness({overrides:{'/api/service':personalService,'/api/settings':()=>accessSettings(true)}});
+    await settle(); await h.click({action:'filters'});
+    const view = displaySettingsForm(h);
+    view.query.value = 'Fixture'; h.input(view.query); view.rows[0].input.checked = false;
+    h.overrides['/api/today'] = () => unverifiedAccess(true,'checking');
+    await h.click({action:'refresh'});
+    assert.equal(h.elements.modal.open,true);
+    h.overrides['/api/today'] = () => unverifiedAccess(false,'reauth_required');
+    await h.click({action:'refresh'});
+    assert.equal(h.elements.modal.open,false);
+    assert.equal(h.elements.modal.innerHTML,''); assert.equal(writes(h).length,0);
+  }
   // The typed renewal response retains rows; subsequent definitive revocation still clears them.
   {
     const h=harness({overrides:{'/api/service':personalService}});await settle();await h.click({action:'calendar'});
@@ -1273,8 +1324,35 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     await h.click({action:'refresh'});
     assert.match(h.elements.app.innerHTML,/Still authorized schedule/);assert.doesNotMatch(h.elements.app.innerHTML,/Revoked channel schedule/);
   }
-  console.log('Usability UI: 123 synthetic scenarios passed (incremental snapshots, permission renewal, redaction and prior regressions).');
+  console.log('Usability UI: synthetic scenarios passed (incremental snapshots, permission renewal, redaction and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
+function displaySettingsForm(h) {
+  let rows = [];
+  const status = {textContent:''}, apply = {disabled:false,dataset:{}}, retry = {hidden:true};
+  const kinds = ['assignment','application','event'].map(value=>({value,checked:true}));
+  const list = {
+    html:'',
+    get innerHTML() {return this.html;},
+    set innerHTML(value) {
+      this.html = value;
+      rows = [...value.matchAll(/<span>([^<]*)<\/span><input type="checkbox" name="channel" value="([^"]*)"([^>]*)>/g)].map(([,textContent,value,flags])=>{
+        const checked = /\bchecked\b/.test(flags);
+        return {textContent,hidden:false,input:{value,checked,defaultChecked:checked}};
+      });
+    },
+    replaceChildren() {this.innerHTML = '';}
+  };
+  const query = {value:'',dataset:{channelQuery:''},closest:()=>form};
+  const elements = {'#channel-search-status':status,'#filter-channel-list':list,'#filter-channel-retry':retry,'[data-channel-query]':query,'button[type=submit]':apply};
+  const form = {id:'filters-form',querySelector:selector=>elements[selector],querySelectorAll(selector) {
+    if (selector === '[data-channel-row]') return rows;
+    if (selector === '[name=channel]') return rows.map(row=>row.input);
+    return kinds;
+  }};
+  list.innerHTML = h.elements.modal.innerHTML;
+  h.elements['filters-form'] = form;
+  return {form,query,status,apply,kinds,list,get rows() {return rows;}};
+}
 function abortable(value, signal) {
   if (!signal) return Promise.resolve(value);
   return new Promise((resolve, reject) => {
