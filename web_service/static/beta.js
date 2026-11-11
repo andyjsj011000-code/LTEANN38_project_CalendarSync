@@ -725,7 +725,7 @@
     }
   }
   function filters() {
-    openDialog('표시 설정', `<form id="filters-form"><h3>Teams 채널</h3>${S.channels.map(ch => `<label class="toggle-row"><span>${esc(ch.name)}</span><input type="checkbox" name="channel" value="${esc(ch.id)}" ${ch.enabled ? 'checked' : ''}></label>`).join('')}<h3>일정 종류</h3>${Object.entries(kindName).filter(([key]) => key !== 'personal').map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" name="kind" value="${key}" ${S.prefs.disabled_kinds.includes(key) ? '' : 'checked'}></label>`).join('')}<p class="fine muted">설정은 내 계정에만 적용돼요.</p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">적용</button></div></form>`, '', S.channels.length > 0);
+    openDialog('표시 설정', `<form id="filters-form"><h3>Teams 채널</h3><label class="field"><span class="field-label">채널 검색</span><input type="search" data-channel-query placeholder="채널 이름으로 검색" autocomplete="off" aria-describedby="channel-search-status"></label><p id="channel-search-status" class="fine muted" role="status">${S.channels.length ? `${S.channels.length}개 채널 표시` : '표시할 Teams 채널이 없어요.'}</p>${S.channels.map(ch => `<label class="toggle-row" data-channel-row><span>${esc(ch.name)}</span><input type="checkbox" name="channel" value="${esc(ch.id)}" ${ch.enabled ? 'checked' : ''}></label>`).join('')}<h3>일정 종류</h3>${Object.entries(kindName).filter(([key]) => key !== 'personal').map(([key, label]) => `<label class="toggle-row"><span>${label}</span><input type="checkbox" name="kind" value="${key}" ${S.prefs.disabled_kinds.includes(key) ? '' : 'checked'}></label>`).join('')}<p class="fine muted">설정은 내 계정에만 적용돼요.</p><div class="dialog-foot"><button type="button" class="secondary" data-action="close">닫기</button><button class="primary" type="submit">적용</button></div></form>`, '', S.channels.length > 0);
   }
   let hiddenItems = [];
   async function hidden() {
@@ -802,7 +802,23 @@
     }
     if (el.closest('#task-form')) {if (['start_date','end_date','display_mode'].includes(el.name)) syncDates(); draftInputChanged();}
   });
-  document.addEventListener('input', event => {if (plannerEnabled() && event.target.closest?.('#task-form')) draftInputChanged();});
+  document.addEventListener('input', event => {
+    const el = event.target;
+    if (el.dataset.channelQuery !== undefined) {
+      const form = el.closest('#filters-form');
+      if (!form) return;
+      const normalize = text => text.normalize('NFKC').toLocaleLowerCase('ko-KR');
+      const words = normalize(el.value).trim().split(/\s+/).filter(Boolean);
+      const rows = [...form.querySelectorAll('[data-channel-row]')];
+      let matched = 0;
+      for (const row of rows) {
+        row.hidden = !words.every(word => normalize(row.textContent).includes(word));
+        if (!row.hidden) matched++;
+      }
+      form.querySelector('#channel-search-status').textContent = !rows.length ? '표시할 Teams 채널이 없어요.' : matched ? `${rows.length}개 중 ${matched}개 채널 표시` : '검색 결과가 없어요. 다른 채널 이름으로 검색해 주세요.';
+    }
+    if (plannerEnabled() && el.closest?.('#task-form')) draftInputChanged();
+  });
   document.addEventListener('submit', async event => {
     event.preventDefault(); const form = event.target;
     if (S.busy) return;
