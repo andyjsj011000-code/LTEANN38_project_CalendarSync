@@ -93,6 +93,18 @@ REVISIONS = {
             ("postgres-base-v1",),
         ),
         Revision(
+            "sqlite-classroom-google-v1",
+            "classroom_google_v1.sql",
+            "78af776414c7b12f306e2278188c99db68a82720a2fbf19414239c6b5685621d",
+            ("sqlite-classroom-v1",),
+        ),
+        Revision(
+            "postgres-classroom-google-v1",
+            "classroom_google_v1.sql",
+            "78af776414c7b12f306e2278188c99db68a82720a2fbf19414239c6b5685621d",
+            ("postgres-classroom-v1",),
+        ),
+        Revision(
             "postgres-planner-v1",
             "planner_v1.sql",
             "9c3d04fc18f2e3cf49ca5340c92d950a30f795c48a8bf80760f2de30cea98b44",
@@ -108,15 +120,21 @@ PROFILES = {
     "postgres-server": ("postgres-base-v1",),
 }
 FEATURES = {
-    "sqlite-server": {"planner": "sqlite-planner-v1", "classroom": "sqlite-classroom-v1"},
+    "sqlite-server": {
+        "planner": "sqlite-planner-v1",
+        "classroom": "sqlite-classroom-v1",
+        "classroom-google": "sqlite-classroom-google-v1",
+    },
     "postgres-server": {
         "shared-ingestion": "postgres-shared-v1",
         "planner": "postgres-planner-v1",
         "classroom": "postgres-classroom-v1",
+        "classroom-google": "postgres-classroom-google-v1",
     },
 }
 FEATURE_TABLES = {
     "classroom": frozenset({"web_classroom_connections"}),
+    "classroom-google": frozenset({"web_classroom_google"}),
     "planner": frozenset({"web_task_drafts", "web_task_trash", "web_ingestion_status"}),
     "shared-ingestion": frozenset({"web_channel_ingestion"}),
 }

@@ -416,6 +416,13 @@ def create_test_server(
         app.include_router(create_notification_router(notification_runtime.inbox))
     app.add_middleware(SecurityBoundary, settings=settings)
     require = app.state.require_session
+    classroom_google = None
+    if settings.google_classroom_configured and not preview:
+        from .classroom_google import GoogleClassroom, install_google_classroom
+
+        classroom_google = GoogleClassroom(settings, db)
+        app.state.classroom_google = classroom_google
+        install_google_classroom(app, classroom_google, require)
 
     @app.exception_handler(RequestValidationError)
     async def invalid(request, error):
@@ -429,12 +436,12 @@ def create_test_server(
     async def lifespan(app):
         stop = asyncio.Event()
 
-        async def loop():
+        async def loop(tick, extra_tick=None):
             while not stop.is_set():
                 try:
-                    await asyncio.to_thread(integration.tick)
-                    if notification_runtime is not None:
-                        await asyncio.to_thread(notification_runtime.tick)
+                    await asyncio.to_thread(tick)
+                    if extra_tick is not None:
+                        await asyncio.to_thread(extra_tick)
                 except Exception:
                     try:
                         db.audit("worker_failed", "worker")
@@ -447,10 +454,15 @@ def create_test_server(
                 except TimeoutError:
                     pass
 
-        task = asyncio.create_task(loop()) if worker else None
+        tasks = []
+        if worker:
+            extra_tick = notification_runtime.tick if notification_runtime is not None else None
+            tasks.append(asyncio.create_task(loop(integration.tick, extra_tick)))
+            if classroom_google is not None:
+                tasks.append(asyncio.create_task(loop(classroom_google.tick)))
         yield
         stop.set()
-        if task:
+        for task in tasks:
             try:
                 await asyncio.wait_for(task, timeout=5)
             except TimeoutError:
@@ -460,7 +472,7 @@ def create_test_server(
 
     install_server_routes(app, settings, db, integration, require, static, preview)
     if settings.classroom_enabled and not preview:
-        install_classroom_routes(app, db, require)
+        install_classroom_routes(app, db, require, classroom_google)
     install_review_routes(app, db, integration, require)
     install_reminder_routes(app, db, integration, require)
     install_push_routes(app, db, integration, require)

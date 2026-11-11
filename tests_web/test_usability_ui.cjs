@@ -1353,6 +1353,23 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     await h.advance(0);
     assert.equal(h.requests.at(-1).url,'/api/classroom');
   }
+  // A configured Google client offers a consent button even for an existing Apps Script user.
+  {
+    const consentUrl = 'https://accounts.google.com/o/oauth2/v2/auth?scope=classroom';
+    let navigated;
+    const h = harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,classroom_enabled:true,classroom_google_enabled:true}),
+      '/api/classroom':() => response({connected:true,snapshot:null}),
+      '/api/classroom/google/connect':() => response({authorization_url:consentUrl})
+    }});
+    h.context.location.assign = url => {navigated = url;};
+    await settle();
+    assert.match(h.elements.app.innerHTML,/Google Classroom 연결/);
+    await h.click({action:'classroom-google-connect'});
+    assert.equal(navigated,consentUrl);
+    assert.equal(writes(h).at(-1).url,'/api/classroom/google/connect');
+    assert.doesNotMatch(h.elements.modal.innerHTML,/CALENDARSYNC_TOKEN/);
+  }
   console.log('Usability UI: synthetic scenarios passed (incremental snapshots, permission renewal, redaction and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function displaySettingsForm(h) {

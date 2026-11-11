@@ -45,7 +45,7 @@ class ClassroomSnapshot(Input):
     items: list[ClassroomItem] = Field(max_length=24)
 
 
-def install_classroom_routes(app, db, require_session):
+def install_classroom_routes(app, db, require_session, google=None):
     backend = "sqlite" if hasattr(db, "path") else "postgres"
     with db.connect() as connection:
         connection.execute(
@@ -62,6 +62,8 @@ def install_classroom_routes(app, db, require_session):
             x_csrf_token.encode("utf-8"), session["csrf_token"].encode("ascii")
         ):
             raise HTTPException(403, "The Classroom viewing session has changed")
+        if google and (status := google.status(session["user_id"])) is not None:
+            return status
         with db.connect() as connection:
             row = query(
                 connection,

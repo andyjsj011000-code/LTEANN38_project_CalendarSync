@@ -25,6 +25,8 @@ class Settings:
     access_seconds: int = 60
     allow_local_login: bool = False
     classroom_enabled: bool = False
+    google_classroom_client_id: str = ""
+    google_classroom_client_secret: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         Fernet(self.data_key.encode("ascii"))
@@ -47,6 +49,14 @@ class Settings:
 
         if not 60 <= self.idle_seconds <= 3600 or not 15 <= self.access_seconds <= 60:
             raise ValueError("Invalid idle or permission verification lifetime")
+        if bool(self.google_classroom_client_id) != bool(self.google_classroom_client_secret):
+            raise ValueError("Configure both WEB_GOOGLE_CLASSROOM_CLIENT_* values or neither")
+        if self.google_classroom_configured and not self.classroom_enabled:
+            raise ValueError("Google Classroom OAuth requires WEB_CLASSROOM_ENABLED=1")
+
+    @property
+    def google_classroom_configured(self) -> bool:
+        return bool(self.google_classroom_client_id and self.google_classroom_client_secret)
 
     @property
     def secure_cookies(self) -> bool:
@@ -80,6 +90,8 @@ class Settings:
             access_seconds=int(env.get("WEB_ACCESS_SECONDS", "60")),
             allow_local_login=env.get("WEB_ALLOW_LOCAL_LOGIN") == "1",
             classroom_enabled=env.get("WEB_CLASSROOM_ENABLED") == "1",
+            google_classroom_client_id=env.get("WEB_GOOGLE_CLASSROOM_CLIENT_ID", ""),
+            google_classroom_client_secret=env.get("WEB_GOOGLE_CLASSROOM_CLIENT_SECRET", ""),
         )
 
     @classmethod

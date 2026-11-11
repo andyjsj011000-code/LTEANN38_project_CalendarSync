@@ -268,7 +268,8 @@
     try {
       const value = await api('/api/classroom', {signal:controller.signal, timeout:15000});
       if (!current()) return;
-      if (S.classroom?.connected === value.connected &&
+      if (S.classroom?.connected === value.connected && S.classroom?.method === value.method &&
+          S.classroom?.reauth === value.reauth &&
           S.classroom?.snapshot?.captured_at === value.snapshot?.captured_at) return;
       S.classroom = value;
       delete S.partErrors.classroom;
@@ -618,16 +619,26 @@
   function classroomCard() {
     if (!S.service?.classroom_enabled) return '';
     const connection = S.classroom;
-    const action = connection?.connected
-      ? '<button class="text-button" data-action="classroom-disconnect">연결 해제</button>'
-      : connection ? '<button class="secondary small" data-action="classroom-connect">Classroom 연결</button>' : '';
+    const google = connection?.method === 'google';
+    const actions = [];
+    if (connection && S.service.classroom_google_enabled && (!google || connection.reauth)) {
+      actions.push(`<button class="secondary small" data-action="classroom-google-connect">${google ? 'Google Classroom 다시 연결' : 'Google Classroom 연결'}</button>`);
+    }
+    if (connection?.connected) {
+      actions.push('<button class="text-button" data-action="classroom-disconnect">연결 해제</button>');
+    } else if (connection && !S.service.classroom_google_enabled) {
+      actions.push('<button class="secondary small" data-action="classroom-connect">Classroom 연결</button>');
+    }
     let body;
     if (!connection) {
       body = esc(S.partErrors.classroom || 'Classroom 연결을 확인하고 있어요.');
     } else if (!connection.connected) {
       body = '학교 Google 계정을 연결하면 공지와 과제가 여기에 표시돼요.';
+    } else if (connection.reauth) {
+      body = 'Google 읽기 권한을 다시 승인하면 공지와 과제를 가져올 수 있어요.';
     } else if (!connection.snapshot) {
-      body = '최근 동기화 기록이 없어요. Apps Script에서 실행 결과를 확인해 주세요.';
+      body = google ? 'Google Classroom에서 공지와 과제를 가져오고 있어요.'
+        : '최근 동기화 기록이 없어요. Apps Script에서 실행 결과를 확인해 주세요.';
     }
     if (body) body = `<p class="empty" role="status">${body}</p>`;
     else {
@@ -643,7 +654,7 @@
       }).join('');
       body = `<p class="fine muted">최근 동기화 ${esc(dateTime.format(connection.snapshot.captured_at))}</p>${rows || '<p class="empty">표시할 공지나 과제가 없어요.</p>'}`;
     }
-    return `<section class="card classroom-card"><div class="card-head"><h2>Google Classroom</h2>${action}</div><div class="list">${body}</div></section>`;
+    return `<section class="card classroom-card"><div class="card-head"><h2>Google Classroom</h2><div class="actions">${actions.join('')}</div></div><div class="list">${body}</div></section>`;
   }
   async function connectClassroom() {
     const epoch = authEpoch;
@@ -919,24 +930,43 @@
       if (button.dataset.changeDecision !== undefined) {const item = reviewDialogItems.get(button.dataset.changeId); if (!item) return; return mutate(() => api('/api/changes/'+encodeURIComponent(item.id),{method:'POST',body:{accept:button.dataset.changeDecision==='accept'}}),'변경사항을 처리했어요.');}
       if (button.dataset.assignmentFilter && assignmentsEnabled()) {S.assignmentFilter = ['upcoming','overdue','completed','all'].includes(button.dataset.assignmentFilter) ? button.dataset.assignmentFilter : 'upcoming'; render(); return;}
       if (action === 'refresh-assignments' && assignmentsEnabled()) return await loadAssignments(true);
+      if (action === 'classroom-google-connect' && S.service?.classroom_google_enabled) {
+        const epoch = authEpoch;
+        button.disabled = true;
+        try {
+          const result = await api('/api/classroom/google/connect', {method:'POST'});
+          if (!activeView(epoch)) return;
+          const url = new URL(result.authorization_url);
+          if (url.origin !== 'https://accounts.google.com' || url.pathname !== '/o/oauth2/v2/auth') {
+            throw new Error('Google 연결 주소를 확인하지 못했어요.');
+          }
+          location.assign(url.href);
+        } finally {button.disabled = false;}
+        return;
+      }
       if (action === 'classroom-connect') {
         button.disabled = true;
         try {return await connectClassroom();} finally {button.disabled = false;}
       }
       if (action === 'classroom-disconnect') {
-        openDialog('Classroom 연결 해제', '<p>CalendarSync에서 가져온 Classroom 항목을 지우고 연결 키를 폐기해요.</p>',
-          '<button class="secondary" data-action="close">취소</button><button class="danger" data-action="classroom-disconnect-confirm">연결 해제</button>');
+        const google = S.classroom?.method === 'google';
+        const message = google ? '가져온 Classroom 항목을 지우고 CalendarSync의 Google 읽기 권한을 해제해요.'
+          : '가져온 Classroom 항목을 지우고 Apps Script 연결 키를 폐기해요.';
+        openDialog('Classroom 연결 해제', `<p>${message}</p>`,
+          `<button class="secondary" data-action="close">취소</button><button class="danger" data-action="classroom-disconnect-confirm" data-google="${google ? '1' : '0'}">연결 해제</button>`);
         return;
       }
       if (action === 'classroom-disconnect-confirm') {
         const epoch = authEpoch;
-        await api('/api/classroom/connection', {method:'DELETE'});
+        const google = button.dataset.google === '1';
+        await api(google ? '/api/classroom/google/connection' : '/api/classroom/connection', {method:'DELETE'});
         if (!activeView(epoch)) return;
         classroomRevision++;
         stopClassroomRefresh();
         S.classroom = {connected:false,snapshot:null};
         closeDialog();
         render();
+        if (google) await load();
         return;
       }
       if (button.dataset.detail) {const e = find(button.dataset.detail, button.dataset.source); if (e) detail(e); return;}
@@ -1056,6 +1086,11 @@
       try {const me = await api('/api/me'); if (epoch !== authEpoch) return; S.me = me; lastSessionCheckAt = Date.now();} catch (error) {if (epoch !== authEpoch) return; if (error.status === 401) {loginScreen(); return;} throw error;}
       if (plannerEnabled()) {taskDrafts?.load(); refreshPlannerStatus({force:true});}
       await load();
+      if (S.service?.classroom_google_enabled && ['?classroom=connected','?classroom=failed'].includes(location.search)) {
+        const failed = location.search === '?classroom=failed';
+        window.history?.replaceState(null, '', location.pathname);
+        if (failed) toast('Google Classroom 연결을 완료하지 못했어요. 계정과 읽기 권한을 확인해 주세요.', true);
+      }
     } catch (error) {
       if (epoch !== authEpoch) return;
       if (S.me) {failure(error); return;}

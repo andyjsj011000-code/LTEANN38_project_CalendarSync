@@ -62,6 +62,8 @@ def configuration(environ=None):
         idle_seconds=1800,
         access_seconds=60,
         classroom_enabled=env.get("WEB_CLASSROOM_ENABLED") == "1",
+        google_classroom_client_id=env.get("WEB_GOOGLE_CLASSROOM_CLIENT_ID", ""),
+        google_classroom_client_secret=env.get("WEB_GOOGLE_CLASSROOM_CLIENT_SECRET", ""),
     )
     if not settings.auth_configured or not settings.secure_cookies:
         raise ValueError("HTTPS and school Entra authentication are required for the beta factory")

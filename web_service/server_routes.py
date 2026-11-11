@@ -33,6 +33,11 @@ def install_server_routes(app, settings, db, integration, require, static, previ
             "personal_agenda": True,
             "assignments_enabled": integration.assignments_enabled,
             **({"classroom_enabled": True} if settings.classroom_enabled and not preview else {}),
+            **(
+                {"classroom_google_enabled": True}
+                if settings.google_classroom_configured and not preview
+                else {}
+            ),
             "planner_enhancements": bool(getattr(db, "planner_enhancements_enabled", False)),
         }
 
