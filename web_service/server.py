@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .api import create_app
+from .classroom_routes import install_classroom_routes
 from .collection_types import (
     DeviceSnapshot,
     PermissionReadiness,
@@ -458,6 +459,8 @@ def create_test_server(
     app.router.lifespan_context = lifespan
 
     install_server_routes(app, settings, db, integration, require, static, preview)
+    if settings.classroom_enabled and not preview:
+        install_classroom_routes(app, db, require)
     install_review_routes(app, db, integration, require)
     install_reminder_routes(app, db, integration, require)
     install_push_routes(app, db, integration, require)

@@ -61,6 +61,7 @@ def configuration(environ=None):
         session_seconds=28800,
         idle_seconds=1800,
         access_seconds=60,
+        classroom_enabled=env.get("WEB_CLASSROOM_ENABLED") == "1",
     )
     if not settings.auth_configured or not settings.secure_cookies:
         raise ValueError("HTTPS and school Entra authentication are required for the beta factory")

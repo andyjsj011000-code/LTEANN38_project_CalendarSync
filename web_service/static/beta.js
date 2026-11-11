@@ -28,6 +28,8 @@
   const S = {me: null, view: 'today', day: '', month: '', selected: '', today: null, items: [], upcoming: [], channels: [], prefs: null, busy: false, loading: false, loadError: false, epoch: 0};
   S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
   S.listFilters = L?.createState() || {query:'',unfinishedOnly:false};
+  S.classroom = null;
+  let classroomRevision = 0;
   const plannerEnabled = () => !!S.service?.planner_enhancements;
   const shownItems = items => plannerEnabled() && L ? L.filter(items,S.listFilters) : items;
   const partNames = ['personal','today','calendar','upcoming','channels','settings','changes'];
@@ -92,6 +94,7 @@
   function clearPrivate() {
     assignmentRequest?.abort(); assignmentRequest = null; assignmentSequence++;
     S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
+    S.classroom = null; classroomRevision++;
     taskDrafts?.reset(); draftUi = null; plannerStatus = null; statusRequest?.abort(); statusRequest = null; statusReadAt = 0; statusRevision++;
     trashItems = []; undoTrash = null; draftRestoring = false; taskMissing = false; taskFormRevision++;
     S.listFilters = L?.createState() || {query:'',unfinishedOnly:false}; listControls?.reset();
@@ -292,6 +295,12 @@
         if (S.today) render();
       }
     };
+    const classroomVersion = classroomRevision;
+    const classroom = S.service?.classroom_enabled
+      ? part('classroom', '/api/classroom', value => {
+        if (classroomVersion !== classroomRevision) return false;
+        S.classroom = value;
+      }) : null;
     const personal = S.service?.personal_agenda ? part('personal', '/api/personal/today', value => {
       // A combined snapshot owns both sources once it has arrived in this load.
       if (applied.has('today') || (S.today?.date && value.date < S.today.date)) return false;
@@ -337,6 +346,7 @@
         await Promise.allSettled(jobs);
       }
       if (!applied.has('today')) await personal;
+      await classroom;
       const failures = errors.filter(({name}) => name !== 'personal' || !applied.has('today'));
       if (current() && failures.length) {
         if (!S.today) {S.loadError = true; renderLoadState(true);}
@@ -535,7 +545,7 @@
   function render() {
     rememberQuickDraft();
     if (S.me && listControls?.isComposing()) return;
-    const key = JSON.stringify([S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.teamsUnverified,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,S.assignments,S.assignmentFilter,plannerStatus,!!draftUi?.available,undoTrash?.id]);
+    const key = JSON.stringify([S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.teamsUnverified,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,S.assignments,S.assignmentFilter,S.classroom,plannerStatus,!!draftUi?.available,undoTrash?.id]);
     if (key === lastRenderKey) {updateRefreshStatus(); updateSyncStatus(); return;}
     const searchFocus = listControls?.captureFocus();
     const input = $('#quick-form')?.elements?.title;
@@ -564,7 +574,55 @@
     const teamsPending = S.teamsUnverified || !S.ready.today || (SCHOOL && S.service?.mode !== 'preview' && (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state !== 'connected'));
     const teamsCount = teamsPending && !S.today.teams.length ? (!S.ready.today || !S.ready.settings || S.connection?.ingestion_pending || S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : teams.length;
     const teamsEmpty = S.teamsUnverified ? '권한을 다시 확인하는 동안 Teams 일정을 잠시 숨겼어요. 확인되면 다시 표시돼요.' : !S.ready.today ? (S.partErrors.today || 'Teams 일정을 확인하는 대로 표시해요.') : teamsPending ? (S.connection?.ingestion_pending || !S.ready.settings ? 'Teams 일정을 확인하는 대로 표시해요.' : connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
-    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + plannerTools() + listTools('today',[...S.today.teams,...S.today.personal,...S.upcoming]) + `<div class="today-layout"><div class="stack">${assignmentToday()}<section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${!S.ready.today && !S.today.teams.length ? `<div class="empty" role="${S.partErrors.today && !S.permissionPending ? 'alert' : 'status'}">${esc(teamsEmpty)}</div>` : list(teams, filteredEmpty(teamsEmpty,S.today.teams.length))}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${personal.length}</span></h2></div><div class="list">${list(personal, filteredEmpty('오늘 할 일을 가볍게 적어보세요.',S.today.personal.length))}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">${S.ready.today ? '완료한 항목은 원래 위치에 남아요.' : '먼저 확인된 개인 할 일 기준이에요. Teams 일정은 확인 중이에요.'}</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : `<div class="empty">${esc(filteredEmpty('일주일 안에 다가오는 마감이 없어요.',S.upcoming.length))}</div>`}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
+    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + plannerTools() + listTools('today',[...S.today.teams,...S.today.personal,...S.upcoming]) + `<div class="today-layout"><div class="stack">${assignmentToday()}<section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${!S.ready.today && !S.today.teams.length ? `<div class="empty" role="${S.partErrors.today && !S.permissionPending ? 'alert' : 'status'}">${esc(teamsEmpty)}</div>` : list(teams, filteredEmpty(teamsEmpty,S.today.teams.length))}</div></section>${classroomCard()}<section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${personal.length}</span></h2></div><div class="list">${list(personal, filteredEmpty('오늘 할 일을 가볍게 적어보세요.',S.today.personal.length))}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">${S.ready.today ? '완료한 항목은 원래 위치에 남아요.' : '먼저 확인된 개인 할 일 기준이에요. Teams 일정은 확인 중이에요.'}</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : `<div class="empty">${esc(filteredEmpty('일주일 안에 다가오는 마감이 없어요.',S.upcoming.length))}</div>`}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
+  }
+  function classroomCard() {
+    if (!S.service?.classroom_enabled) return '';
+    const connection = S.classroom;
+    const action = connection?.connected
+      ? '<button class="text-button" data-action="classroom-disconnect">연결 해제</button>'
+      : connection ? '<button class="secondary small" data-action="classroom-connect">Classroom 연결</button>' : '';
+    let body;
+    if (!connection) {
+      body = esc(S.partErrors.classroom || 'Classroom 연결을 확인하고 있어요.');
+    } else if (!connection.connected) {
+      body = '학교 Google 계정을 연결하면 공지와 과제가 여기에 표시돼요.';
+    } else if (!connection.snapshot) {
+      body = '최근 동기화 기록이 없어요. Apps Script에서 실행 결과를 확인해 주세요.';
+    }
+    if (body) body = `<p class="empty" role="status">${body}</p>`;
+    else {
+      const dateTime = new Intl.DateTimeFormat('ko-KR', {
+        dateStyle:'short', timeStyle:'short', timeZone:'Asia/Seoul'
+      });
+      const rows = connection.snapshot.items.map(item => {
+        const type = item.kind === 'announcement' ? '공지' : '과제';
+        const deadline = item.due ? (item.due.length === 10 ? pretty(item.due) : dateTime.format(new Date(item.due))) : '';
+        const meta = [item.course, type, deadline && '마감 ' + deadline].filter(Boolean).join(' · ');
+        const link = item.url ? ` <a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">원문</a>` : '';
+        return `<div class="upcoming-item"><div class="upcoming-text"><strong>${esc(item.title)}</strong><small>${esc(meta)}${link}</small>${item.description ? `<p class="fine">${esc(item.description)}</p>` : ''}</div></div>`;
+      }).join('');
+      body = `<p class="fine muted">최근 동기화 ${esc(dateTime.format(connection.snapshot.captured_at))}</p>${rows || '<p class="empty">표시할 공지나 과제가 없어요.</p>'}`;
+    }
+    return `<section class="card classroom-card"><div class="card-head"><h2>Google Classroom</h2>${action}</div><div class="list">${body}</div></section>`;
+  }
+  async function connectClassroom() {
+    const epoch = authEpoch;
+    const result = await api('/api/classroom/connection', {method:'POST'});
+    if (!activeView(epoch)) return;
+    classroomRevision++;
+    S.classroom = {connected:true,snapshot:null};
+    render();
+    openDialog('Google Classroom 연결', `
+      <ol>
+        <li>학교 계정의 개인 Apps Script 프로젝트에 <a href="/assets/classroom-sync.gs" download>Code.gs 코드</a>와 <a href="/assets/classroom-appsscript.json" download>appsscript.json 설정</a>을 붙여넣으세요.</li>
+        <li>프로젝트 설정의 스크립트 속성에 아래 두 값을 저장하세요.</li>
+        <li><strong>startClassroomSync</strong>를 실행하고 Google 권한을 승인하세요. 첫 전송이 성공하면 15분마다 갱신돼요.</li>
+      </ol>
+      <label class="field"><span class="field-label">CALENDARSYNC_ORIGIN</span><input readonly value="${esc(location.origin)}"></label>
+      <label class="field"><span class="field-label">CALENDARSYNC_TOKEN</span><input id="classroom-connection-token" readonly value="${esc(result.token)}"></label>
+      <p class="fine muted">연결 키는 이 창에서 한 번만 표시돼요.</p>`,
+      '<button class="secondary" data-action="close">닫기</button>');
   }
   function renderCalendar() {
     if (!S.ready.calendar) {
@@ -626,6 +684,9 @@
     }
   }
   document.addEventListener('cancel', async event => {if (event.target !== modal) return; if (plannerEnabled() && personalForm()) {event.preventDefault(); if (!S.busy && await leaveTaskForm()) closeDialog();} else {dialogEpoch++; dialogRequestId++;}}, true);
+  modal.addEventListener?.('close', () => {
+    if (!modal.open && $('#classroom-connection-token')) modal.replaceChildren();
+  });
   function find(id, source) {return [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming, ...(S.assignments?.items || [])].find(e => e.id === id && e.source === source);}
   let detailItem = null;
   function detail(e) {
@@ -818,6 +879,25 @@
       if (button.dataset.changeDecision !== undefined) {const item = reviewDialogItems.get(button.dataset.changeId); if (!item) return; return mutate(() => api('/api/changes/'+encodeURIComponent(item.id),{method:'POST',body:{accept:button.dataset.changeDecision==='accept'}}),'변경사항을 처리했어요.');}
       if (button.dataset.assignmentFilter && assignmentsEnabled()) {S.assignmentFilter = ['upcoming','overdue','completed','all'].includes(button.dataset.assignmentFilter) ? button.dataset.assignmentFilter : 'upcoming'; render(); return;}
       if (action === 'refresh-assignments' && assignmentsEnabled()) return await loadAssignments(true);
+      if (action === 'classroom-connect') {
+        button.disabled = true;
+        try {return await connectClassroom();} finally {button.disabled = false;}
+      }
+      if (action === 'classroom-disconnect') {
+        openDialog('Classroom 연결 해제', '<p>CalendarSync에서 가져온 Classroom 항목을 지우고 연결 키를 폐기해요.</p>',
+          '<button class="secondary" data-action="close">취소</button><button class="danger" data-action="classroom-disconnect-confirm">연결 해제</button>');
+        return;
+      }
+      if (action === 'classroom-disconnect-confirm') {
+        const epoch = authEpoch;
+        await api('/api/classroom/connection', {method:'DELETE'});
+        if (!activeView(epoch)) return;
+        classroomRevision++;
+        S.classroom = {connected:false,snapshot:null};
+        closeDialog();
+        render();
+        return;
+      }
       if (button.dataset.detail) {const e = find(button.dataset.detail, button.dataset.source); if (e) detail(e); return;}
       if (button.dataset.day) {S.selected = button.dataset.day; render(); return;}
       if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); draftInputChanged(); return;}

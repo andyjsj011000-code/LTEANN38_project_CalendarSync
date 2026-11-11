@@ -24,6 +24,7 @@ class Settings:
     idle_seconds: int = 900
     access_seconds: int = 60
     allow_local_login: bool = False
+    classroom_enabled: bool = False
 
     def __post_init__(self) -> None:
         Fernet(self.data_key.encode("ascii"))
@@ -78,6 +79,7 @@ class Settings:
             idle_seconds=int(env.get("WEB_IDLE_SECONDS", "900")),
             access_seconds=int(env.get("WEB_ACCESS_SECONDS", "60")),
             allow_local_login=env.get("WEB_ALLOW_LOCAL_LOGIN") == "1",
+            classroom_enabled=env.get("WEB_CLASSROOM_ENABLED") == "1",
         )
 
     @classmethod

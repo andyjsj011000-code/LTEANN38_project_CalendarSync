@@ -1,7 +1,7 @@
 """Pinned revision sources for existing web schemas and additive features.
 
 Baseline scripts are reference definitions, never replayed against an existing
-database. Only the two closed, creation-only feature scripts can be upgraded.
+database. Only the listed creation-only feature scripts can be upgraded.
 Keep published scripts/checksums immutable; add a revision for future changes.
 """
 
@@ -81,6 +81,18 @@ REVISIONS = {
             ("postgres-base-v1",),
         ),
         Revision(
+            "sqlite-classroom-v1",
+            "classroom_v1.sql",
+            "c41654384abd99a3b8752b35a88b8c2e10b5ba05d197142a3732c283b2d0fd38",
+            ("sqlite-server-v1",),
+        ),
+        Revision(
+            "postgres-classroom-v1",
+            "classroom_v1.sql",
+            "c41654384abd99a3b8752b35a88b8c2e10b5ba05d197142a3732c283b2d0fd38",
+            ("postgres-base-v1",),
+        ),
+        Revision(
             "postgres-planner-v1",
             "planner_v1.sql",
             "9c3d04fc18f2e3cf49ca5340c92d950a30f795c48a8bf80760f2de30cea98b44",
@@ -96,10 +108,15 @@ PROFILES = {
     "postgres-server": ("postgres-base-v1",),
 }
 FEATURES = {
-    "sqlite-server": {"planner": "sqlite-planner-v1"},
-    "postgres-server": {"shared-ingestion": "postgres-shared-v1", "planner": "postgres-planner-v1"},
+    "sqlite-server": {"planner": "sqlite-planner-v1", "classroom": "sqlite-classroom-v1"},
+    "postgres-server": {
+        "shared-ingestion": "postgres-shared-v1",
+        "planner": "postgres-planner-v1",
+        "classroom": "postgres-classroom-v1",
+    },
 }
 FEATURE_TABLES = {
+    "classroom": frozenset({"web_classroom_connections"}),
     "planner": frozenset({"web_task_drafts", "web_task_trash", "web_ingestion_status"}),
     "shared-ingestion": frozenset({"web_channel_ingestion"}),
 }

@@ -32,6 +32,7 @@ def install_server_routes(app, settings, db, integration, require, static, previ
             "shared_channel_ingestion": integration.shared_ingestion_enabled,
             "personal_agenda": True,
             "assignments_enabled": integration.assignments_enabled,
+            **({"classroom_enabled": True} if settings.classroom_enabled and not preview else {}),
             "planner_enhancements": bool(getattr(db, "planner_enhancements_enabled", False)),
         }
 
