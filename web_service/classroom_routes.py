@@ -54,7 +54,14 @@ def install_classroom_routes(app, db, require_session):
         )
 
     @app.get("/api/classroom")
-    def classroom(session=Depends(require_session)):
+    def classroom(
+        session=Depends(require_session), x_csrf_token: str | None = Header(default=None)
+    ):
+        # An open tab can outlive the cookie that established its identity.
+        if x_csrf_token is not None and not secrets.compare_digest(
+            x_csrf_token.encode("utf-8"), session["csrf_token"].encode("ascii")
+        ):
+            raise HTTPException(403, "The Classroom viewing session has changed")
         with db.connect() as connection:
             row = query(
                 connection,

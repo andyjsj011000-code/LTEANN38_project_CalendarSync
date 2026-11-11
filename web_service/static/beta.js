@@ -29,7 +29,7 @@
   S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
   S.listFilters = L?.createState() || {query:'',unfinishedOnly:false};
   S.classroom = null;
-  let classroomRevision = 0;
+  let classroomRevision = 0, classroomTimer = null, classroomRequest = null;
   const plannerEnabled = () => !!S.service?.planner_enhancements;
   const shownItems = items => plannerEnabled() && L ? L.filter(items,S.listFilters) : items;
   const partNames = ['personal','today','calendar','upcoming','channels','settings','changes'];
@@ -94,7 +94,7 @@
   function clearPrivate() {
     assignmentRequest?.abort(); assignmentRequest = null; assignmentSequence++;
     S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
-    S.classroom = null; classroomRevision++;
+    stopClassroomRefresh(); S.classroom = null; classroomRevision++;
     taskDrafts?.reset(); draftUi = null; plannerStatus = null; statusRequest?.abort(); statusRequest = null; statusReadAt = 0; statusRevision++;
     trashItems = []; undoTrash = null; draftRestoring = false; taskMissing = false; taskFormRevision++;
     S.listFilters = L?.createState() || {query:'',unfinishedOnly:false}; listControls?.reset();
@@ -245,6 +245,44 @@
       finally {if (activeView(epoch)) {ingestionRefresh = false; scheduleIngestionRefresh();}}
     }, 3000);
   }
+  function stopClassroomRefresh() {
+    clearTimeout(classroomTimer); classroomTimer = null;
+    classroomRequest?.abort(); classroomRequest = null;
+  }
+  function canRefreshClassroom() {
+    return S.me && S.service?.classroom_enabled && S.classroom?.connected !== false &&
+      !document.hidden && !autoReadsPaused;
+  }
+  function scheduleClassroomRefresh(delay = 30000) {
+    if (!canRefreshClassroom() || classroomTimer !== null || classroomRequest) return;
+    classroomTimer = setTimeout(refreshClassroom, delay);
+  }
+  async function refreshClassroom() {
+    classroomTimer = null;
+    if (!canRefreshClassroom() || expireIdle()) return;
+    if (activeLoad || S.busy) {scheduleClassroomRefresh(); return;}
+    const epoch = authEpoch, version = classroomRevision;
+    const controller = new AbortController(); classroomRequest = controller;
+    const current = () => activeView(epoch) && version === classroomRevision &&
+      !controller.signal.aborted && canRefreshClassroom() && !expireIdle();
+    try {
+      const value = await api('/api/classroom', {signal:controller.signal, timeout:15000});
+      if (!current()) return;
+      if (S.classroom?.connected === value.connected &&
+          S.classroom?.snapshot?.captured_at === value.snapshot?.captured_at) return;
+      S.classroom = value;
+      delete S.partErrors.classroom;
+      const card = $('.classroom-card');
+      if (card) card.outerHTML = classroomCard();
+    } catch (error) {
+      if (current() && [401,403].includes(error.status)) failure(error);
+    } finally {
+      if (classroomRequest === controller) {
+        classroomRequest = null;
+        scheduleClassroomRefresh();
+      }
+    }
+  }
   // 개인 일정을 별도로 불러오고, 현재 로그인·수정 세대와 맞는 조회 결과만 화면에 반영한다.
   async function load({background = false, afterSync = false, checkingRetry = false, ingestionRetry = false, mutationVersion} = {}) {
     if (!S.me) return;
@@ -258,6 +296,7 @@
     if (!background) {monthRequest?.abort(); monthRequest = null; monthEpoch++; S.pendingMonth = '';}
     const calendarEpoch = monthEpoch;
     activeLoad?.abort();
+    stopClassroomRefresh();
     const controller = new AbortController(); activeLoad = controller;
     const timer = setTimeout(() => controller.abort(), 100000), errors = [], applied = new Set();
     let teamsRejected = false; const accessRevision = teamsAccessRevision;
@@ -360,7 +399,7 @@
       clearTimeout(timer);
       if (activeLoad === controller) {
         activeLoad = null; S.loading = false; S.refreshing = false; updateRefreshStatus();
-        if (current()) {scheduleCheckingRefresh(); scheduleIngestionRefresh(); refreshPlannerStatus();}
+        if (current()) {scheduleCheckingRefresh(); scheduleIngestionRefresh(); scheduleClassroomRefresh(); refreshPlannerStatus();}
       }
     }
   }
@@ -613,6 +652,7 @@
     classroomRevision++;
     S.classroom = {connected:true,snapshot:null};
     render();
+    scheduleClassroomRefresh();
     openDialog('Google Classroom 연결', `
       <ol>
         <li>학교 계정의 개인 Apps Script 프로젝트에 <a href="/assets/classroom-sync.gs" download>Code.gs 코드</a>와 <a href="/assets/classroom-appsscript.json" download>appsscript.json 설정</a>을 붙여넣으세요.</li>
@@ -893,6 +933,7 @@
         await api('/api/classroom/connection', {method:'DELETE'});
         if (!activeView(epoch)) return;
         classroomRevision++;
+        stopClassroomRefresh();
         S.classroom = {connected:false,snapshot:null};
         closeDialog();
         render();
@@ -1137,7 +1178,7 @@
       if (resumeCheck === check) {
         resumeCheck = null; updateRefreshStatus();
         if (activeView(check.epoch) && !autoReadsPaused) {taskDrafts?.changed(); refreshPlannerStatus({force:true});}
-        if (activeView(check.epoch)) {scheduleCheckingRefresh(); scheduleIngestionRefresh();}
+        if (activeView(check.epoch)) {scheduleCheckingRefresh(); scheduleIngestionRefresh(); scheduleClassroomRefresh(0);}
       }
     }
   }
@@ -1147,7 +1188,7 @@
   if (SCHOOL) {
     for (const type of ['pointerdown','keydown','touchstart']) document.addEventListener(type,resetIdle,{passive:true});
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) {clearTimeout(ingestionTimer); ingestionTimer = null;}
+      if (document.hidden) {clearTimeout(ingestionTimer); ingestionTimer = null; stopClassroomRefresh();}
       else if (!expireIdle()) {checkResumedSession(); scheduleCheckingRefresh(); scheduleIngestionRefresh();}
     });
     resetIdle();

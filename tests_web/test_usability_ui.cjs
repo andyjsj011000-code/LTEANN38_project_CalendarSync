@@ -1324,6 +1324,35 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     await h.click({action:'refresh'});
     assert.match(h.elements.app.innerHTML,/Still authorized schedule/);assert.doesNotMatch(h.elements.app.innerHTML,/Revoked channel schedule/);
   }
+  // A new Classroom snapshot replaces the card without redrawing the agenda.
+  {
+    const oldTime = Date.UTC(2026,10,7,0,0);
+    let snapshot = {captured_at:oldTime,items:[{kind:'announcement',course:'Science',title:'Old Classroom notice'}]};
+    const h = harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,classroom_enabled:true}),
+      '/api/classroom':() => response({connected:true,snapshot})
+    }});
+    await settle();
+    const before = h.elements.app.innerHTML;
+    assert.match(before,/Old Classroom notice/);
+    snapshot = {captured_at:oldTime+900000,items:[
+      {kind:'announcement',course:'Science',title:'New Classroom notice'},
+      {kind:'assignment',course:'Science',title:'New Classroom assignment'}
+    ]};
+    await h.advance(30000);
+    assert.match(h.elements.classroomCard.outerHTML,/New Classroom notice/);
+    assert.match(h.elements.classroomCard.outerHTML,/New Classroom assignment/);
+    assert.match(h.elements.classroomCard.outerHTML,/최근 동기화.*9:15/);
+    assert.equal(h.elements.app.innerHTML,before);
+    h.visibility(true);
+    const requests = h.requests.length;
+    await h.advance(60000);
+    assert.equal(h.requests.length,requests);
+    h.visibility(false);
+    await settle();
+    await h.advance(0);
+    assert.equal(h.requests.at(-1).url,'/api/classroom');
+  }
   console.log('Usability UI: synthetic scenarios passed (incremental snapshots, permission renewal, redaction and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 function displaySettingsForm(h) {
@@ -1380,6 +1409,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
       removeAttribute(name) {delete this.attributes[name];},
       replaceChildren() {this.innerHTML = '';}}];
   }));
+  elements.classroomCard = {outerHTML:''};
   elements.modal.close = function () {this.open = false;};
   elements.modal.showModal = function () {this.open = true;};
   const item = {id: 'fixture', source: 'teams', title: 'Fixture assignment', notes: 'Fixture notes', channel: 'Fixture channel',
@@ -1390,7 +1420,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
     setTimeout(callback, delay = 0) {const id = ++timerId; timers.set(id, {callback, at: now + Number(delay)}); return id;},
     clearTimeout(id) {timers.delete(id);},
     document: {hidden: false, documentElement: {dataset: {mode: 'school'}},
-      querySelector(selector) {return selector === '[data-action="sync-teams"]' ? elements['sync-button'] : selector === '[data-action="refresh"]' ? elements['refresh-button'] : elements[selector.slice(1)] || null;},
+      querySelector(selector) {return selector === '.classroom-card' ? elements.classroomCard : selector === '[data-action="sync-teams"]' ? elements['sync-button'] : selector === '[data-action="refresh"]' ? elements['refresh-button'] : elements[selector.slice(1)] || null;},
       querySelectorAll(selector) {return selector === '[data-locked]' ? controls.filter(control => control.dataset.locked) : selector === 'button,input,select,textarea' ? controls : [];},
       addEventListener(type, handler) {listeners[type] = handler;}},
     async fetch(url, options = {}) {

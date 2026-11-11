@@ -59,6 +59,12 @@ def test_classroom_snapshot_is_private_and_disconnect_revokes_upload(server):
             )
             result = client.get("/api/classroom")
             assert result.headers["cache-control"] == "no-store"
+            assert (
+                client.get(
+                    "/api/classroom", headers={"x-csrf-token": other.headers["x-csrf-token"]}
+                ).status_code
+                == 403
+            )
             assert [item["title"] for item in result.json()["snapshot"]["items"]] == [
                 "Private announcement",
                 "Private assignment",
