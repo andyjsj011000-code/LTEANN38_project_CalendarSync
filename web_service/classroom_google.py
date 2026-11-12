@@ -17,11 +17,15 @@ from .classroom_routes import _MAX_SNAPSHOT_AGE_MS, ClassroomSnapshot
 from .schema_inspection import query
 from .storage import Missing
 
+_COURSEWORK_READONLY = "https://www.googleapis.com/auth/classroom.coursework.me.readonly"
 SCOPES = (
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.announcements.readonly",
-    "https://www.googleapis.com/auth/classroom.coursework.me.readonly",
+    _COURSEWORK_READONLY,
 )
+_SCOPE_ALIASES = {
+    "https://www.googleapis.com/auth/classroom.student-submissions.me.readonly": _COURSEWORK_READONLY,
+}
 _CALLBACK = "/auth/classroom/google/callback"
 _TOKEN = "https://oauth2.googleapis.com/token"
 _CLASSROOM = "https://classroom.googleapis.com/v1/"
@@ -43,8 +47,10 @@ def _token_reply(response):
     response.raise_for_status()
     if not isinstance(payload.get("access_token"), str) or not payload["access_token"]:
         raise ValueError("Google did not issue an access token")
-    if "scope" in payload and set(payload["scope"].split()) != set(SCOPES):
-        raise GoogleAccessExpired
+    if "scope" in payload:
+        granted = {_SCOPE_ALIASES.get(scope, scope) for scope in payload["scope"].split()}
+        if granted != set(SCOPES):
+            raise GoogleAccessExpired
     return payload
 
 

@@ -53,7 +53,10 @@ def test_google_connection_reads_classroom_and_preserves_the_existing_connection
                     json={
                         "access_token": "first-access",
                         "refresh_token": "private-refresh",
-                        "scope": " ".join(scopes),
+                        "scope": " ".join(scopes).replace(
+                            "classroom.coursework.me.readonly",
+                            "classroom.student-submissions.me.readonly",
+                        ),
                     },
                 )
             assert fields["refresh_token"] == ["private-refresh"]
