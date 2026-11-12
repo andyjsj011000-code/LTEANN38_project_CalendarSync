@@ -26,5 +26,6 @@
 .assignment .task-time { min-width:48px; }
 .single-event.assignment, .single-event.classroom { color:#65409c; background:#f1eafa; }
 .calendar-legend .dot.classroom { background:#65409c; }
+.range-event.classroom { color:#65409c; background:#f1eafa; }
 
 .classroom-card .upcoming-text strong{white-space:normal;overflow-wrap:anywhere}.classroom-card .upcoming-text small{overflow-wrap:anywhere}.classroom-card .upcoming-text p{margin:4px 0 0;overflow-wrap:anywhere}.classroom-card .upcoming-text a{margin-left:6px;color:var(--blue)}

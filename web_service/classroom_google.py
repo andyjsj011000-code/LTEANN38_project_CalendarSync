@@ -13,8 +13,11 @@ import httpx
 from fastapi import BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 
+from .calendar_rules import KST
 from .classroom_routes import _MAX_SNAPSHOT_AGE_MS, ClassroomSnapshot
+from .ports import EventExtractor
 from .schema_inspection import query
+from .schemas import Input
 from .storage import Missing
 
 _COURSEWORK_READONLY = "https://www.googleapis.com/auth/classroom.coursework.me.readonly"
@@ -32,6 +35,18 @@ _CLASSROOM = "https://classroom.googleapis.com/v1/"
 _INTERVAL = 900
 _CLAIM_SECONDS = 120
 _STATE = re.compile(r"[A-Za-z0-9_-]{43}")
+_SUBMISSION_STATES = {
+    "NEW": "working",
+    "CREATED": "working",
+    "TURNED_IN": "submitted",
+    "RETURNED": "returned",
+    "RECLAIMED_BY_STUDENT": "reclaimed",
+}
+_MAX_NEW_NOTICE_ANALYSES = 4
+
+
+class AnnouncementAnalysisPreference(Input):
+    enabled: bool
 
 
 class GoogleAccessExpired(Exception):
@@ -118,8 +133,80 @@ def _pages(client, token, path, params, field, deadline):
         params = {**params, "pageToken": next_page}
 
 
-def _snapshot(client, token, captured_at):
+def _read_submission_statuses(client, token, assignments, deadline):
+    by_course = {}
+    for assignment in assignments:
+        if work_id := assignment.get("assignment_id"):
+            by_course.setdefault(assignment["course_id"], {})[work_id] = assignment
+    for course_id, pending in by_course.items():
+        try:
+            for submission in _pages(
+                client,
+                token,
+                f"courses/{quote(course_id, safe='')}/courseWork/-/studentSubmissions",
+                {
+                    "userId": "me",
+                    "pageSize": 100,
+                    "fields": "studentSubmissions(courseWorkId,state),nextPageToken",
+                },
+                "studentSubmissions",
+                deadline,
+            ):
+                work_id = submission.get("courseWorkId")
+                if work_id in pending:
+                    pending.pop(work_id)["submission_status"] = _SUBMISSION_STATES.get(
+                        submission.get("state")
+                    )
+                    if not pending:
+                        break
+        except (GoogleAccessExpired, httpx.HTTPError, TimeoutError, ValueError):
+            # A submission lookup failure leaves the course work visible with unknown status.
+            continue
+
+
+def _analyze_announcements(extractor, notices, previous, can_send):
+    cached = {(item["course_id"], item["notice_id"]): item for item in previous}
+    analysis = []
+    attempted = 0
+    for item, text, created_at in notices:
+        notice_id = item.get("notice_id")
+        if not notice_id or not text or not created_at:
+            continue
+        try:
+            created = datetime.fromisoformat(created_at)
+            if created.tzinfo is None:
+                continue
+        except (ValueError, TypeError):
+            continue
+        course_id = item["course_id"]
+        published = created.astimezone(KST).strftime("%Y-%m-%d %H:%M")
+        prompt = f"공지 작성일 (한국 시간): {published}\n공지 본문:\n{text}"
+        version = hashlib.sha256(prompt[:16000].encode()).hexdigest()
+        old = cached.get((course_id, notice_id))
+        if old is not None and old["version"] == version:
+            events = old["events"]
+        else:
+            if attempted >= _MAX_NEW_NOTICE_ANALYSES or not can_send(course_id):
+                continue
+            attempted += 1
+            try:
+                events = extractor.extract(prompt, [], [])
+            except (httpx.HTTPError, ValueError, TypeError, KeyError):
+                continue
+        analysis.append({
+            "course_id": course_id,
+            "notice_id": notice_id,
+            "course": item["course"],
+            "url": item["url"],
+            "version": version,
+            "events": events,
+        })
+    return analysis
+
+
+def _snapshot(client, token, captured_at, analyze=None):
     notices, assignments = [], []
+    notice_content = {}
     active_courses = []
     deadline = time.monotonic() + 45
     courses = _pages(
@@ -145,14 +232,15 @@ def _snapshot(client, token, captured_at):
                 "announcements",
                 "announcements",
                 "announcement",
-                "text,alternateLink,updateTime",
+                "id,text,alternateLink,creationTime,updateTime"
+                if analyze else "text,alternateLink,updateTime",
                 notices,
             ),
             (
                 "courseWork",
                 "courseWork",
                 "assignment",
-                "title,description,alternateLink,updateTime,dueDate,dueTime,workType",
+                "id,title,description,alternateLink,updateTime,dueDate,dueTime,workType",
                 assignments,
             ),
         ):
@@ -166,36 +254,52 @@ def _snapshot(client, token, captured_at):
                 if kind == "assignment" and item.get("workType") != "ASSIGNMENT":
                     continue
                 title_key = "text" if kind == "announcement" else "title"
-                output.append(
-                    (
-                        item.get("updateTime", ""),
-                        {
-                            "course": name,
-                            "course_id": course_id,
-                            "kind": kind,
-                            "title": _text(item.get(title_key), 240)
-                            or ("수업 공지" if kind == "announcement" else "과제"),
-                            "description": _text(item.get("description"), 160),
-                            "url": _link(item.get("alternateLink")),
-                            "due": _due(item),
-                        },
+                entry = {
+                    "course": name,
+                    "course_id": course_id,
+                    "kind": kind,
+                    "assignment_id": item.get("id") if kind == "assignment" else None,
+                    "title": _text(item.get(title_key), 240)
+                    or ("수업 공지" if kind == "announcement" else "과제"),
+                    "description": _text(item.get("description"), 160),
+                    "url": _link(item.get("alternateLink")),
+                    "due": _due(item),
+                }
+                if analyze and kind == "announcement" and (notice_id := item.get("id")):
+                    entry["notice_id"] = notice_id
+                    notice_content[(course_id, notice_id)] = (
+                        (item.get("text") or "")[:16000],
+                        item.get("creationTime"),
                     )
-                )
+                output.append((item.get("updateTime", ""), entry))
                 count += 1
                 if count == 12:
                     break
-    items = [
-        item
-        for group in (notices, assignments)
-        for _, item in sorted(group, key=lambda pair: pair[0], reverse=True)[:12]
+    latest_notices = [item for _, item in sorted(notices, key=lambda pair: pair[0], reverse=True)[:12]]
+    latest_assignments = [
+        item for _, item in sorted(assignments, key=lambda pair: pair[0], reverse=True)[:12]
     ]
-    return ClassroomSnapshot(captured_at=captured_at, items=items, courses=active_courses).model_dump(mode="json")
+    _read_submission_statuses(client, token, latest_assignments, deadline)
+    analysis = []
+    if analyze:
+        analysis = analyze([
+            (item, *notice_content[(item["course_id"], item["notice_id"])])
+            for item in latest_notices
+            if item.get("notice_id")
+        ])
+    return ClassroomSnapshot(
+        captured_at=captured_at,
+        items=latest_notices + latest_assignments,
+        courses=active_courses,
+        analysis=analysis,
+    ).model_dump(mode="json")
 
 
 class GoogleClassroom:
-    def __init__(self, settings, db):
+    def __init__(self, settings, db, extractor: EventExtractor | None = None):
         self.settings = settings
         self.db = db
+        self.extractor = extractor
         self.backend = "sqlite" if hasattr(db, "path") else "postgres"
         self.client_factory = lambda: httpx.Client(timeout=8, follow_redirects=False)
         self.redirect_uri = settings.origin + _CALLBACK
@@ -304,40 +408,82 @@ class GoogleClassroom:
 
     def status(self, user):
         rows = self._execute(
-            """SELECT state,captured_at,snapshot_blob FROM web_classroom_google
+            """SELECT state,captured_at,snapshot_blob,credential_blob FROM web_classroom_google
             WHERE user_id=%s AND state<>'pending'""",
             user,
         )
         if not rows:
             return None
-        state, captured_at, blob = rows[0]
+        state, captured_at, blob, credential_blob = rows[0]
         recent = (
             captured_at is not None
             and captured_at >= int(self.db.clock() * 1000) - _MAX_SNAPSHOT_AGE_MS
         )
-        return {
+        snapshot = self.db.unseal(blob) if recent else None
+        analysis_available = bool(self.extractor and self.extractor.configured and state == "connected")
+        analysis_enabled = analysis_available and (
+            self.db.unseal(credential_blob).get("announcement_analysis") is True
+        )
+        if snapshot and not analysis_enabled:
+            snapshot.pop("analysis", None)
+        result = {
             "connected": True,
             "method": "google",
             "reauth": state == "reauth",
-            "snapshot": self.db.unseal(blob) if recent else None,
+            "snapshot": snapshot,
         }
+        if analysis_available:
+            result["announcement_analysis"] = analysis_enabled
+        return result
+
+    def set_announcement_analysis(self, user, enabled):
+        if not self.extractor or not self.extractor.configured:
+            raise HTTPException(409, "Classroom announcement analysis is unavailable")
+        for _ in range(3):
+            rows = self._execute(
+                """SELECT connection_id,credential_blob,snapshot_blob,next_sync_at
+                FROM web_classroom_google WHERE user_id=%s AND state='connected'""",
+                user,
+            )
+            if not rows:
+                raise HTTPException(409, "Connect Google Classroom first")
+            connection_id, blob, snapshot_blob, next_sync_at = rows[0]
+            credentials = self.db.unseal(blob)
+            if (credentials.get("announcement_analysis") is True) == enabled:
+                return False
+            credentials["announcement_analysis"] = enabled
+            if not enabled and snapshot_blob:
+                snapshot = self.db.unseal(snapshot_blob)
+                snapshot.pop("analysis", None)
+                snapshot_blob = self.db.seal(snapshot)
+            if self._execute(
+                """UPDATE web_classroom_google SET credential_blob=%s,snapshot_blob=%s,next_sync_at=0
+                WHERE user_id=%s AND connection_id=%s AND state='connected'
+                AND credential_blob=%s AND next_sync_at=%s
+                AND user_id IN (SELECT id FROM web_users WHERE active=1)""",
+                self.db.seal(credentials), snapshot_blob, user, connection_id, blob, next_sync_at,
+            ):
+                return True
+        raise HTTPException(409, "Classroom connection changed; try again")
 
     def sync(self, user, access=None):
+        analysis_deadline = time.monotonic() + 80
         now = int(self.db.clock())
         lease = now + _CLAIM_SECONDS
         rows = self._execute(
             """UPDATE web_classroom_google SET next_sync_at=%s WHERE user_id=%s AND state='connected'
             AND next_sync_at<=%s AND user_id IN (SELECT id FROM web_users WHERE active=1)
-            RETURNING connection_id,credential_blob""",
+            RETURNING connection_id,credential_blob,snapshot_blob""",
             lease,
             user,
             now,
         )
         if not rows:
             return
-        connection_id, credential_blob = rows[0]
+        connection_id, credential_blob, previous_blob = rows[0]
         try:
-            refresh = self.db.unseal(credential_blob)["refresh_token"]
+            credentials = self.db.unseal(credential_blob)
+            refresh = credentials["refresh_token"]
             with self.client_factory() as client:
                 if not access:
                     tokens = self._token(
@@ -346,33 +492,58 @@ class GoogleClassroom:
                     access = tokens["access_token"]
                     replacement = tokens.get("refresh_token")
                     if isinstance(replacement, str) and replacement:
-                        credential_blob = self.db.seal({"refresh_token": replacement})
-                        self._execute(
+                        replacement_blob = self.db.seal({**credentials, "refresh_token": replacement})
+                        if not self._execute(
                             """UPDATE web_classroom_google SET credential_blob=%s
-                            WHERE user_id=%s AND connection_id=%s AND next_sync_at=%s""",
-                            credential_blob,
+                            WHERE user_id=%s AND connection_id=%s AND next_sync_at=%s
+                            AND credential_blob=%s""",
+                            replacement_blob,
                             user,
                             connection_id,
                             lease,
-                        )
-                snapshot = _snapshot(client, access, int(self.db.clock() * 1000))
+                            credential_blob,
+                        ):
+                            return
+                        credential_blob = replacement_blob
+                analyze = None
+                extractor = self.extractor
+                if extractor and extractor.configured and credentials.get("announcement_analysis") is True:
+                    previous = self.db.unseal(previous_blob).get("analysis", []) if previous_blob else []
+
+                    def can_send(course_id):
+                        return time.monotonic() < analysis_deadline and bool(self._execute(
+                            """SELECT 1 FROM web_classroom_google g JOIN web_users u ON u.id=g.user_id
+                            WHERE g.user_id=%s AND g.connection_id=%s AND g.next_sync_at=%s
+                            AND g.credential_blob=%s AND g.state='connected' AND u.active=1
+                            AND NOT EXISTS (SELECT 1 FROM web_classroom_hidden_courses h
+                                WHERE h.user_id=g.user_id AND h.course_key=%s)""",
+                            user, connection_id, lease, credential_blob, "id:" + course_id,
+                        ))
+
+                    def analyze(notices):
+                        return _analyze_announcements(extractor, notices, previous, can_send)
+
+                snapshot = _snapshot(client, access, int(self.db.clock() * 1000), analyze)
             self._execute(
                 """UPDATE web_classroom_google SET captured_at=%s,snapshot_blob=%s,next_sync_at=%s
-                WHERE user_id=%s AND connection_id=%s AND next_sync_at=%s""",
+                WHERE user_id=%s AND connection_id=%s AND next_sync_at=%s AND credential_blob=%s""",
                 snapshot["captured_at"],
                 self.db.seal(snapshot),
                 now + _INTERVAL,
                 user,
                 connection_id,
                 lease,
+                credential_blob,
             )
         except GoogleAccessExpired:
             self._execute(
                 """UPDATE web_classroom_google SET state='reauth',credential_blob=NULL,
-                captured_at=NULL,snapshot_blob=NULL WHERE user_id=%s AND connection_id=%s AND next_sync_at=%s""",
+                captured_at=NULL,snapshot_blob=NULL WHERE user_id=%s AND connection_id=%s
+                AND next_sync_at=%s AND credential_blob=%s""",
                 user,
                 connection_id,
                 lease,
+                credential_blob,
             )
         except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError, AttributeError):
             # The reservation allows a retry after two minutes without overwriting a good snapshot.
@@ -406,6 +577,15 @@ class GoogleClassroom:
 def install_google_classroom(app, service, require):
     secure = service.settings.secure_cookies
     cookie = ("__Host-" if secure else "") + "calendarsync_classroom_flow"
+
+    @app.put("/api/classroom/google/announcement-analysis")
+    def announcement_analysis(
+        body: AnnouncementAnalysisPreference, tasks: BackgroundTasks, session=Depends(require)
+    ):
+        user = session["user_id"]
+        if service.set_announcement_analysis(user, body.enabled) and body.enabled:
+            tasks.add_task(service.sync, user)
+        return {"enabled": body.enabled}
 
     @app.post("/api/classroom/google/connect")
     def start(response: Response, session=Depends(require)):

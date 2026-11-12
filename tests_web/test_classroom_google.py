@@ -38,6 +38,29 @@ def test_google_connection_reads_classroom_and_preserves_the_existing_connection
     token_calls = []
     revoked = []
     assignment = "First assignment"
+    submission_state = "CREATED"
+    extracted_prompts = []
+
+    class Extractor:
+        configured = True
+
+        def extract(self, text, images, previous):
+            assert not images and not previous
+            extracted_prompts.append(text)
+            if text.endswith("Undated notice"):
+                return []
+            return [{
+                "key": "event",
+                "title": "Class schedule",
+                "notes": "Schedule summary",
+                "start_date": "2026-11-17",
+                "end_date": "2026-11-17",
+                "time": None,
+                "kind": "event",
+                "cancelled": False,
+            }]
+
+    app.state.classroom_google.extractor = Extractor()
 
     def google(request):
         if request.url.host == "oauth2.googleapis.com":
@@ -78,13 +101,25 @@ def test_google_connection_reads_classroom_and_preserves_the_existing_connection
         if request.url.path.startswith("/v1/courses/2/"):
             return httpx.Response(200, json={})
         if request.url.path.endswith("/announcements"):
-            return httpx.Response(200, json={"announcements": [{"text": "Class notice"}]})
+            notices = [{"id": "21", "text": "Class notice", "creationTime": "2026-10-22T16:00:00Z"}]
+            if "creationTime" in request.url.params["fields"]:
+                notices.append({
+                    "id": "22", "text": "Undated notice", "creationTime": "2026-10-22T16:00:00Z",
+                })
+            return httpx.Response(200, json={"announcements": notices})
+        if request.url.path == "/v1/courses/1/courseWork/-/studentSubmissions":
+            assert request.url.params["userId"] == "me"
+            assert request.url.params["fields"] == "studentSubmissions(courseWorkId,state),nextPageToken"
+            return httpx.Response(200, json={"studentSubmissions": [
+                {"courseWorkId": "11", "state": submission_state},
+            ]})
         assert request.url.path.endswith("/courseWork")
         return httpx.Response(
             200,
             json={
                 "courseWork": [
                     {
+                        "id": "11",
                         "title": assignment,
                         "workType": "ASSIGNMENT",
                         "dueDate": {"year": 2026, "month": 11, "day": 17},
@@ -124,11 +159,14 @@ def test_google_connection_reads_classroom_and_preserves_the_existing_connection
         assert result.headers["location"] == "/?classroom=connected"
         snapshot = client.get("/api/classroom").json()
         assert snapshot["method"] == "google"
+        assert snapshot["announcement_analysis"] is False
+        assert extracted_prompts == []
         assert [item["title"] for item in snapshot["snapshot"]["items"]] == [
             "Class notice",
             "First assignment",
         ]
         assert snapshot["snapshot"]["items"][1]["due"] == "2026-11-17"
+        assert snapshot["snapshot"]["items"][1]["submission_status"] == "working"
         assert [course["key"] for course in snapshot["courses"]] == ["id:1", "id:2"]
         preference = "/api/classroom/courses/preference"
         hidden = client.put(preference, json={"key": "id:1", "hidden": True}).json()
@@ -155,9 +193,30 @@ def test_google_connection_reads_classroom_and_preserves_the_existing_connection
         assert len(token_calls) == 1
         server.now[0] += 901
         assignment = "New assignment"
+        submission_state = "TURNED_IN"
         app.state.classroom_google.tick()
-        assert client.get("/api/classroom").json()["snapshot"]["items"][1]["title"] == assignment
+        item = client.get("/api/classroom").json()["snapshot"]["items"][1]
+        assert item["title"] == assignment
+        assert item["submission_status"] == "submitted"
         assert len(token_calls) == 2
+        analysis = "/api/classroom/google/announcement-analysis"
+        assert client.put(analysis, json={"enabled": True}).json() == {"enabled": True}
+        opted_in = client.get("/api/classroom").json()
+        assert opted_in["announcement_analysis"] is True
+        assert [event["title"] for event in opted_in["snapshot"]["events"]] == ["Class schedule"]
+        assert extracted_prompts == [
+            f"공지 작성일 (한국 시간): 2026-10-23 01:00\n공지 본문:\n{body}"
+            for body in ("Class notice", "Undated notice")
+        ]
+        server.now[0] += 901
+        app.state.classroom_google.tick()
+        assert len(extracted_prompts) == 2
+        hidden = client.put(preference, json={"key": "id:1", "hidden": True}).json()
+        assert hidden["snapshot"]["events"] == []
+        assert client.put(analysis, json={"enabled": False}).json() == {"enabled": False}
+        assert "events" not in client.get("/api/classroom").json()["snapshot"]
+        app.state.classroom_google.tick()
+        assert len(extracted_prompts) == 2
         assert client.delete("/api/classroom/google/connection").status_code == 204
         assert revoked == ["private-refresh"]
         assert client.get("/api/classroom").json() == {"connected": True, "snapshot": None}

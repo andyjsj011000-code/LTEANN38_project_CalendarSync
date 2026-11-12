@@ -33,9 +33,11 @@ function syncClassroom() {
 
     const mostRecent = items => items.sort((left, right) => right.updated.localeCompare(left.updated))
       .slice(0, 12).map(({updated, ...item}) => item);
+    const recentAssignments = mostRecent(assignments);
+    collectClassroomSubmissionStates(recentAssignments);
     const payload = JSON.stringify({
       captured_at: capturedAt,
-      items: [...mostRecent(announcements), ...mostRecent(assignments)]
+      items: [...mostRecent(announcements), ...recentAssignments]
     });
     const result = UrlFetchApp.fetch(origin + '/api/classroom/import', {
       method: 'post', contentType: 'application/json', payload,
@@ -79,7 +81,7 @@ function collectClassroomItems(course, announcements, assignments) {
   do {
     const result = Classroom.Courses.CourseWork.list(course.id, {
       ...options, pageToken,
-      fields: 'courseWork(title,description,alternateLink,updateTime,dueDate,dueTime,workType),nextPageToken'
+      fields: 'courseWork(id,title,description,alternateLink,updateTime,dueDate,dueTime,workType),nextPageToken'
     });
     work.push(...(result.courseWork || []).filter(item => item.workType === 'ASSIGNMENT'));
     pageToken = result.nextPageToken;
@@ -87,9 +89,42 @@ function collectClassroomItems(course, announcements, assignments) {
   for (const item of work) {
     assignments.push({
       kind: 'assignment', course: courseName, course_id: String(course.id), title: shortText(item.title, 240) || '과제',
+      assignment_id: item.id,
       description: shortText(item.description, 160), url: classroomLink(item.alternateLink),
       updated: item.updateTime || '', due: classroomDue(item.dueDate, item.dueTime)
     });
+  }
+}
+
+function collectClassroomSubmissionStates(assignments) {
+  const states = {NEW:'working', CREATED:'working', TURNED_IN:'submitted', RETURNED:'returned', RECLAIMED_BY_STUDENT:'reclaimed'};
+  const byCourse = new Map();
+  for (const assignment of assignments) {
+    if (!assignment.assignment_id) continue;
+    if (!byCourse.has(assignment.course_id)) byCourse.set(assignment.course_id, new Map());
+    byCourse.get(assignment.course_id).set(assignment.assignment_id, assignment);
+  }
+  for (const [courseId, pending] of byCourse) {
+    try {
+      const seen = new Set();
+      let pageToken;
+      do {
+        const result = Classroom.Courses.CourseWork.StudentSubmissions.list(courseId, '-', {
+          userId: 'me', pageSize: 100, pageToken, fields: 'studentSubmissions(courseWorkId,state),nextPageToken'
+        });
+        for (const submission of result.studentSubmissions || []) {
+          const item = pending.get(submission.courseWorkId);
+          if (!item) continue;
+          item.submission_status = Object.hasOwn(states, submission.state) ? states[submission.state] : null;
+          pending.delete(submission.courseWorkId);
+        }
+        pageToken = result.nextPageToken;
+        if (seen.has(pageToken)) break;
+        seen.add(pageToken);
+      } while (pageToken && pending.size);
+    } catch (_) {
+      console.log('Classroom submission status is unavailable for one course.');
+    }
   }
 }
 

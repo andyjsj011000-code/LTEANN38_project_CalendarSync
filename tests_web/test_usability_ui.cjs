@@ -1341,7 +1341,7 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     ]};
     await h.advance(30000);
     assert.match(h.elements.classroomCard.outerHTML,/New Classroom notice/);
-    assert.match(h.elements.classroomCard.outerHTML,/New Classroom assignment/);
+    assert.doesNotMatch(h.elements.classroomCard.outerHTML,/New Classroom assignment/);
     assert.match(h.elements.classroomCard.outerHTML,/최근 동기화.*9:15/);
     assert.equal(h.elements.app.innerHTML,before);
     h.visibility(true);

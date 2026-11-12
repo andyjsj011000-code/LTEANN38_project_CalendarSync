@@ -420,7 +420,7 @@ def create_test_server(
     if settings.google_classroom_configured and not preview:
         from .classroom_google import GoogleClassroom, install_google_classroom
 
-        classroom_google = GoogleClassroom(settings, db)
+        classroom_google = GoogleClassroom(settings, db, getattr(source, "extractor", None))
         app.state.classroom_google = classroom_google
         install_google_classroom(app, classroom_google, require)
 

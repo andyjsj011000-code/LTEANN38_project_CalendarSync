@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import Depends, Header, HTTPException
 from pydantic import AwareDatetime, Field, field_validator
 
+from .direct_source import ExtractedEvent
 from .schema_inspection import query
 from .schemas import Input
 from .storage import digest
@@ -23,6 +24,9 @@ class ClassroomItem(Input):
     kind: Literal["announcement", "assignment"]
     course: str = Field(min_length=1, max_length=120)
     course_id: str | None = Field(default=None, min_length=1, max_length=128)
+    assignment_id: str | None = Field(default=None, min_length=1, max_length=128)
+    notice_id: str | None = Field(default=None, min_length=1, max_length=128)
+    submission_status: Literal["working", "submitted", "returned", "reclaimed"] | None = None
     title: str = Field(min_length=1, max_length=240)
     description: str = Field(default="", max_length=240)
     url: str = Field(default="", max_length=320)
@@ -48,10 +52,20 @@ class ClassroomCourse(Input):
     name: str = Field(min_length=1, max_length=120)
 
 
+class ClassroomNoticeSchedule(Input):
+    notice_id: str
+    course_id: str
+    course: str
+    url: str
+    version: str
+    events: list[ExtractedEvent] = Field(max_length=20)
+
+
 class ClassroomSnapshot(Input):
     captured_at: int = Field(ge=1, strict=True)
     items: list[ClassroomItem] = Field(max_length=24)
     courses: list[ClassroomCourse] = Field(default_factory=list, max_length=500)
+    analysis: list[ClassroomNoticeSchedule] = Field(default_factory=list, max_length=12)
 
 
 class ClassroomCoursePreference(Input):
@@ -98,7 +112,20 @@ def _visible_courses(snapshot, hidden):
     options = [
         {"key": key, "name": name, "hidden": key in hidden} for key, name in courses.items()
     ]
-    return {"captured_at": snapshot["captured_at"], "items": visible}, options
+    result = {"captured_at": snapshot["captured_at"], "items": visible}
+    if analysis := snapshot.get("analysis"):
+        result["events"] = [
+            {
+                **event,
+                "id": f"{notice['course_id']}:{notice['notice_id']}:{event['key']}",
+                "course": notice["course"],
+                "url": notice["url"],
+            }
+            for notice in analysis
+            if "id:" + notice["course_id"] not in hidden
+            for event in notice["events"]
+        ]
+    return result, options
 
 
 def install_classroom_routes(app, db, require_session, google=None):
@@ -214,7 +241,7 @@ def install_classroom_routes(app, db, require_session, google=None):
         if not now - _MAX_SNAPSHOT_AGE_MS <= body.captured_at <= now + 300_000:
             raise HTTPException(422, "Invalid Classroom sync time")
         token_hash = digest(matched[1])
-        blob = db.seal(body.model_dump(mode="json"))
+        blob = db.seal(body.model_dump(mode="json", exclude={"analysis"}))
         with db.connect() as connection:
             # Compare and update atomically. Rotated tokens and older retries cannot win.
             result = query(

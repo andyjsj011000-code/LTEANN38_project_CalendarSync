@@ -12,8 +12,12 @@ elements.modal.showModal = function(){this.open=true;};
 let signedIn = true, resolveAssignments, result = null;
 const now = Date.parse('2026-11-08T05:00:00Z');
 const classroomCourse = {key:'id:101',name:'학급',hidden:false};
-let classroom = {connected:true,method:'google',courses:[classroomCourse],snapshot:{captured_at:now,items:[
- {kind:'assignment',title:'Classroom November assignment',course:'학급',due:'2026-11-29T15:30:00Z',url:'https://classroom.google.com/c/course/a/assignment/details'},
+let classroom = {connected:true,method:'google',announcement_analysis:false,courses:[classroomCourse],snapshot:{captured_at:now,items:[
+ {kind:'assignment',title:'Classroom November assignment',course:'학급',submission_status:'working',due:'2026-11-29T15:30:00Z',url:'https://classroom.google.com/c/course/a/assignment/details'},
+ {kind:'assignment',title:'Classroom due today',course:'학급',submission_status:'working',due:'2026-11-08'},
+ {kind:'assignment',title:'Classroom submitted',course:'학급',submission_status:'submitted',due:'2026-11-06'},
+ {kind:'assignment',title:'Classroom reclaimed',course:'학급',submission_status:'reclaimed',due:'2026-11-06'},
+ {kind:'assignment',title:'Classroom status unknown',course:'학급'},
  {kind:'announcement',title:'Classroom announcement',course:'학급'}
 ]}};
 class Clock extends Date {constructor(...a){super(...(a.length ? a : [now]));} static now(){return now;}}
@@ -29,10 +33,17 @@ const context = {
   else if(url==='/api/me'){status=signedIn?200:401;data={id:'student',name:'학생',csrf_token:'csrf'};}
   else if(url.startsWith('/api/assignments')) data=result || await new Promise(r=>{resolveAssignments=r;});
   else if(url==='/api/classroom') data=classroom;
+  else if(url==='/api/classroom/google/announcement-analysis') {
+   const {enabled} = JSON.parse(options.body);
+   const events = enabled ? [{id:'101:21:event',title:'Extracted Classroom schedule',course:'학급',
+    kind:'event',start_date:'2026-11-08',end_date:'2026-11-08',notes:'일정 요약'}] : [];
+   classroom = {...classroom,announcement_analysis:enabled,snapshot:{...classroom.snapshot,events}};
+   data = {enabled};
+  }
   else if(url==='/api/classroom/courses/preference') {
    const body = JSON.parse(options.body);
    assert.deepEqual(body,{key:classroomCourse.key,hidden:true});
-   data = classroom = {...classroom,courses:[{...classroomCourse,hidden:true}],snapshot:{...classroom.snapshot,items:[]}};
+   data = classroom = {...classroom,courses:[{...classroomCourse,hidden:true}],snapshot:{...classroom.snapshot,items:[],events:[]}};
   }
   else if(url==='/api/today') data={date:'2026-11-08',teams:[],personal:[]};
   else if(url==='/api/personal/today') data={date:'2026-11-08',personal:[]};
@@ -55,20 +66,20 @@ const click=dataset=>listeners.click({target:{closest(){return {dataset};}}});
  assert.match(elements.app.innerHTML,/오늘 할 일/); // assignments must not block the agenda
  await click({action:'assignments'});
  assert.match(elements.app.innerHTML,/불러오는 중/);
- assert.match(elements.app.innerHTML,/Google Classroom 과제/);
+ assert.match(elements.app.innerHTML,/aria-label="Google Classroom 과제"/);
  assert.match(elements.app.innerHTML,/Classroom November assignment/);
  assert.match(elements.app.innerHTML,/11(?:월|\.)\s*30/);
- assert.match(elements.app.innerHTML,/https:\/\/classroom\.google\.com\/c\/course\/a\/assignment\/details/);
  assert.doesNotMatch(elements.app.innerHTML,/Classroom announcement/);
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom submitted|Classroom reclaimed|Classroom status unknown/);
  elements.classroomCard = {outerHTML:''};
  classroom = {...classroom,snapshot:{captured_at:now+1,items:[
-  {...classroom.snapshot.items[0],title:'Classroom updated assignment'},classroom.snapshot.items[1]
+  {...classroom.snapshot.items[0],title:'Classroom updated assignment'},...classroom.snapshot.items.slice(1)
  ]}};
  const [timer,{fn}] = [...timers].find(([,t])=>t.delay===30000);
  timers.delete(timer);
  await fn();
- assert.match(elements.classroomCard.outerHTML,/Classroom updated assignment/);
- assert.doesNotMatch(elements.classroomCard.outerHTML,/Classroom announcement/);
+ assert.match(elements.app.innerHTML,/Classroom updated assignment/);
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom announcement/);
  resolveAssignments({items:[],state:'permission_required',checked_at:0});
  await flush();
  assert.match(elements.app.innerHTML,/Teams 과제 연결하기/);
@@ -86,9 +97,16 @@ const click=dataset=>listeners.click({target:{closest(){return {dataset};}}});
  assert.match(elements.app.innerHTML,/기한 없음/);
  await click({assignmentFilter:'completed'});
  assert.match(elements.app.innerHTML,/제출됨/);
+ assert.match(elements.app.innerHTML,/Classroom submitted/);
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom reclaimed/);
  assert.ok(!elements.app.innerHTML.includes('data-detail="overdue"'));
  await click({assignmentFilter:'overdue'});
  assert.match(elements.app.innerHTML,/data-detail="overdue"/);
+ assert.match(elements.app.innerHTML,/Classroom reclaimed/);
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom submitted/);
+ await click({assignmentFilter:'all'});
+ assert.match(elements.app.innerHTML,/Classroom status unknown/);
+ assert.match(elements.app.innerHTML,/제출 상태 미확인/);
  await click({action:'calendar'});
  assert.match(elements.app.innerHTML,/data-detail="upcoming"/);
  assert.match(elements.app.innerHTML,/data-source="classroom"[^>]*>.*Classroom updated assignment/);
@@ -103,13 +121,25 @@ const click=dataset=>listeners.click({target:{closest(){return {dataset};}}});
  await click({action:'today'});
  assert.match(elements.app.innerHTML,/오늘 마감 과제/);
  assert.match(elements.app.innerHTML,/data-detail="today"/);
+ assert.match(elements.app.innerHTML,/Classroom due today/);
+ assert.match(elements.app.innerHTML,/Classroom announcement/);
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom updated assignment|Classroom status unknown/);
+ await click({action:'classroom-analysis'});
+ assert.match(elements.modal.innerHTML,/공지 본문과 작성일을 OpenAI API에 보내/);
+ assert.ok(!requests.includes('/api/classroom/google/announcement-analysis'));
+ await click({action:'classroom-analysis-confirm',enabled:'true'});
+ assert.match(elements.app.innerHTML,/Extracted Classroom schedule/);
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom announcement/);
+ await click({action:'calendar'});
+ assert.match(elements.app.innerHTML,/data-source="classroom-event"[^>]*>.*Extracted Classroom schedule/);
+ await click({action:'today'});
  await click({action:'classroom-courses'});
  assert.match(elements.modal.innerHTML,/학급/);
  await click({action:'classroom-course-visibility',courseKey:classroomCourse.key});
  assert.doesNotMatch(elements.app.innerHTML,/Classroom updated assignment/);
  assert.match(elements.modal.innerHTML,/다시 표시/);
  await click({action:'calendar'});
- assert.doesNotMatch(elements.app.innerHTML,/Classroom updated assignment/);
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom updated assignment|Extracted Classroom schedule/);
  await click({action:'assignments'});
  assert.doesNotMatch(elements.app.innerHTML,/Classroom updated assignment/);
  result=null;
