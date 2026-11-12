@@ -57,7 +57,7 @@
       const submission_status = item.submission_status || 'unknown';
       const id = item.url || JSON.stringify([item.course_id,item.assignment_id || [item.title,item.due,index]]);
       return [{id, source:'classroom',
-        kind:'assignment', title:item.title, channel:item.course, notes:item.description, source_url:item.url,
+        kind:'assignment', title:item.title, channel:item.course, course_id:item.course_id, notes:item.description, source_url:item.url,
         start_date:day, end_date:day, time, due_at:dueAt, submission_status,
         completed:submission_status === 'submitted' || submission_status === 'returned'}];
     });
@@ -66,6 +66,7 @@
     ...event, source:'classroom-event', channel:event.course, source_url:event.url,
   }));
   const isClassroom = item => item.source === 'classroom' || item.source === 'classroom-event';
+  const calendarEntries = () => C.mergeClassroomSchedules([...S.items,...assignmentCalendar(),...classroomSchedule()]);
   const period = e => e.start_date === e.end_date ? pretty(e.start_date) : `${pretty(e.start_date)} ~ ${pretty(e.end_date)}`;
   let toastTimer;
   function toast(message, error = false) {
@@ -305,7 +306,7 @@
           S.classroom?.announcement_analysis === value.announcement_analysis &&
           S.classroom?.snapshot?.captured_at === value.snapshot?.captured_at &&
           JSON.stringify(S.classroom?.courses) === JSON.stringify(value.courses)) return;
-      S.classroom = value;
+      updateClassroom(value);
       delete S.partErrors.classroom;
       if (S.view !== 'today') render();
       else {
@@ -380,7 +381,7 @@
     const classroom = S.service?.classroom_enabled
       ? part('classroom', '/api/classroom', value => {
         if (classroomVersion !== classroomRevision) return false;
-        S.classroom = value;
+        updateClassroom(value);
       }) : null;
     const personal = S.service?.personal_agenda ? part('personal', '/api/personal/today', value => {
       // A combined snapshot owns both sources once it has arrived in this load.
@@ -790,7 +791,7 @@
       root.innerHTML = intro('캘린더', '확인된 일정부터 표시해요.') + `<section class="card"><div class="card-head"><h2>${esc(S.month)}</h2></div><div class="empty" role="status">${esc(S.partErrors.calendar || '달력 일정을 불러오고 있어요.')}</div></section>`;
       return;
     }
-    const calendarItems = [...S.items,...assignmentCalendar(),...classroomSchedule()];
+    const calendarItems = calendarEntries();
     const visibleItems = shownItems(calendarItems);
     const weeks = C.layoutRanges(visibleItems, S.month);
     const gridHtml = weeks.map(week => {
@@ -849,24 +850,51 @@
   modal.addEventListener?.('close', () => {
     if (!modal.open && $('#classroom-connection-token')) modal.replaceChildren();
   });
-  function find(id, source) {return [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming, ...(S.assignments.items || []), ...classroomAssignments(), ...classroomSchedule()].find(e => e.id === id && e.source === source);}
-  let detailItem = null;
+  function find(id, source) {
+    const matches = item => item.id === id && item.source === source;
+    return (S.view === 'calendar' && calendarEntries().find(matches)) ||
+      [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming,
+       ...(S.assignments.items || []), ...classroomAssignments(), ...classroomSchedule()].find(matches);
+  }
+  let detailItem = null, calendarDetailEpoch = -1;
+  function updateClassroom(value) {
+    S.classroom = value;
+    if (!modal.open || calendarDetailEpoch !== dialogEpoch) return;
+    const current = [...classroomAssignments(),...classroomSchedule()];
+    if (detailItem.calendar_members.filter(isClassroom).some(old => !current.some(item =>
+      item.source === old.source && item.id === old.id && item.source_url === old.source_url
+    ))) closeDialog();
+  }
+  function calendarSourceLinks(members) {
+    const labels = {teams:'Teams 게시물',assignment:'Teams 과제',classroom:'Google Classroom 과제','classroom-event':'Google Classroom 공지'};
+    const seen = new Set();
+    return members.flatMap(item => (item.related_sources || [{url:item.source_url,channel:item.channel}]).map(source => {
+        const label = labels[item.source] + (source.channel ? ` · ${source.channel}` : '') + ' →';
+        const link = sourceLink(source.url, label, item.source);
+        if (!link || seen.has(source.url)) return '';
+        seen.add(source.url);
+        return link;
+    })).join('');
+  }
   function detail(e) {
     detailItem = e;
+    calendarDetailEpoch = e.calendar_members ? dialogEpoch + 1 : -1;
+    const groupedLinks = e.calendar_members ? calendarSourceLinks(e.calendar_members) : null;
+    const containsTeams = e.calendar_members?.some(item => !isClassroom(item));
     if (isClassroom(e)) {
-      const link = e.source_url ? `<p><a href="${esc(e.source_url)}" target="_blank" rel="noopener noreferrer">Google Classroom 원문 보기 →</a></p>` : '';
+      const link = groupedLinks ?? sourceLink(e.source_url, 'Google Classroom 원문 보기 →', e.source);
       const due = e.end_date ? `${period(e)} ${e.time || ''}` : '기한 없음';
       const status = e.source === 'classroom' ? `<p>${esc(A.status(e))}</p>` : e.cancelled ? '<p>취소된 일정</p>' : '';
-      openDialog(e.title, `<p class="detail-meta">${esc(e.channel)} · Google Classroom ${e.source === 'classroom' ? '과제' : '공지'}</p><p>${esc(due)}</p>${status}${link}<div class="detail-notes">${esc(e.notes || '')}</div>`, '<button class="secondary" data-action="close">닫기</button>');
+      openDialog(e.title, `<p class="detail-meta">${esc(e.channel)} · Google Classroom ${e.source === 'classroom' ? '과제' : '공지'}</p><p>${esc(due)}</p>${status}${link}<div class="detail-notes">${esc(e.notes || '')}</div>`, '<button class="secondary" data-action="close">닫기</button>', containsTeams);
       return;
     }
     if (e.source === 'assignment' && A) {
-      openDialog(e.title, '<p class="detail-meta">'+esc(e.channel)+' · Teams 과제</p><p>'+esc(e.end_date ? period(e)+' '+(e.time || '') : '기한 없음')+'</p><p>'+esc(A.status(e))+'</p><p class="muted fine">제출 상태는 Teams에서 읽어 와요. 제출과 수정은 Teams에서 진행해 주세요.</p>'+sourceLink(e.source_url)+'<div class="detail-notes">'+esc(e.notes || '자세한 안내는 Teams 과제에서 확인해 주세요.')+'</div>', '<button class="secondary" data-action="close">닫기</button>');
+      openDialog(e.title, '<p class="detail-meta">'+esc(e.channel)+' · Teams 과제</p><p>'+esc(e.end_date ? period(e)+' '+(e.time || '') : '기한 없음')+'</p><p>'+esc(A.status(e))+'</p><p class="muted fine">제출 상태는 Teams에서 읽어 와요. 제출과 수정은 Teams에서 진행해 주세요.</p>'+(groupedLinks ?? sourceLink(e.source_url, 'Teams 과제 원문 보기 →', e.source))+'<div class="detail-notes">'+esc(e.notes || '자세한 안내는 Teams 과제에서 확인해 주세요.')+'</div>', '<button class="secondary" data-action="close">닫기</button>', containsTeams);
       return;
     }
-    const links = e.related_sources
+    const links = groupedLinks ?? (e.related_sources
       ? e.related_sources.map((source, i) => sourceLink(source.url, `Teams 원문 ${i + 1} · ${source.channel} →`)).join('')
-      : sourceLink(e.source_url);
+      : sourceLink(e.source_url));
     openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + links : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : (testServer() ? '<button class="secondary" data-action="override-detail">나만 수정</button>' : '')}${testServer() ? '<button class="secondary" data-action="reminders">예약 알림</button>' : ''}`, e.source === 'teams');
   }
   function taskForm(e = null, draft = null) {
@@ -965,6 +993,10 @@
     if (!item) return;
     const original = {...item};
     const pending = values.hidden === true ? '숨기는 중…' : values.hidden === false ? '복원하는 중…' : '완료 상태를 저장하는 중…';
+    if (original.calendar_members) {
+      return mutate(() => changeEventSources(original, id => setState({...original, id}, values)),
+        message, false, undefined, pending);
+    }
     return mutate(() => changeEventSources(original, id => setState({...original, id}, values)),
       message, false, result => applyConfirmedState(original, values, result), pending);
   }
@@ -1318,9 +1350,17 @@
     reminderCustomInitial = custom && !Number.isNaN(custom.getTime()) ? new Date(custom.getTime()-custom.getTimezoneOffset()*60000).toISOString().slice(0,16) : '';
     openDialog('이 일정의 예약 알림', `<form id="reminder-form"><p>${esc(item.title)}</p><label class="toggle-row">하루 전<input name="day" type="checkbox" ${rules.offsets.includes(-1440) ? 'checked' : ''}></label><label class="toggle-row">1시간 전<input name="hour" type="checkbox" ${rules.offsets.includes(-60) ? 'checked' : ''}></label><label class="field"><span class="field-label">직접 지정 (기기 현지 시각, 선택)</span><input name="custom" type="datetime-local" value="${esc(reminderCustomInitial)}"></label><p class="fine muted">완료·취소·숨김 또는 꺼둔 채널의 일정은 알림에서 제외돼요. 직접 지정한 시각은 새로 저장한 값으로 바뀌어요.</p><div class="dialog-foot"><button class="primary" type="submit">저장</button></div></form>`);
   }
-  function sourceLink(value, label = 'Teams 원문 보기 →') {
+  function sourceLink(value, label = 'Teams 원문 보기 →', source = 'teams') {
     if (!SCHOOL || !value) return '';
-    try {const url = new URL(value); if (url.protocol !== 'https:' || url.hostname !== 'teams.microsoft.com' || !url.pathname.startsWith('/l/message/')) return ''; return `<p><a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a></p>`;} catch {return '';}
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'https:' || url.username || url.password || url.port) return '';
+      if (isClassroom({source})) {
+        if (url.hostname !== 'classroom.google.com' || !url.pathname.startsWith('/c/')) return '';
+      } else if (url.hostname !== 'teams.microsoft.com' ||
+                 (source !== 'assignment' && !url.pathname.startsWith('/l/message/'))) return '';
+      return `<p><a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a></p>`;
+    } catch {return '';}
   }
   function expireIdle() {
     if (S.me && idleDeadline && Date.now() >= idleDeadline) {

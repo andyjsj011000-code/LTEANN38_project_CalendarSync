@@ -118,6 +118,7 @@ def _visible_courses(snapshot, hidden):
             {
                 **event,
                 "id": f"{notice['course_id']}:{notice['notice_id']}:{event['key']}",
+                "course_id": notice["course_id"],
                 "course": notice["course"],
                 "url": notice["url"],
             }

@@ -10,6 +10,7 @@ const elements = Object.fromEntries(['app','modal','topbar','account-name','nav-
 elements.modal.close = function(){this.open=false;};
 elements.modal.showModal = function(){this.open=true;};
 let signedIn = true, resolveAssignments, result = null;
+let calendarExtras = [];
 const now = Date.parse('2026-11-08T05:00:00Z');
 const repost = {id:'event-1',source:'teams',kind:'event',title:'실험실 안전 점검 설명회',
  channel:'학년 채널',channel_id:'grade',start_date:'2026-11-08',end_date:'2026-11-08',time:'16:10',
@@ -55,7 +56,7 @@ const context = {
   }
   else if(url==='/api/today') data={date:'2026-11-08',teams:repostStates.length ? [] : [repost],personal:[]};
   else if(url==='/api/personal/today') data={date:'2026-11-08',personal:[]};
-  else if(url.startsWith('/api/calendar')) data={items:[]};
+  else if(url.startsWith('/api/calendar')) data={items:calendarExtras};
   else if(url.startsWith('/api/events/') && options.method==='PATCH') {
    repostStates.push([url,JSON.parse(options.body)]); data={hidden:true};
   }
@@ -150,6 +151,41 @@ const click=dataset=>listeners.click({target:{closest(){return {dataset};}}});
  assert.doesNotMatch(elements.app.innerHTML,/Classroom announcement/);
  await click({action:'calendar'});
  assert.match(elements.app.innerHTML,/data-source="classroom-event"[^>]*>.*Extracted Classroom schedule/);
+ const classroomPost = 'https://classroom.google.com/c/course/p/notice';
+ const classroomWork = 'https://classroom.google.com/c/course/a/assignment/details';
+ const teamsPost = 'https://teams.microsoft.com/l/message/course/3';
+ const teamsRepost = 'https://teams.microsoft.com/l/message/another-course/3';
+ const common = {title:'Classroom updated assignment',start_date:'2026-11-30',
+   end_date:'2026-11-30',time:'00:30',kind:'event',cancelled:false};
+ const notice = {...common,id:'101:22:event',course_id:'101',course:'학급',url:classroomPost,
+   title:'Classroom updated assignment 안내'};
+ classroom = {...classroom,snapshot:{...classroom.snapshot,captured_at:now+2,
+   events:[...classroom.snapshot.events,notice]}};
+ calendarExtras = [
+   {...common,id:'cross-post',source:'teams',channel:'학급',source_url:teamsPost,related_sources:[
+     {id:'cross-post',url:teamsPost,channel:'학급',channel_id:'course'},
+     {id:'cross-repost',url:teamsRepost,channel:'다른 채널',channel_id:'another-course'},
+   ]},
+   {...common,id:'other-time',source:'teams',channel:'학급',time:'11:30',
+     source_url:'https://teams.microsoft.com/l/message/course/4'},
+ ];
+ await click({action:'refresh'});
+ await click({day:'2026-11-30'});
+ assert.equal([...elements.app.innerHTML.matchAll(/data-detail="cross-post"/g)].length,2);
+ assert.match(elements.app.innerHTML,/data-detail="other-time"/);
+ assert.doesNotMatch(elements.app.innerHTML,/data-detail="101:22:event"|data-detail="https:\/\/classroom\.google\.com\/c\/course\/a\/assignment\/details"/);
+ await click({detail:'cross-post',source:'teams'});
+ for (const url of [classroomPost,classroomWork,teamsPost,teamsRepost]) {
+   assert.equal(elements.modal.innerHTML.split(`href="${url}"`).length - 1, 1);
+ }
+ assert.doesNotMatch(elements.modal.innerHTML,/\/message\/course\/4/);
+ await click({action:'close'});
+ calendarExtras = [];
+ await click({action:'refresh'});
+ await click({detail:classroomWork,source:'classroom'});
+ assert.ok(elements.modal.innerHTML.includes(`href="${classroomPost}"`));
+ assert.ok(elements.modal.innerHTML.includes(`href="${classroomWork}"`));
+ assert.doesNotMatch(elements.modal.innerHTML,/teams\.microsoft\.com/);
  await click({action:'today'});
  await click({action:'classroom-courses'});
  assert.match(elements.modal.innerHTML,/학급/);
