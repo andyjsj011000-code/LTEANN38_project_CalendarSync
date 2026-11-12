@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 from fastapi import Depends, HTTPException
 
-from .calendar_rules import KST
+from .calendar_rules import KST, merge_teams_reposts
 from .schemas import EventState
 
 
@@ -46,7 +46,9 @@ def install_shared_routes(app, settings, db, current_session, integration):
             lambda: {
                 "start": lo,
                 "end": hi,
-                "items": db.calendar(session["user_id"], session["tenant_id"], lo, hi),
+                "items": merge_teams_reposts(
+                    db.calendar(session["user_id"], session["tenant_id"], lo, hi)
+                ),
             },
         )
 
@@ -56,8 +58,8 @@ def install_shared_routes(app, settings, db, current_session, integration):
         return teams_read(
             session,
             lambda: {
-                "items": db.calendar(
-                    session["user_id"], session["tenant_id"], lo, hi, hidden_only=True
+                "items": merge_teams_reposts(
+                    db.calendar(session["user_id"], session["tenant_id"], lo, hi, hidden_only=True)
                 )
             },
         )
@@ -65,7 +67,9 @@ def install_shared_routes(app, settings, db, current_session, integration):
     @app.get("/api/today")
     def today(day: date | None = None, session=Depends(current_session)):
         selected = day or datetime.fromtimestamp(db.clock(), KST).date()
-        return teams_read(
-            session,
-            lambda: db.agenda(session["user_id"], session["tenant_id"], selected.isoformat()),
-        )
+
+        def agenda():
+            result = db.agenda(session["user_id"], session["tenant_id"], selected.isoformat())
+            return {**result, "teams": merge_teams_reposts(result["teams"])}
+
+        return teams_read(session, agenda)

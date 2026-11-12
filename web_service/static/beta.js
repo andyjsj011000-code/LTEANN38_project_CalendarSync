@@ -206,7 +206,10 @@
     // New reads and writes still require the server's unchanged permission proof.
     S.teamsUnverified = true; S.teamsSnapshotPending = true; teamsAccessRevision++;
     if (Array.isArray(channels)) {
-      const allowed = new Set(channels), visible = item => item.source === 'personal' || allowed.has(item.channel_id);
+      const allowed = new Set(channels);
+      const visible = item => item.source === 'personal' || (
+        allowed.has(item.channel_id) && (item.related_sources || []).every(source => allowed.has(source.channel_id))
+      );
       if (S.today) S.today = {...S.today,teams:S.today.teams.filter(visible)};
       S.items = S.items.filter(visible); S.upcoming = S.upcoming.filter(visible); hiddenItems = hiddenItems.filter(visible);
     }
@@ -861,7 +864,10 @@
       openDialog(e.title, '<p class="detail-meta">'+esc(e.channel)+' · Teams 과제</p><p>'+esc(e.end_date ? period(e)+' '+(e.time || '') : '기한 없음')+'</p><p>'+esc(A.status(e))+'</p><p class="muted fine">제출 상태는 Teams에서 읽어 와요. 제출과 수정은 Teams에서 진행해 주세요.</p>'+sourceLink(e.source_url)+'<div class="detail-notes">'+esc(e.notes || '자세한 안내는 Teams 과제에서 확인해 주세요.')+'</div>', '<button class="secondary" data-action="close">닫기</button>');
       return;
     }
-    openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + sourceLink(e.source_url) : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : (testServer() ? '<button class="secondary" data-action="override-detail">나만 수정</button>' : '')}${testServer() ? '<button class="secondary" data-action="reminders">예약 알림</button>' : ''}`, e.source === 'teams');
+    const links = e.related_sources
+      ? e.related_sources.map((source, i) => sourceLink(source.url, `Teams 원문 ${i + 1} · ${source.channel} →`)).join('')
+      : sourceLink(e.source_url);
+    openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + links : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : (testServer() ? '<button class="secondary" data-action="override-detail">나만 수정</button>' : '')}${testServer() ? '<button class="secondary" data-action="reminders">예약 알림</button>' : ''}`, e.source === 'teams');
   }
   function taskForm(e = null, draft = null) {
     detailItem = e; taskMissing = false; taskFormRevision++;
@@ -959,7 +965,21 @@
     if (!item) return;
     const original = {...item};
     const pending = values.hidden === true ? '숨기는 중…' : values.hidden === false ? '복원하는 중…' : '완료 상태를 저장하는 중…';
-    return mutate(() => setState(original, values), message, false, result => applyConfirmedState(original, values, result), pending);
+    return mutate(() => changeEventSources(original, id => setState({...original, id}, values)),
+      message, false, result => applyConfirmedState(original, values, result), pending);
+  }
+  async function changeEventSources(item, write) {
+    if (!item.related_sources) return write(item.id);
+    const epoch = authEpoch;
+    const results = await Promise.allSettled(item.related_sources.map(source => write(source.id)));
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed) {
+      if (activeView(epoch) && results.some(result => result.status === 'fulfilled')) {
+        await load().catch(() => {});
+      }
+      throw failed.reason;
+    }
+    return results[0].value;
   }
   function applyConfirmedDelete(item) {
     const keep = candidate => candidate.id !== item.id || candidate.source !== item.source;
@@ -1167,7 +1187,12 @@
       data.time = data.time || null; data.selected_dates = data.display_mode === 'selected' ? [...selectedDates].filter(d => d >= data.start_date && d <= data.end_date) : [];
       const e = detailItem;
       if (!data.title.trim() || data.end_date < data.start_date) {$('#form-error').textContent = '제목과 시작·마지막 날짜를 확인해 주세요.'; return;}
-      if (e?.source === 'teams' && testServer()) {delete data.display_mode; delete data.selected_dates; return mutate(() => api(`/api/events/${encodeURIComponent(e.id)}/override`, {method:'PUT',body:data}), '이 계정의 일정만 수정했어요.');}
+      if (e?.source === 'teams' && testServer()) {
+        delete data.display_mode; delete data.selected_dates;
+        return mutate(() => changeEventSources(e, id => api(
+          `/api/events/${encodeURIComponent(id)}/override`, {method:'PUT',body:data}
+        )), '이 계정의 일정만 수정했어요.');
+      }
       return mutate(async () => {const epoch = authEpoch, dialog = dialogEpoch; const draftResult = plannerEnabled() ? await taskDrafts?.flush() : null; if (!activeView(epoch) || dialog !== dialogEpoch || (plannerEnabled() && (autoReadsPaused || resumeCheck))) throw new Error('로그인 상태를 확인한 뒤 다시 저장해 주세요.'); const result = await api(e ? `/api/tasks/${encodeURIComponent(e.id)}` : '/api/tasks',{method:e ? 'PUT' : 'POST',body:{...data,...(e ? {version:e.version} : {})}}); if (activeView(epoch) && plannerEnabled()) await taskDrafts?.clearConfirmed(draftResult); return result;}, '할 일을 저장했어요.', false, result => applyConfirmedState({hidden:false,completed:false,...e,...data,id:e?.id || result.id,source:'personal'}, {}, result));
     }
     if (form.id === 'filters-form') {
@@ -1293,9 +1318,9 @@
     reminderCustomInitial = custom && !Number.isNaN(custom.getTime()) ? new Date(custom.getTime()-custom.getTimezoneOffset()*60000).toISOString().slice(0,16) : '';
     openDialog('이 일정의 예약 알림', `<form id="reminder-form"><p>${esc(item.title)}</p><label class="toggle-row">하루 전<input name="day" type="checkbox" ${rules.offsets.includes(-1440) ? 'checked' : ''}></label><label class="toggle-row">1시간 전<input name="hour" type="checkbox" ${rules.offsets.includes(-60) ? 'checked' : ''}></label><label class="field"><span class="field-label">직접 지정 (기기 현지 시각, 선택)</span><input name="custom" type="datetime-local" value="${esc(reminderCustomInitial)}"></label><p class="fine muted">완료·취소·숨김 또는 꺼둔 채널의 일정은 알림에서 제외돼요. 직접 지정한 시각은 새로 저장한 값으로 바뀌어요.</p><div class="dialog-foot"><button class="primary" type="submit">저장</button></div></form>`);
   }
-  function sourceLink(value) {
+  function sourceLink(value, label = 'Teams 원문 보기 →') {
     if (!SCHOOL || !value) return '';
-    try {const url = new URL(value); if (url.protocol !== 'https:' || url.hostname !== 'teams.microsoft.com' || !url.pathname.startsWith('/l/message/')) return ''; return `<p><a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer">Teams 원문 보기 →</a></p>`;} catch {return '';}
+    try {const url = new URL(value); if (url.protocol !== 'https:' || url.hostname !== 'teams.microsoft.com' || !url.pathname.startsWith('/l/message/')) return ''; return `<p><a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a></p>`;} catch {return '';}
   }
   function expireIdle() {
     if (S.me && idleDeadline && Date.now() >= idleDeadline) {

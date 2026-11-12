@@ -1318,11 +1318,17 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     const h=harness({overrides:{'/api/service':personalService}});await settle();
     const allowed={...h.item,channel_id:'allowed',title:'Still authorized schedule'};
     const revoked={...h.item,id:'revoked',channel_id:'revoked',title:'Revoked channel schedule'};
-    h.overrides['/api/calendar']=()=>response({items:[allowed,revoked]});await h.click({action:'refresh'});await h.click({action:'calendar'});
+    const grouped={...allowed,id:'group',title:'Cross-channel repost',related_sources:[
+      {id:'group',channel_id:'allowed',url:'https://teams.microsoft.com/l/message/allowed/1'},
+      {id:'extra',channel_id:'revoked',url:'https://teams.microsoft.com/l/message/revoked/2'}
+    ]};
+    h.overrides['/api/calendar']=()=>response({items:[allowed,revoked,grouped]});await h.click({action:'refresh'});await h.click({action:'calendar'});
+    assert.match(h.elements.app.innerHTML,/Cross-channel repost/);
     h.overrides['/api/today']=()=>response({code:'permission_check_pending',teams_access_unverified:true,
       connection_state:'connected',retryable:true,retain_teams_snapshot:true,snapshot_channel_ids:['allowed']},503);
     await h.click({action:'refresh'});
     assert.match(h.elements.app.innerHTML,/Still authorized schedule/);assert.doesNotMatch(h.elements.app.innerHTML,/Revoked channel schedule/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/Cross-channel repost/);
   }
   // A new Classroom snapshot replaces the card without redrawing the agenda.
   {

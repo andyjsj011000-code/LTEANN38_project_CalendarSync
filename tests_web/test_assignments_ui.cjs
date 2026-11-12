@@ -11,6 +11,14 @@ elements.modal.close = function(){this.open=false;};
 elements.modal.showModal = function(){this.open=true;};
 let signedIn = true, resolveAssignments, result = null;
 const now = Date.parse('2026-11-08T05:00:00Z');
+const repost = {id:'event-1',source:'teams',kind:'event',title:'실험실 안전 점검 설명회',
+ channel:'학년 채널',channel_id:'grade',start_date:'2026-11-08',end_date:'2026-11-08',time:'16:10',
+ completed:false,source_url:'https://teams.microsoft.com/l/message/grade/1',
+ related_sources:[
+  {id:'event-1',channel:'학년 채널',channel_id:'grade',url:'https://teams.microsoft.com/l/message/grade/1'},
+  {id:'event-2',channel:'학교 채널',channel_id:'school',url:'https://teams.microsoft.com/l/message/school/2'}
+ ]};
+const repostStates = [];
 const classroomCourse = {key:'id:101',name:'학급',hidden:false};
 let classroom = {connected:true,method:'google',announcement_analysis:false,courses:[classroomCourse],snapshot:{captured_at:now,items:[
  {kind:'assignment',title:'Classroom November assignment',course:'학급',submission_status:'working',due:'2026-11-29T15:30:00Z',url:'https://classroom.google.com/c/course/a/assignment/details'},
@@ -45,9 +53,12 @@ const context = {
    assert.deepEqual(body,{key:classroomCourse.key,hidden:true});
    data = classroom = {...classroom,courses:[{...classroomCourse,hidden:true}],snapshot:{...classroom.snapshot,items:[],events:[]}};
   }
-  else if(url==='/api/today') data={date:'2026-11-08',teams:[],personal:[]};
+  else if(url==='/api/today') data={date:'2026-11-08',teams:repostStates.length ? [] : [repost],personal:[]};
   else if(url==='/api/personal/today') data={date:'2026-11-08',personal:[]};
   else if(url.startsWith('/api/calendar')) data={items:[]};
+  else if(url.startsWith('/api/events/') && options.method==='PATCH') {
+   repostStates.push([url,JSON.parse(options.body)]); data={hidden:true};
+  }
   else if(url==='/api/channels') data=[];
   else if(url==='/api/settings') data={preferences:{disabled_kinds:[]},connection:{state:'connected',background_enabled:true}};
   else if(url==='/api/changes') data={items:[]};
@@ -64,6 +75,13 @@ const click=dataset=>listeners.click({target:{closest(){return {dataset};}}});
 (async()=>{
  await flush();
  assert.match(elements.app.innerHTML,/오늘 할 일/); // assignments must not block the agenda
+ await click({detail:'event-1',source:'teams'});
+ assert.match(elements.modal.innerHTML,/href="https:\/\/teams\.microsoft\.com\/l\/message\/grade\/1"/);
+ assert.match(elements.modal.innerHTML,/href="https:\/\/teams\.microsoft\.com\/l\/message\/school\/2"/);
+ await click({action:'hide-detail'});
+ assert.deepEqual(repostStates,[
+  ['/api/events/event-1/state',{hidden:true}],['/api/events/event-2/state',{hidden:true}]
+ ]);
  await click({action:'assignments'});
  assert.match(elements.app.innerHTML,/불러오는 중/);
  assert.match(elements.app.innerHTML,/aria-label="Google Classroom 과제"/);
