@@ -101,6 +101,7 @@ REQUIRED_FILES = (
     "web_service/schema_revisions/planner_v1.sql",
     "web_service/schema_revisions/classroom_v1.sql",
     "web_service/schema_revisions/classroom_google_v1.sql",
+    "web_service/schema_revisions/classroom_courses_v1.sql",
     "web_service/schema_revisions/postgres_base_v1.sql",
     "web_service/schema_revisions/shared_ingestion_v1.sql",
     "web_service/schema_revisions/sqlite_base_v1.sql",

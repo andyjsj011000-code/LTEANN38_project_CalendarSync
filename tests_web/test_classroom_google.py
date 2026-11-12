@@ -13,7 +13,7 @@ from web_service.server import create_test_server
 def test_google_connection_reads_classroom_and_preserves_the_existing_connection(server):
     history = SQLiteHistory(server.settings.database_path, "sqlite-server")
     history.baseline(expected_sha256=history.plan()["plan_sha256"])
-    for feature in ("classroom", "classroom-google"):
+    for feature in ("classroom", "classroom-google", "classroom-courses"):
         history.upgrade(feature, expected_sha256=history.plan(feature)["plan_sha256"])
     settings = replace(
         server.settings,
@@ -68,7 +68,15 @@ def test_google_connection_reads_classroom_and_preserves_the_existing_connection
         }
         if request.url.path == "/v1/courses":
             assert request.url.params["studentId"] == "me"
-            return httpx.Response(200, json={"courses": [{"id": "1", "name": "Test course"}]})
+            return httpx.Response(
+                200,
+                json={"courses": [
+                    {"id": "1", "name": "Test course"},
+                    {"id": "2", "name": "Test course"},
+                ]},
+            )
+        if request.url.path.startswith("/v1/courses/2/"):
+            return httpx.Response(200, json={})
         if request.url.path.endswith("/announcements"):
             return httpx.Response(200, json={"announcements": [{"text": "Class notice"}]})
         assert request.url.path.endswith("/courseWork")
@@ -121,6 +129,15 @@ def test_google_connection_reads_classroom_and_preserves_the_existing_connection
             "First assignment",
         ]
         assert snapshot["snapshot"]["items"][1]["due"] == "2026-11-17"
+        assert [course["key"] for course in snapshot["courses"]] == ["id:1", "id:2"]
+        preference = "/api/classroom/courses/preference"
+        hidden = client.put(preference, json={"key": "id:1", "hidden": True}).json()
+        assert [course["hidden"] for course in hidden["courses"]] == [True, False]
+        assert hidden["snapshot"]["items"] == []
+        same_owner = server.client()
+        with TestClient(app, base_url=settings.origin, cookies=same_owner.cookies) as relogged:
+            assert relogged.get("/api/classroom").json()["snapshot"]["items"] == []
+        assert client.put(preference, json={"key": "id:1", "hidden": False}).status_code == 200
         assert "private-refresh" not in str(snapshot)
         with server.db.connect() as connection:
             credential = connection.execute(

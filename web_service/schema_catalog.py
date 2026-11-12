@@ -105,6 +105,18 @@ REVISIONS = {
             ("postgres-classroom-v1",),
         ),
         Revision(
+            "sqlite-classroom-courses-v1",
+            "classroom_courses_v1.sql",
+            "88b653d626514f8071410c49ec2bd6b3cf86bfdad79a6ee3b41425f111afee8b",
+            ("sqlite-classroom-v1",),
+        ),
+        Revision(
+            "postgres-classroom-courses-v1",
+            "classroom_courses_v1.sql",
+            "88b653d626514f8071410c49ec2bd6b3cf86bfdad79a6ee3b41425f111afee8b",
+            ("postgres-classroom-v1",),
+        ),
+        Revision(
             "postgres-planner-v1",
             "planner_v1.sql",
             "9c3d04fc18f2e3cf49ca5340c92d950a30f795c48a8bf80760f2de30cea98b44",
@@ -124,17 +136,20 @@ FEATURES = {
         "planner": "sqlite-planner-v1",
         "classroom": "sqlite-classroom-v1",
         "classroom-google": "sqlite-classroom-google-v1",
+        "classroom-courses": "sqlite-classroom-courses-v1",
     },
     "postgres-server": {
         "shared-ingestion": "postgres-shared-v1",
         "planner": "postgres-planner-v1",
         "classroom": "postgres-classroom-v1",
         "classroom-google": "postgres-classroom-google-v1",
+        "classroom-courses": "postgres-classroom-courses-v1",
     },
 }
 FEATURE_TABLES = {
     "classroom": frozenset({"web_classroom_connections"}),
     "classroom-google": frozenset({"web_classroom_google"}),
+    "classroom-courses": frozenset({"web_classroom_hidden_courses"}),
     "planner": frozenset({"web_task_drafts", "web_task_trash", "web_ingestion_status"}),
     "shared-ingestion": frozenset({"web_channel_ingestion"}),
 }

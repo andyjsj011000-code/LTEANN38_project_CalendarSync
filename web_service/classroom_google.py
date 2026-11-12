@@ -120,6 +120,7 @@ def _pages(client, token, path, params, field, deadline):
 
 def _snapshot(client, token, captured_at):
     notices, assignments = [], []
+    active_courses = []
     deadline = time.monotonic() + 45
     courses = _pages(
         client,
@@ -136,7 +137,9 @@ def _snapshot(client, token, captured_at):
     )
     for course in courses:
         name = _text(course.get("name"), 120) or "Classroom"
-        path = f"courses/{quote(course['id'], safe='')}/"
+        course_id = course["id"]
+        active_courses.append({"id": course_id, "name": name})
+        path = f"courses/{quote(course_id, safe='')}/"
         for segment, field, kind, fields, output in (
             (
                 "announcements",
@@ -168,6 +171,7 @@ def _snapshot(client, token, captured_at):
                         item.get("updateTime", ""),
                         {
                             "course": name,
+                            "course_id": course_id,
                             "kind": kind,
                             "title": _text(item.get(title_key), 240)
                             or ("수업 공지" if kind == "announcement" else "과제"),
@@ -185,7 +189,7 @@ def _snapshot(client, token, captured_at):
         for group in (notices, assignments)
         for _, item in sorted(group, key=lambda pair: pair[0], reverse=True)[:12]
     ]
-    return ClassroomSnapshot(captured_at=captured_at, items=items).model_dump(mode="json")
+    return ClassroomSnapshot(captured_at=captured_at, items=items, courses=active_courses).model_dump(mode="json")
 
 
 class GoogleClassroom:

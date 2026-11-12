@@ -24,6 +24,7 @@
 .assignment-mark { color:var(--assignment-color); font-size:12px; font-weight:700; padding:5px; }
 .assignment-group { margin:16px 0; }
 .assignment .task-time { min-width:48px; }
-.single-event.assignment { color:#65409c; background:#f1eafa; }
+.single-event.assignment, .single-event.classroom { color:#65409c; background:#f1eafa; }
+.calendar-legend .dot.classroom { background:#65409c; }
 
 .classroom-card .upcoming-text strong{white-space:normal;overflow-wrap:anywhere}.classroom-card .upcoming-text small{overflow-wrap:anywhere}.classroom-card .upcoming-text p{margin:4px 0 0;overflow-wrap:anywhere}.classroom-card .upcoming-text a{margin-left:6px;color:var(--blue)}

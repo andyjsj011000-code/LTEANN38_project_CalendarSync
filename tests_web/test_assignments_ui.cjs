@@ -11,8 +11,9 @@ elements.modal.close = function(){this.open=false;};
 elements.modal.showModal = function(){this.open=true;};
 let signedIn = true, resolveAssignments, result = null;
 const now = Date.parse('2026-11-08T05:00:00Z');
-let classroom = {connected:true,method:'google',snapshot:{captured_at:now,items:[
- {kind:'assignment',title:'Classroom November assignment',course:'학급',due:'2026-11-30',url:'https://classroom.google.com/c/course/a/assignment/details'},
+const classroomCourse = {key:'id:101',name:'학급',hidden:false};
+let classroom = {connected:true,method:'google',courses:[classroomCourse],snapshot:{captured_at:now,items:[
+ {kind:'assignment',title:'Classroom November assignment',course:'학급',due:'2026-11-29T15:30:00Z',url:'https://classroom.google.com/c/course/a/assignment/details'},
  {kind:'announcement',title:'Classroom announcement',course:'학급'}
 ]}};
 class Clock extends Date {constructor(...a){super(...(a.length ? a : [now]));} static now(){return now;}}
@@ -28,6 +29,11 @@ const context = {
   else if(url==='/api/me'){status=signedIn?200:401;data={id:'student',name:'학생',csrf_token:'csrf'};}
   else if(url.startsWith('/api/assignments')) data=result || await new Promise(r=>{resolveAssignments=r;});
   else if(url==='/api/classroom') data=classroom;
+  else if(url==='/api/classroom/courses/preference') {
+   const body = JSON.parse(options.body);
+   assert.deepEqual(body,{key:classroomCourse.key,hidden:true});
+   data = classroom = {...classroom,courses:[{...classroomCourse,hidden:true}],snapshot:{...classroom.snapshot,items:[]}};
+  }
   else if(url==='/api/today') data={date:'2026-11-08',teams:[],personal:[]};
   else if(url==='/api/personal/today') data={date:'2026-11-08',personal:[]};
   else if(url.startsWith('/api/calendar')) data={items:[]};
@@ -51,7 +57,7 @@ const click=dataset=>listeners.click({target:{closest(){return {dataset};}}});
  assert.match(elements.app.innerHTML,/불러오는 중/);
  assert.match(elements.app.innerHTML,/Google Classroom 과제/);
  assert.match(elements.app.innerHTML,/Classroom November assignment/);
- assert.match(elements.app.innerHTML,/11월 30일/);
+ assert.match(elements.app.innerHTML,/11(?:월|\.)\s*30/);
  assert.match(elements.app.innerHTML,/https:\/\/classroom\.google\.com\/c\/course\/a\/assignment\/details/);
  assert.doesNotMatch(elements.app.innerHTML,/Classroom announcement/);
  elements.classroomCard = {outerHTML:''};
@@ -85,12 +91,27 @@ const click=dataset=>listeners.click({target:{closest(){return {dataset};}}});
  assert.match(elements.app.innerHTML,/data-detail="overdue"/);
  await click({action:'calendar'});
  assert.match(elements.app.innerHTML,/data-detail="upcoming"/);
+ assert.match(elements.app.innerHTML,/data-source="classroom"[^>]*>.*Classroom updated assignment/);
+ await click({day:'2026-11-30'});
+ assert.match(elements.app.innerHTML,/class="date-detail".*Classroom updated assignment/);
+ await click({detail:'https://classroom.google.com/c/course/a/assignment/details',source:'classroom'});
+ assert.match(elements.modal.innerHTML,/Google Classroom 원문/);
+ assert.doesNotMatch(elements.modal.innerHTML,/hide-detail/);
  await click({detail:'upcoming',source:'assignment'});
  assert.match(elements.modal.innerHTML,/제출과 수정은 Teams에서/);
  assert.ok(!elements.modal.innerHTML.includes('hide-detail'));
  await click({action:'today'});
  assert.match(elements.app.innerHTML,/오늘 마감 과제/);
  assert.match(elements.app.innerHTML,/data-detail="today"/);
+ await click({action:'classroom-courses'});
+ assert.match(elements.modal.innerHTML,/학급/);
+ await click({action:'classroom-course-visibility',courseKey:classroomCourse.key});
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom updated assignment/);
+ assert.match(elements.modal.innerHTML,/다시 표시/);
+ await click({action:'calendar'});
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom updated assignment/);
+ await click({action:'assignments'});
+ assert.doesNotMatch(elements.app.innerHTML,/Classroom updated assignment/);
  result=null;
  const pending=click({action:'refresh-assignments'});
  await flush();

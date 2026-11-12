@@ -69,7 +69,7 @@ function collectClassroomItems(course, announcements, assignments) {
   } while (pageToken && notices.length < options.pageSize);
   for (const notice of notices) {
     announcements.push({
-      kind: 'announcement', course: courseName,
+      kind: 'announcement', course: courseName, course_id: String(course.id),
       title: shortText(notice.text, 240) || '수업 공지', url: classroomLink(notice.alternateLink),
       updated: notice.updateTime || ''
     });
@@ -86,7 +86,7 @@ function collectClassroomItems(course, announcements, assignments) {
   } while (pageToken && work.length < options.pageSize);
   for (const item of work) {
     assignments.push({
-      kind: 'assignment', course: courseName, title: shortText(item.title, 240) || '과제',
+      kind: 'assignment', course: courseName, course_id: String(course.id), title: shortText(item.title, 240) || '과제',
       description: shortText(item.description, 160), url: classroomLink(item.alternateLink),
       updated: item.updateTime || '', due: classroomDue(item.dueDate, item.dueTime)
     });

@@ -21,6 +21,7 @@ Google의 External Testing 상태에서는 Classroom 권한의 갱신 토큰이 
 
 1. `python -m web_service.schema_history_cli --profile postgres-server --feature classroom`로 변경 계획과 `plan_sha256`을 확인한다. SQLite에서는 `--profile sqlite-server`를 사용한다.
 2. 동일한 프로필로 `--upgrade classroom --expected-sha256 <plan_sha256>`과 DB 대상 인자를 지정해 적용한다.
+3. `classroom-courses` 기능도 같은 절차로 계획을 확인하고 적용한다. 수업별 표시 설정은 계정마다 저장한다.
 3. 서버에 `WEB_CLASSROOM_ENABLED=1`을 설정한다. 실제 스크립트 전송에는 Google 서버에서 접속할 수 있는 CalendarSync HTTPS 주소가 필요하다.
 
 ### 학생 연결
