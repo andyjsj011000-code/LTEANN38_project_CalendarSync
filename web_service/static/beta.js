@@ -274,7 +274,7 @@
       S.classroom = value;
       delete S.partErrors.classroom;
       const card = $('.classroom-card');
-      if (card) card.outerHTML = classroomCard();
+      if (card) card.outerHTML = classroomCard(S.view === 'assignments');
     } catch (error) {
       if (current() && [401,403].includes(error.status)) failure(error);
     } finally {
@@ -602,7 +602,7 @@
       topbar.hidden = false; $('#account-name').textContent = S.me.name;
       $('#nav-today').classList.toggle('active',false); $('#nav-calendar').classList.toggle('active',false);
       const connect = '/auth/login?assignments=1' + (S.connection?.background_enabled === true ? '&background=1' : '');
-      root.innerHTML = A.render(S.assignments,S.assignmentFilter,connect); return;
+      root.innerHTML = A.render(S.assignments,S.assignmentFilter,connect,Date.now(),classroomCard(true)); return;
     }
     if (!S.today) return renderLoadState();
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
@@ -616,7 +616,7 @@
     const teamsEmpty = S.teamsUnverified ? '권한을 다시 확인하는 동안 Teams 일정을 잠시 숨겼어요. 확인되면 다시 표시돼요.' : !S.ready.today ? (S.partErrors.today || 'Teams 일정을 확인하는 대로 표시해요.') : teamsPending ? (S.connection?.ingestion_pending || !S.ready.settings ? 'Teams 일정을 확인하는 대로 표시해요.' : connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
     root.innerHTML = intro('오늘 할 일', pretty(S.day)) + plannerTools() + listTools('today',[...S.today.teams,...S.today.personal,...S.upcoming]) + `<div class="today-layout"><div class="stack">${assignmentToday()}<section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${!S.ready.today && !S.today.teams.length ? `<div class="empty" role="${S.partErrors.today && !S.permissionPending ? 'alert' : 'status'}">${esc(teamsEmpty)}</div>` : list(teams, filteredEmpty(teamsEmpty,S.today.teams.length))}</div></section>${classroomCard()}<section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${personal.length}</span></h2></div><div class="list">${list(personal, filteredEmpty('오늘 할 일을 가볍게 적어보세요.',S.today.personal.length))}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">${S.ready.today ? '완료한 항목은 원래 위치에 남아요.' : '먼저 확인된 개인 할 일 기준이에요. Teams 일정은 확인 중이에요.'}</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : `<div class="empty">${esc(filteredEmpty('일주일 안에 다가오는 마감이 없어요.',S.upcoming.length))}</div>`}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
   }
-  function classroomCard() {
+  function classroomCard(assignmentsOnly = false) {
     if (!S.service?.classroom_enabled) return '';
     const connection = S.classroom;
     const google = connection?.method === 'google';
@@ -645,16 +645,21 @@
       const dateTime = new Intl.DateTimeFormat('ko-KR', {
         dateStyle:'short', timeStyle:'short', timeZone:'Asia/Seoul'
       });
-      const rows = connection.snapshot.items.map(item => {
+      const items = assignmentsOnly
+        ? connection.snapshot.items.filter(item => item.kind === 'assignment')
+        : connection.snapshot.items;
+      const rows = items.map(item => {
         const type = item.kind === 'announcement' ? '공지' : '과제';
         const deadline = item.due ? (item.due.length === 10 ? pretty(item.due) : dateTime.format(new Date(item.due))) : '';
         const meta = [item.course, type, deadline && '마감 ' + deadline].filter(Boolean).join(' · ');
         const link = item.url ? ` <a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">원문</a>` : '';
         return `<div class="upcoming-item"><div class="upcoming-text"><strong>${esc(item.title)}</strong><small>${esc(meta)}${link}</small>${item.description ? `<p class="fine">${esc(item.description)}</p>` : ''}</div></div>`;
       }).join('');
-      body = `<p class="fine muted">최근 동기화 ${esc(dateTime.format(connection.snapshot.captured_at))}</p>${rows || '<p class="empty">표시할 공지나 과제가 없어요.</p>'}`;
+      const empty = assignmentsOnly ? '표시할 구글 클래스룸 과제가 없어요.' : '표시할 공지나 과제가 없어요.';
+      body = `<p class="fine muted">최근 동기화 ${esc(dateTime.format(connection.snapshot.captured_at))}</p>${rows || `<p class="empty">${empty}</p>`}`;
     }
-    return `<section class="card classroom-card"><div class="card-head"><h2>Google Classroom</h2><div class="actions">${actions.join('')}</div></div><div class="list">${body}</div></section>`;
+    const heading = assignmentsOnly ? 'Google Classroom 과제' : 'Google Classroom';
+    return `<section class="card classroom-card"><div class="card-head"><h2>${heading}</h2><div class="actions">${actions.join('')}</div></div><div class="list">${body}</div></section>`;
   }
   async function connectClassroom() {
     const epoch = authEpoch;
