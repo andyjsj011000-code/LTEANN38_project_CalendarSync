@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # Security
     DATA_ENCRYPTION_KEY: str
+    BOT_CONNECTOR_HOSTS: list[str] = ["smba.trafficmanager.net"]
 
     # OpenAI / LLM Config
     OPENAI_API_KEY: str

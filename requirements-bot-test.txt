@@ -2,3 +2,4 @@
 -r requirements-web.txt
 SQLAlchemy==2.0.36
 cachetools==5.5.0
+PyJWT[crypto]==2.15.1

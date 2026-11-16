@@ -1,9 +1,12 @@
 # app/services/bot_service.py
 import logging
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
+
+from app.core.bot_auth import is_trusted_connector_url
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -16,11 +19,14 @@ class BotService:
         client_secret: str,
         tenant_id: str,
         client: httpx.AsyncClient,
+        *,
+        allowed_hosts: Collection[str],
     ):
         self.client_id = client_id
         self.client_secret = client_secret
         self.tenant_id = tenant_id
         self._client = client
+        self._allowed_hosts = frozenset(allowed_hosts)
 
         self._access_token: Optional[str] = None
         self._token_expires_at: Optional[datetime] = None
@@ -46,7 +52,7 @@ class BotService:
             "scope": "https://api.botframework.com/.default",  # Bot Connector 전용 Scope
         }
 
-        res = await self._client.post(token_url, data=payload)
+        res = await self._client.post(token_url, data=payload, follow_redirects=False)
         res.raise_for_status()
         data = res.json()
 
@@ -63,6 +69,9 @@ class BotService:
         if not service_url or not conversation_id:
             logger.warning("[BotService] service_url 또는 conversation_id가 누락되었습니다.")
             return False
+        if not is_trusted_connector_url(service_url, self._allowed_hosts):
+            logger.warning("[BotService] 신뢰할 수 없는 Teams 발송 주소입니다.")
+            return False
 
         token = await self._get_access_token()
         base_url = service_url.rstrip("/")
@@ -78,7 +87,9 @@ class BotService:
             "text": message,
         }
 
-        res = await self._client.post(endpoint, headers=headers, json=payload)
+        res = await self._client.post(
+            endpoint, headers=headers, json=payload, follow_redirects=False
+        )
 
         # 401 Unauthorized 발생 시 토큰 강제 재발급 후 1회 재시도
         if res.status_code == 401:
@@ -86,7 +97,9 @@ class BotService:
             self._access_token = None
             token = await self._get_access_token()
             headers["Authorization"] = f"Bearer {token}"
-            res = await self._client.post(endpoint, headers=headers, json=payload)
+            res = await self._client.post(
+                endpoint, headers=headers, json=payload, follow_redirects=False
+            )
 
         if res.status_code not in (200, 201, 202):
             logger.error(f"[BotService] 메시지 발송 실패 ({res.status_code}): {res.text}")
@@ -97,6 +110,10 @@ class BotService:
         self, service_url: str, user_id: str, tenant_id: str
     ) -> Optional[str]:
         """user_id를 기반으로 새 봇 기준 1:1 대화방 생성 및 conversation_id 반환"""
+        if not is_trusted_connector_url(service_url, self._allowed_hosts):
+            logger.warning("[BotService] 신뢰할 수 없는 Teams 대화방 생성 주소입니다.")
+            return None
+
         try:
             token = await self._get_access_token()
             base_url = service_url.rstrip("/")
@@ -113,7 +130,9 @@ class BotService:
                 "channelData": {"tenant": {"id": tenant_id}},
             }
 
-            res = await self._client.post(endpoint, headers=headers, json=payload)
+            res = await self._client.post(
+                endpoint, headers=headers, json=payload, follow_redirects=False
+            )
             res.raise_for_status()
 
             # 새로 발급된 conversation_id
