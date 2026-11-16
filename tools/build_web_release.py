@@ -24,7 +24,7 @@ REQUIRED_FILES = (
     "requirements-postgres-experimental.txt",
     "NOTIFICATION_WORK_IN_PROGRESS.md",
     "docs/BETA_PREPARATION_STATUS_KO.md",
-    "docs/TEST_SERVER_PRIVACY.md",
+    "docs/TEST_SERVER_PRIVACY.html",
     "docs/TEAMS_ASSIGNMENTS.md",
     "docs/CLASSROOM_APPS_SCRIPT.md",
     "docs/SCHEMA_HISTORY.md",

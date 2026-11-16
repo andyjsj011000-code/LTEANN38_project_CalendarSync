@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import Field
 
 from .schemas import Input
@@ -14,6 +14,16 @@ class Feedback(Input):
 
 
 def install_server_routes(app, settings, db, integration, require, static, preview):
+    if preview:
+        notice_processing = "sample"
+        notice_description = "예시 모드에서는 실제 학교 공지를 읽거나 외부로 보내지 않아요."
+    elif hasattr(integration.source, "collect"):
+        notice_processing = "openai"
+        notice_description = "접근 권한이 확인된 Teams 채널의 공지와 답글을 확인합니다. 일정을 추출할 때 본문과, 이미지 분석 설정이 켜져 있으면 지원되는 이미지를 OpenAI API로 보낼 수 있습니다."
+    else:
+        notice_processing = "existing"
+        notice_description = "접근 권한이 확인된 채널에 대해 기존 수집기가 추출한 일정 결과를 읽습니다."
+
     @app.get("/api/assignments")
     def assignments(refresh: bool = False, session=Depends(require)):
         if not integration.assignments_enabled:
@@ -30,6 +40,7 @@ def install_server_routes(app, settings, db, integration, require, static, previ
             "synthetic_data_only": preview,
             "idle_seconds": settings.idle_seconds,
             "shared_channel_ingestion": integration.shared_ingestion_enabled,
+            "teams_notice_processing": notice_processing,
             "personal_agenda": True,
             "assignments_enabled": integration.assignments_enabled,
             **({"classroom_enabled": True} if settings.classroom_enabled and not preview else {}),
@@ -55,10 +66,8 @@ def install_server_routes(app, settings, db, integration, require, static, previ
 
     @app.get("/privacy")
     def privacy():
-        return FileResponse(
-            Path(__file__).parent.parent / "docs" / "TEST_SERVER_PRIVACY.md",
-            media_type="text/plain; charset=utf-8",
-        )
+        page = Path(__file__).parent.parent / "docs" / "TEST_SERVER_PRIVACY.html"
+        return HTMLResponse(page.read_text(encoding="utf-8").replace("<!-- teams-notice-processing -->", notice_description))
 
     @app.post("/api/teams/sync")
     def sync(background_tasks: BackgroundTasks, session=Depends(require)):

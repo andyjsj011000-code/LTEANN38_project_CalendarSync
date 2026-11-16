@@ -1372,6 +1372,9 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     await settle();
     assert.match(h.elements.app.innerHTML,/Google Classroom 연결/);
     await h.click({action:'classroom-google-connect'});
+    assert.equal(navigated,undefined);
+    assert.match(h.elements.modal.innerHTML,/수업 목록·공지·내 과제/);
+    await h.click({action:'classroom-google-confirm'});
     assert.equal(navigated,consentUrl);
     assert.equal(writes(h).at(-1).url,'/api/classroom/google/connect');
     assert.doesNotMatch(h.elements.modal.innerHTML,/CALENDARSYNC_TOKEN/);

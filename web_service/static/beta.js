@@ -151,7 +151,21 @@
   }
   function loginScreen() {
     lastRenderKey = null;
-    if (SCHOOL) {root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC</p><h1>학교 일정과 할 일,<br>한눈에.</h1><p>${S.service?.mode === 'preview' ? '학교 계정 없이 예시 화면을 확인하세요.' : '학교 Microsoft 계정으로 로그인하세요.'}</p><a class="primary school-signin" href="/auth/login?background=1">${S.service?.mode === 'preview' ? '예시 데이터로 시작하기 →' : 'Microsoft 로그인 · 이 기기 연동 유지 →'}</a><p class="fine muted">공유 기기에서는 <a href="/auth/login">이번 사용만 로그인</a>을 선택하세요.</p>${S.service?.classroom_google_enabled ? '<p class="fine muted">처음 로그인할 때 Google Classroom 읽기 권한을 승인하거나 건너뛸 수 있어요.</p>' : ''}<p class="login-note">Microsoft 로그인 화면에서 인증해요. 이 서비스는 계정 비밀번호를 받지 않아요. 기기 연동을 유지하면 최대 30일 동안 서버가 공지를 갱신하며, 직접 로그아웃하면 이 기기의 연동과 알림을 끊어요. 본인이 접근할 수 있는 Teams 일정만 표시하며, 웹 알림은 로그인 후 이 기기에서 따로 켤 수 있어요. 외부 캘린더 등록은 아직 제공하지 않아요.</p><p><a href="/privacy">개인정보 안내</a></p>${testServer() ? '<button class="secondary" type="button" data-action="disconnect-device">이 기기 연결 해제</button>' : ''}<p class="error-message" id="login-error" role="alert">${location.search?.includes('login=failed') ? '로그인을 완료하지 못했어요. 학교 계정과 앱 권한을 확인하고 다시 시도해 주세요.' : ''}</p></div></section>`; return;}
+    if (SCHOOL) {
+      const preview = S.service?.mode === 'preview';
+      const teamsAi = S.service?.teams_notice_processing === 'openai'
+        ? '<p>Teams 공지와 답글에서 일정을 찾기 위해 본문과 지원되는 이미지를 OpenAI로 보낼 수 있어요.</p>' : '';
+      const classroomOffer = S.service?.classroom_google_enabled
+        ? '<p>첫 로그인 때 학교 이메일을 Google에 계정 선택 힌트로 보낼 수 있어요. 수업 목록·공지·내 과제 읽기 권한은 Google에서 승인하거나 건너뛸 수 있어요.</p>' : '';
+      const privacy = preview ? '' : `<section class="login-note privacy-summary" aria-labelledby="signin-privacy"><h2 id="signin-privacy">로그인 전에 확인해 주세요</h2>
+        <p>학교 계정 이름·이메일·식별자와 읽을 수 있는 Teams 채널 정보를 사용해요. 비밀번호는 Microsoft에서 입력해요.</p>${teamsAi}${classroomOffer}
+        <p>기기 연동을 유지하면 암호화한 Microsoft 연결 정보로 최대 30일 동안 공지를 갱신해요.</p><a href="/privacy">개인정보 상세 안내</a></section>`;
+      root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC</p><h1>학교 일정과 할 일,<br>한눈에.</h1><p>${preview ? '학교 계정 없이 예시 화면을 확인하세요.' : '학교 Microsoft 계정으로 로그인하세요.'}</p>${privacy}
+        <a class="primary school-signin" href="/auth/login?background=1">${preview ? '예시 데이터로 시작하기 →' : 'Microsoft 로그인 · 이 기기 연동 유지 →'}</a>
+        ${preview ? '' : '<p class="fine muted">공유 기기에서는 <a href="/auth/login">이번 사용만 로그인</a>을 선택하세요.</p>'}
+        ${testServer() ? '<button class="secondary" type="button" data-action="disconnect-device">이 기기 연결 해제</button>' : ''}
+        <p class="error-message" id="login-error" role="alert">${location.search?.includes('login=failed') ? '로그인을 완료하지 못했어요. 학교 계정과 앱 권한을 확인하고 다시 시도해 주세요.' : ''}</p></div></section>`; return;
+    }
     root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC · BETA</p><h1>오늘 해야 할 일,<br>한눈에.</h1><p class="muted">학교 로그인 없이 초대 코드로 먼저 써보세요.</p><form id="login-form"><label class="field"><span class="field-label">테스트 계정 초대 코드</span><input name="code" type="password" required minlength="16" maxlength="128" autocomplete="off" spellcheck="false" placeholder="실행 창에 표시된 코드를 입력하세요"></label><p class="error-message" id="login-error" role="alert"></p><button class="primary" type="submit">베타 시작하기 →</button></form><p class="login-note">Teams 공지는 예시 데이터입니다. 개인 할 일은 계정별로 서버에 저장됩니다. 같은 코드로 로그인하면 같은 계정이 열려요.</p></div></section>`;
   }
   function renderLoadState(error = S.loadError) {
@@ -777,6 +791,13 @@
   function classroomCoursesButton() {
     return '<button class="secondary small" data-action="classroom-courses">구클 수업 표시</button>';
   }
+  function classroomConnectionDialog(google) {
+    const explanation = google ? '수업 목록·공지·내 과제와 제출 상태를 읽어 CalendarSync에 표시해요. 동기화에 쓰는 Google 연결 정보와 최근 목록은 암호화해 저장해요.'
+      : '내 Apps Script가 수업 목록·공지·내 과제와 제출 상태를 CalendarSync로 보내요. 가져온 최근 목록은 암호화해 저장해요.';
+    const ai = google ? '<p>공지 AI 분석은 연결한 뒤 따로 켤 수 있어요.</p>' : '';
+    openDialog('Google 클래스룸을 연결할까요?', `<p>${explanation}</p>${ai}<p><a href="/privacy#classroom" target="_blank" rel="noopener noreferrer">클래스룸 개인정보 안내</a></p>`,
+      `<button class="secondary" data-action="close">취소</button><button class="primary" data-action="${google ? 'classroom-google-confirm' : 'classroom-script-confirm'}">${google ? 'Google에서 읽기 권한 확인' : 'Apps Script 연결 계속'}</button>`);
+  }
   function classroomAnalysisDialog() {
     const enabled = S.classroom?.announcement_analysis;
     if (typeof enabled !== 'boolean') return;
@@ -1156,7 +1177,9 @@
       if (action === 'classroom-course-visibility') return await changeClassroomCourse(button.dataset.courseKey);
       if (action === 'classroom-analysis') return classroomAnalysisDialog();
       if (action === 'classroom-analysis-confirm') return await changeClassroomAnalysis(button.dataset.enabled);
-      if (action === 'classroom-google-connect' && S.service?.classroom_google_enabled) {
+      if (action === 'classroom-google-connect' && S.service?.classroom_google_enabled) return classroomConnectionDialog(true);
+      if (action === 'classroom-connect' && S.service?.classroom_enabled) return classroomConnectionDialog(false);
+      if (action === 'classroom-google-confirm' && S.service?.classroom_google_enabled) {
         const epoch = authEpoch;
         button.disabled = true;
         try {
@@ -1170,15 +1193,15 @@
         } finally {button.disabled = false;}
         return;
       }
-      if (action === 'classroom-connect') {
+      if (action === 'classroom-script-confirm' && S.service?.classroom_enabled) {
         button.disabled = true;
         try {return await connectClassroom();} finally {button.disabled = false;}
       }
       if (action === 'classroom-disconnect') {
         const google = S.classroom?.method === 'google';
-        const message = google ? '가져온 Classroom 항목을 지우고 CalendarSync의 Google 읽기 권한을 해제해요.'
-          : '가져온 Classroom 항목을 지우고 Apps Script 연결 키를 폐기해요.';
-        openDialog('Classroom 연결 해제', `<p>${message}</p>`,
+        const message = google ? '가져온 목록과 Google 연결 정보를 지우고 Google에 권한 취소를 요청해요.'
+          : '가져온 목록을 지우고 Apps Script 연결 키를 폐기해요.';
+        openDialog('Classroom 연결 해제', `<p>${message}</p><p>Google 클래스룸 원본, 개인 할 일, 수업 표시 설정은 남아요.</p>`,
           `<button class="secondary" data-action="close">취소</button><button class="danger" data-action="classroom-disconnect-confirm" data-google="${google ? '1' : '0'}">연결 해제</button>`);
         return;
       }
@@ -1202,7 +1225,7 @@
       if (action === 'close') {closeDialog(); return;}
       if (action === 'profile' && profile && S.me) {S.view = 'profile'; render(); return await Promise.allSettled([loadProfileStatus(),refreshPlannerStatus()]);}
       if (action === 'profile-refresh') return await Promise.allSettled([load(),loadProfileStatus(),refreshPlannerStatus({force:true})]);
-      if (action === 'profile-logout-all') return openDialog('모든 기기에서 로그아웃할까요?', '<p>CalendarSync에 로그인한 모든 기기의 세션과 백그라운드 연동을 종료해요.</p>', '<button class="secondary" data-action="close">취소</button><button class="danger" data-action="logout-all">모든 기기에서 로그아웃</button>');
+      if (action === 'profile-logout-all') return openDialog('모든 기기에서 로그아웃할까요?', '<p>모든 기기의 Microsoft 연동과 브라우저 알림을 종료해요. 연결된 클래스룸, 개인 할 일과 표시 설정은 남아요.</p>', '<button class="secondary" data-action="close">취소</button><button class="danger" data-action="logout-all">모든 기기에서 로그아웃</button>');
       if (action === 'today' || action === 'calendar' || (action === 'assignments' && assignmentsEnabled())) {S.view = action; if (S.me) render(); return;}
       if (action === 'refresh') {if (!S.refreshing) return await load(); return;}
       if (action === 'retry-boot') return await boot();

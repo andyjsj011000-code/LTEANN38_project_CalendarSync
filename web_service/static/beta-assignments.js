@@ -18,7 +18,7 @@
     return `<div class="task-row assignment ${e.completed ? 'done' : ''}"><span class="assignment-mark" aria-label="${provider} 과제">과제</span><button class="task-main" data-detail="${esc(e.id)}" data-source="${esc(e.source)}"><span class="task-title">${esc(e.title)}</span><span class="task-meta">${esc(e.channel)} · ${provider} · ${esc(status(e))}</span></button><span class="task-time">${esc(time)}</span></div>`;
   }
   function notice(snapshot, connect) {
-    if (snapshot.state === 'permission_required') return `<div class="beta-banner" role="status"><strong>Teams 과제 연결</strong><span>처음 한 번 과제 읽기 권한을 연결해 주세요. 학교 관리자 승인이 필요하다고 나오면 관리자에게 권한 승인을 요청해 주세요.</span><a class="primary" href="${esc(connect)}">Teams 과제 연결하기</a></div>`;
+    if (snapshot.state === 'permission_required') return `<div class="beta-banner" role="status"><strong>Teams 과제 연결</strong><span>수업 이름, 과제 제목·설명·마감일, 원문 링크와 내 제출 상태를 읽어 표시해요. <a href="/privacy#teams">Teams 개인정보 안내</a></span><a class="primary" href="${esc(connect)}">Teams 과제 연결하기</a></div>`;
     if (snapshot.state === 'reauth_required') return '<div class="beta-banner" role="alert"><span>과제 연결을 다시 확인해 주세요.</span><a href="/auth/login">다시 로그인</a></div>';
     if (snapshot.state === 'unavailable') return '<div class="beta-banner" role="alert"><span>과제를 불러오지 못했어요. 빈 목록을 수집 완료로 처리하지 않았어요.</span><button class="secondary" data-action="refresh-assignments">다시 확인</button></div>';
     return '';

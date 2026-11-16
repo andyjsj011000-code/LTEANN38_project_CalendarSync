@@ -22,7 +22,7 @@ const context = {
   async fetch(url, options) {
     requests.push({url, options});
     let status = 200, data;
-    if (url === '/api/service') data = {synthetic_data_only: true, assignments_enabled: true, classroom_enabled: true, classroom_google_enabled: true, planner_enhancements: true, mode: 'test-server'};
+    if (url === '/api/service') data = {synthetic_data_only: true, assignments_enabled: true, classroom_enabled: true, classroom_google_enabled: true, planner_enhancements: true, teams_notice_processing: 'openai', mode: 'test-server'};
     else if (url === '/api/me') {status = signedIn ? 200 : 401; data = signedIn ? {id: 'user', name: '테스터', email: 'student@school.example', csrf_token: 'test-csrf'} : {detail: 'not signed in'};}
     else if (url === '/auth/logout-all') {signedIn = false; status = 204;}
     else if (url === '/auth/logout') {signedIn = false; status = 204;}
@@ -51,6 +51,10 @@ const click = data => listeners.click({target: {closest() {return {dataset: data
   for (let i = 0; i < 4; i++) await tick();
   assert.match(elements.app.innerHTML, /href="\/auth\/login"/);
   assert.doesNotMatch(elements.app.innerHTML, /name="code"/);
+  const beforeLogin = elements.app.innerHTML.split('href="/auth/login?background=1"')[0];
+  assert.match(beforeLogin, /Teams.*OpenAI/);
+  assert.match(beforeLogin, /학교 이메일.*Google.*읽기 권한/);
+  assert.match(beforeLogin, /href="\/privacy"/);
   signedIn = true;
   vm.runInContext(source('beta.js'), context);
   for (let i = 0; i < 5; i++) await tick();
@@ -70,6 +74,18 @@ const click = data => listeners.click({target: {closest() {return {dataset: data
   assert.match(elements.app.innerHTML, /Teams 과제 읽기[\s\S]*?승인 필요/);
   assert.match(elements.app.innerHTML, /Google 클래스룸 읽기[\s\S]*?연결됨/);
   assert.match(elements.app.innerHTML, /브라우저 알림[\s\S]*?꺼짐/);
+  const permissionRows = [...elements.app.innerHTML.matchAll(/data-profile-section="[\w-]+"[\s\S]+?<\/details>/g)];
+  assert.equal(permissionRows.length, 6);
+  for (const [row] of permissionRows) {
+    assert.match(row, /사용하는 데이터/);
+    assert.match(row, /끄거나 해제하면/);
+  }
+  assert.match(elements.app.innerHTML, /href="\/privacy#connections"/);
+  await click({action: 'classroom-google-connect'});
+  assert.match(elements.modal.innerHTML, /수업 목록·공지·내 과제/);
+  assert.match(elements.modal.innerHTML, /Google에서 읽기 권한 확인/);
+  assert.ok(!requests.some(request => request.url === '/api/classroom/google/connect'));
+  await click({action: 'close'});
   assert.ok(requests.some(request => request.url === '/api/push'));
   listeners.change({target: {name: 'profile-theme', value: 'dark', dataset: {}}});
   assert.equal(context.document.documentElement.dataset.theme, 'dark');

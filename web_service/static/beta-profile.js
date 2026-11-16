@@ -69,12 +69,12 @@
       : push.registered && browserPermission === 'granted' ? on : push.registered ? status('브라우저 권한 확인', 'attention') : off;
     const connectClassroom = button(service.classroom_google_enabled ? 'classroom-google-connect' : 'classroom-connect', classroom?.reauth ? '다시 연결' : '클래스룸 연결');
 
-    function row(id, iconName, name, description, current, detail, action = '') {
+    function row(id, iconName, name, description, current, dataUsed, after, action = '') {
       const collection = id === 'teams' && teamsIngestion;
       const subtitle = collection ? `<span class="profile-copy">수집 상태 · <span id="profile-teams-ingestion" role="status">${esc(collection)}</span></span>` : `<span class="profile-copy">${description}</span>`;
       return `<details class="profile-permission" data-profile-section="${id}"${openRows.has(id) ? ' open' : ''}>
         <summary id="profile-summary-${id}"><span class="profile-icon">${icon(iconName)}</span><span><strong>${name}</strong>${subtitle}</span><span class="profile-status ${current.tone}">${collection ? '읽기 권한 · ' : ''}${current.label}</span><span class="profile-chevron">${icon('chevron')}</span></summary>
-        <div class="profile-detail"><p>${detail}</p>${action ? `<div class="profile-actions">${action}</div>` : ''}</div>
+        <div class="profile-detail"><dl class="profile-data"><dt>사용하는 데이터</dt><dd>${dataUsed}</dd><dt>끄거나 해제하면</dt><dd>${after}</dd></dl>${action ? `<div class="profile-actions">${action}</div>` : ''}</div>
       </details>`;
     }
 
@@ -83,20 +83,33 @@
       <div class="profile-grid"><div class="profile-stack">
         <section class="card profile-card" aria-labelledby="profile-account-title">
           <h2 id="profile-account-title">내 계정</h2><div class="profile-person"><span class="profile-avatar" aria-hidden="true">${esc(Array.from(account.name || '나')[0])}</span><div><strong>${esc(account.name)}</strong><p class="profile-copy">${esc(account.email || '학교 Microsoft 계정')}</p></div></div>
-          ${link('https://myaccount.microsoft.com/', 'Microsoft 계정 관리', true)}<p class="profile-copy">학교 계정 비밀번호는 Microsoft에서 변경해요.</p>
+          ${link('https://myaccount.microsoft.com/', 'Microsoft 계정 관리', true)}<p class="profile-copy">학교 계정 이름·이메일·식별자를 사용해요. 비밀번호는 Microsoft에서 변경해요.</p>
         </section>
         <section class="card profile-card" aria-labelledby="profile-theme-title">
           <h2 id="profile-theme-title">화면 테마</h2><fieldset class="profile-theme" aria-labelledby="profile-theme-title">${themeOptions.map(([value, symbol, label]) => `<label>${icon(symbol)}<input name="profile-theme" type="radio" value="${value}"${theme() === value ? ' checked' : ''}><span>${label}</span></label>`).join('')}</fieldset>
         </section>
-        <section class="card profile-card profile-signout">${button('profile-logout-all','모든 기기에서 로그아웃')}<a href="/privacy">개인정보 안내</a></section>
+        <section class="card profile-card profile-signout">${button('profile-logout-all','모든 기기에서 로그아웃')}<p class="profile-copy">로그아웃 후에도 개인 할 일, 설정, 연결된 클래스룸은 남아요.</p></section>
       </div>
-      <section class="card profile-permissions" aria-labelledby="profile-connection-title"><h2 id="profile-connection-title">연결 및 권한</h2>
-        ${row('teams','messages','Teams 공지 읽기','볼 수 있는 채널의 공지와 일정',teams,'학교 Teams에서 접근 권한이 있는 채널 공지를 읽어 일정으로 표시해요.',teams === retry ? link('/auth/login','Microsoft로 다시 로그인') : microsoftApps)}
-        ${row('assignments','list','Teams 과제 읽기','내 과제, 마감일, 제출 상태',assignment,'과제 읽기는 Microsoft에서 승인해요. Microsoft에서 앱 권한을 철회하면 다른 Teams 기능에도 영향을 줄 수 있어요.',assignment === approval || assignment === retry ? reconnectAssignments : assignment === enabled ? microsoftApps : '')}
-        ${row('classroom','book','Google 클래스룸 읽기','수업, 공지, 내 과제와 마감일',classroomStatus,'연결을 해제하면 클래스룸 항목 가져오기를 중단하고 가져온 데이터를 지워요.',service.classroom_enabled && classroom && !classroomError ? (classroom.connected && !classroom.reauth ? button('classroom-disconnect','연결 해제') : connectClassroom) : '')}
-        ${row('analysis','sparkles','클래스룸 공지 AI 분석','공지 본문에서 일정 추출',analysis,'켜면 클래스룸 공지 본문과 작성일을 OpenAI에 보내 일정을 추출해요.',typeof classroom?.announcement_analysis === 'boolean' ? button('classroom-analysis',classroom.announcement_analysis ? 'AI 분석 끄기' : '동의 설정') : '')}
-        ${row('device','laptop','이 기기 연동 유지','화면을 닫은 뒤에도 학교 일정 갱신',deviceEnabled === true ? on : deviceEnabled === false ? off : pending,'이 기기에서 로그아웃하면 CalendarSync의 기기 연동도 종료돼요.',deviceEnabled === true ? button('logout','이 기기에서 로그아웃') : deviceEnabled === false ? link('/auth/login?background=1','연동 유지로 다시 로그인') : '')}
-        ${row('push','bell','브라우저 알림','이 브라우저에서 일정 알림 받기',pushStatus,'브라우저 알림 허용과 이 기기의 CalendarSync 구독 상태를 함께 확인해요.',push?.configured && state.hasPreferences ? button('notifications','알림 설정') : '')}
+      <section class="card profile-permissions" aria-labelledby="profile-connection-title">
+        <div class="profile-permissions-head"><h2 id="profile-connection-title">연결 및 권한</h2>${link('/privacy#connections','개인정보 상세 안내')}</div>
+        ${row('teams','messages','Teams 공지 읽기','볼 수 있는 채널의 공지와 일정',teams,
+          service.teams_notice_processing === 'openai' ? '읽을 수 있는 채널의 공지와 답글을 확인해요. 일정 추출에 필요한 본문과 지원되는 이미지는 OpenAI로 보낼 수 있어요.' : 'Teams 채널 접근 권한과 해당 채널의 공지에서 추출한 일정을 사용해요.',
+          '읽기 권한을 잃으면 해당 채널에서 새로 가져오거나 일정을 표시할 수 없어요. Teams 원본, 서비스에 저장된 수집 결과와 내 개인 수정은 남을 수 있어요.', teams === retry ? link('/auth/login','Microsoft로 다시 로그인') : microsoftApps)}
+        ${row('assignments','list','Teams 과제 읽기','내 과제, 마감일, 제출 상태',assignment,
+          '수업 이름, 과제 제목·설명·마감일, 원문 링크와 내 제출 상태를 읽어요.',
+          '권한이 해제되면 과제 조회와 표시가 중단돼요. Teams 원본과 서버에 저장된 최근 과제 목록은 남을 수 있어요. Microsoft에서 앱 권한을 철회하면 공지 읽기에도 영향을 줄 수 있어요.', assignment === approval || assignment === retry ? reconnectAssignments : assignment === enabled ? microsoftApps : '')}
+        ${row('classroom','book','Google 클래스룸 읽기','수업, 공지, 내 과제와 마감일',classroomStatus,
+          '참여 중인 수업 이름, 최근 공지와 과제, 기한, 원문 링크와 내 제출 상태를 읽어요.',
+          '가져온 목록과 연결 정보를 지워요. Google 직접 연결은 Google에 권한 취소도 요청해요. Google 원본, 수업 표시 설정과 개인 할 일은 남아요.', service.classroom_enabled && classroom && !classroomError ? (classroom.connected && !classroom.reauth ? button('classroom-disconnect','연결 해제') : connectClassroom) : '')}
+        ${row('analysis','sparkles','클래스룸 공지 AI 분석','공지 본문에서 일정 추출',analysis,
+          '별도로 켜면 최근 공지 본문과 작성일을 OpenAI API로 보내 일정과 요약을 만들어요. 제출 상태와 성적은 전송 대상에서 제외해요.',
+          '새 전송을 중단하고 CalendarSync에 저장한 추출 결과를 지워요. 클래스룸 연결과 가져온 원본 목록은 남아요.', typeof classroom?.announcement_analysis === 'boolean' ? button('classroom-analysis',classroom.announcement_analysis ? 'AI 분석 끄기' : '동의 설정') : '')}
+        ${row('device','laptop','이 기기 연동 유지','화면을 닫은 뒤에도 학교 일정 갱신',deviceEnabled === true ? on : deviceEnabled === false ? off : pending,
+          '암호화한 Microsoft 연결 정보를 사용해 화면을 닫은 뒤에도 최대 30일 동안 공지를 갱신해요.',
+          '로그아웃하면 이 기기의 Microsoft 연결 정보와 알림 등록이 폐기돼요. 연결된 클래스룸, 개인 할 일과 설정은 남아요.', deviceEnabled === true ? button('logout','이 기기에서 로그아웃') : deviceEnabled === false ? link('/auth/login?background=1','연동 유지로 다시 로그인') : '')}
+        ${row('push','bell','브라우저 알림','이 브라우저에서 일정 알림 받기',pushStatus,
+          '이 기기의 알림 수신 주소와 암호화 키를 사용해 일반적인 일정 확인 안내를 보내요.',
+          'CalendarSync에서 기기 알림을 끄면 이 기기의 서버 알림 등록이 삭제돼요. 일정과 할 일은 남고, 브라우저의 사이트 권한은 브라우저 설정에서 따로 바꿀 수 있어요.', push?.configured && state.hasPreferences ? button('notifications','알림 설정') : '')}
       </section></div></div>`;
   }
 

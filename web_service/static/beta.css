@@ -81,8 +81,7 @@ input, select, textarea { color: var(--ink); }
 .profile-theme input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; }
 .profile-signout { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 .profile-signout button { color: light-dark(#a4313c,#ffc2c6); }
-.profile-signout a { color: var(--muted); font-size: 12px; }
-.profile-permissions > h2 { padding: 16px; }
+.profile-permissions-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 14px; padding: 16px; }
 .profile-permission { border-top: 1px solid var(--line); }
 .profile-permission summary { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto 16px; column-gap: 9px; align-items: center; padding: 11px 15px; min-height: 62px; list-style: none; cursor: pointer; }
 .profile-permission summary::-webkit-details-marker { display: none; }
@@ -95,7 +94,18 @@ input, select, textarea { color: var(--ink); }
 .profile-status.on { color: light-dark(#19684f,#99e0c3); background: light-dark(#e6f5ed,#203e35); }
 .profile-status.attention { color: light-dark(#824412,#ffd1a3); background: light-dark(#fff3e5,#473324); }
 .profile-detail { padding: 0 16px 13px 54px; font-size: 13px; color: var(--muted); }
+.profile-data { margin: 0; line-height: 1.55; }
+.profile-data dt { color: var(--ink); font-weight: 650; }
+.profile-data dd { margin: 0 0 8px; }
 .profile-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.privacy-summary { margin-block: 14px; }
+.privacy-summary h2 { font-size: 14px; margin: 0; color: var(--ink); }
+.privacy-summary p { margin-block: 7px; line-height: 1.5; }
+.privacy-page { max-width: 730px; }
+.privacy-page nav { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-block: 16px; }
+.privacy-page section { padding: 18px; margin-block: 16px; }
+.privacy-page h2 { margin: 0 0 12px; }
+.privacy-page p { line-height: 1.65; }
 
 @media (max-width: 740px) {
   .profile-grid { grid-template-columns: minmax(0, 1fr); }
