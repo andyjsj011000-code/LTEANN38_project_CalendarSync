@@ -35,6 +35,7 @@ _CLASSROOM = "https://classroom.googleapis.com/v1/"
 _INTERVAL = 900
 _CLAIM_SECONDS = 120
 _STATE = re.compile(r"[A-Za-z0-9_-]{43}")
+_FLOW_ID_PREFIX = "oauth:"
 _SUBMISSION_STATES = {
     "NEW": "working",
     "CREATED": "working",
@@ -303,6 +304,8 @@ class GoogleClassroom:
         self.backend = "sqlite" if hasattr(db, "path") else "postgres"
         self.client_factory = lambda: httpx.Client(timeout=8, follow_redirects=False)
         self.redirect_uri = settings.origin + _CALLBACK
+        prefix = "__Host-" if settings.secure_cookies else ""
+        self.flow_cookie = prefix + "calendarsync_classroom_flow"
         with db.connect() as connection:
             connection.execute(
                 "SELECT user_id,connection_id,state,credential_blob,captured_at,"
@@ -314,24 +317,59 @@ class GoogleClassroom:
             result = query(connection, self.backend, sql, values)
             return result.fetchall() if result.description else result.rowcount
 
-    def begin(self, session):
+    def continue_sign_in(self, session, email):
+        if not session or not (flow := self.begin(session, first_offer=True, login_hint=email)):
+            return None
+        raw, url = flow
+        response = RedirectResponse(url, status_code=303)
+        self.set_flow_cookie(response, raw)
+        return response
+
+    def set_flow_cookie(self, response, raw):
+        response.set_cookie(
+            self.flow_cookie,
+            raw,
+            max_age=600,
+            secure=self.settings.secure_cookies,
+            httponly=True,
+            samesite="lax",
+        )
+
+    def begin(self, session, *, first_offer=False, login_hint=""):
         state = secrets.token_urlsafe(32)
+        connection_id = _FLOW_ID_PREFIX + state
         verifier = secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
         user = session["user_id"]
+        if first_offer:
+            eligibility = (
+                "AND NOT EXISTS (SELECT 1 FROM web_classroom_connections WHERE user_id=web_users.id)"
+            )
+            # Pending flows created by older versions have an unprefixed connection ID.
+            reconnectable = (
+                "web_classroom_google.state='pending' "
+                f"AND substr(web_classroom_google.connection_id,1,{len(_FLOW_ID_PREFIX)}) "
+                f"<> '{_FLOW_ID_PREFIX}'"
+            )
+        else:
+            eligibility = ""
+            reconnectable = "web_classroom_google.state IN ('pending', 'reauth')"
         if not self._execute(
-            """INSERT INTO web_classroom_google(user_id,connection_id,state,next_sync_at)
+            f"""INSERT INTO web_classroom_google(user_id,connection_id,state,next_sync_at)
             SELECT id,%s,'pending',0 FROM web_users WHERE id=%s AND active=1
-            ON CONFLICT(user_id) DO UPDATE SET connection_id=excluded.connection_id
-            WHERE web_classroom_google.state IN ('pending', 'reauth')""",
-            state,
+            {eligibility} ON CONFLICT(user_id) DO UPDATE SET connection_id=excluded.connection_id
+            WHERE {reconnectable}""",
+            connection_id,
             user,
         ):
+            if first_offer:
+                return None
             raise HTTPException(409, "Google Classroom is already connected")
         raw = self.db.store_flow(
             {
                 "kind": "classroom-google",
                 "state": state,
+                "connection_id": connection_id,
                 "verifier": verifier,
                 "user": user,
                 "session": session["csrf_token"],
@@ -347,12 +385,13 @@ class GoogleClassroom:
                 "code_challenge": challenge.decode().rstrip("="),
                 "code_challenge_method": "S256",
                 "access_type": "offline",
-                "prompt": "consent select_account",
+                "prompt": "consent" if first_offer else "consent select_account",
+                **({"login_hint": login_hint} if login_hint else {}),
             }
         )
         return raw, url
 
-    def finish(self, session, raw, state, code):
+    def finish(self, session, raw, state, code, *, declined=False):
         flow = self.db.consume_flow(raw)
         if (
             flow.get("kind") != "classroom-google"
@@ -360,16 +399,20 @@ class GoogleClassroom:
             or not secrets.compare_digest(flow["state"], state)
             or flow["user"] != session["user_id"]
             or flow["session"] != session["csrf_token"]
-            or not 0 < len(code) <= 2048
         ):
             raise ValueError("Invalid Classroom authorization response")
         user = session["user_id"]
+        connection_id = flow.get("connection_id", state)
         if not self._execute(
             "SELECT 1 FROM web_classroom_google WHERE user_id=%s AND connection_id=%s AND state IN ('pending', 'reauth')",
             user,
-            state,
+            connection_id,
         ):
             raise ValueError("Stale Classroom authorization response")
+        if declined and not code:
+            return None
+        if declined or not 0 < len(code) <= 2048:
+            raise ValueError("Invalid Classroom authorization response")
         with self.client_factory() as client:
             payload = self._token(
                 client,
@@ -389,7 +432,7 @@ class GoogleClassroom:
             AND state IN ('pending', 'reauth') AND user_id IN (SELECT id FROM web_users WHERE active=1)""",
             self.db.seal({"refresh_token": refresh}),
             user,
-            state,
+            connection_id,
         ):
             raise ValueError("Classroom authorization was superseded")
         return payload["access_token"]
@@ -559,10 +602,22 @@ class GoogleClassroom:
             self.sync(user)
 
     def disconnect(self, user):
-        rows = self._execute(
-            "DELETE FROM web_classroom_google WHERE user_id=%s RETURNING credential_blob",
-            user,
-        )
+        with self.db.connect() as connection:
+            rows = query(
+                connection,
+                self.backend,
+                "DELETE FROM web_classroom_google WHERE user_id=%s RETURNING credential_blob",
+                (user,),
+            ).fetchall()
+            if rows:
+                # Keep a credential-free marker so sign-in does not reconnect a disconnected account.
+                query(
+                    connection,
+                    self.backend,
+                    """INSERT INTO web_classroom_google(user_id,connection_id,state,next_sync_at)
+                    VALUES (%s,%s,'pending',0) ON CONFLICT(user_id) DO NOTHING""",
+                    (user, _FLOW_ID_PREFIX + secrets.token_urlsafe(32)),
+                )
         if rows and rows[0][0]:
             try:
                 refresh = self.db.unseal(rows[0][0])["refresh_token"]
@@ -576,7 +631,7 @@ class GoogleClassroom:
 
 def install_google_classroom(app, service, require):
     secure = service.settings.secure_cookies
-    cookie = ("__Host-" if secure else "") + "calendarsync_classroom_flow"
+    cookie = service.flow_cookie
 
     @app.put("/api/classroom/google/announcement-analysis")
     def announcement_analysis(
@@ -592,7 +647,7 @@ def install_google_classroom(app, service, require):
         if not service.db.allow("classroom-google:" + session["user_id"], 5):
             raise HTTPException(429, "Try again later")
         raw, url = service.begin(session)
-        response.set_cookie(cookie, raw, max_age=600, secure=secure, httponly=True, samesite="lax")
+        service.set_flow_cookie(response, raw)
         return {"authorization_url": url}
 
     @app.get(_CALLBACK)
@@ -609,9 +664,13 @@ def install_google_classroom(app, service, require):
                 request.cookies.get(cookie),
                 params.get("state", ""),
                 params.get("code", ""),
+                declined=params.get("error") == "access_denied",
             )
-            tasks.add_task(service.sync, session["user_id"], access)
-            result = "connected"
+            if access is None:
+                result = "skipped"
+            else:
+                tasks.add_task(service.sync, session["user_id"], access)
+                result = "connected"
         except (
             Missing,
             GoogleAccessExpired,

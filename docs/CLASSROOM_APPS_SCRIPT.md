@@ -7,7 +7,7 @@ CalendarSync 운영자가 Google Cloud 프로젝트에서 Classroom API를 켜�
 1. OAuth 클라이언트의 승인된 리디렉션 URI에 CalendarSync HTTPS 주소 뒤에 `/auth/classroom/google/callback`을 붙여 등록한다. 로컬 테스트에는 실제 사용하는 루프백 주소와 포트를 정확히 등록한다.
 2. 아래의 `classroom` 스키마를 적용한 뒤 같은 CLI에서 `--feature classroom-google`로 계획 해시를 확인하고 `--upgrade classroom-google --expected-sha256 <plan_sha256>`를 실행한다.
 3. 서버에 `WEB_CLASSROOM_ENABLED=1`, `WEB_GOOGLE_CLASSROOM_CLIENT_ID`, `WEB_GOOGLE_CLASSROOM_CLIENT_SECRET`을 설정한다. 클라이언트 비밀값은 서버의 비밀 환경 변수에 보관한다.
-4. 학생이 CalendarSync의 **Google Classroom 연결**을 누르고 학교 Google 계정으로 로그인해 읽기 권한을 승인한다. 첫 수집이 완료되면 공지와 과제가 표시되며 서버에서 약 15분마다 갱신한다. Google 권한이 만료되면 **Google Classroom 다시 연결**이 표시된다.
+4. 클래스룸 연결 이력이 없는 학생이 CalendarSync에 Microsoft로 로그인하면 Google 읽기 권한 승인으로 이어진다. Google에서 학교 계정의 인증이 필요한 경우 해당 화면이 먼저 표시된다. 승인을 건너뛰면 CalendarSync로 돌아가며 나중에 **Google Classroom 연결**을 눌러 연결할 수 있다. 첫 수집이 완료되면 공지와 과제가 표시되며 서버에서 약 15분마다 갱신한다. Google 권한이 만료되면 **Google Classroom 다시 연결**이 표시된다.
 
 Google의 External Testing 상태에서는 Classroom 권한의 갱신 토큰이 일반적으로 7일 후 만료된다. 학교에서 계속 사용할 수 있게 공개하기 전에는 [Google의 OAuth 앱 검증 요건](https://developers.google.com/identity/protocols/oauth2/web-server#appverification)을 확인한다. 기존 Apps Script 연결이 있는 계정에서 Google 연결이 활성화되면 Google 데이터를 먼저 보여준다. Google 연결을 끊으면 기존 Apps Script 데이터로 돌아간다.
 
