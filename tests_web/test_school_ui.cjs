@@ -12,6 +12,7 @@ elements.modal.close = function () {this.open = false;};
 elements.modal.showModal = function () {this.open = true;};
 const requests = [];
 let signedIn = false;
+let ingestion = {state: 'partial', counts: {channels_checked: 15, channels_total: 62, messages_failed: 2}};
 const storage = new Map();
 const item = {id: 'sample', source: 'teams', title: '<img src=x onerror=alert(1)>', notes: '<script>bad()</script>', channel: '예시 공지', start_date: '2026-10-20', end_date: '2026-10-25', time: null, kind: 'assignment', completed: false, cancelled: false};
 const context = {
@@ -21,7 +22,7 @@ const context = {
   async fetch(url, options) {
     requests.push({url, options});
     let status = 200, data;
-    if (url === '/api/service') data = {synthetic_data_only: true, assignments_enabled: true, classroom_enabled: true, classroom_google_enabled: true, mode: 'test-server'};
+    if (url === '/api/service') data = {synthetic_data_only: true, assignments_enabled: true, classroom_enabled: true, classroom_google_enabled: true, planner_enhancements: true, mode: 'test-server'};
     else if (url === '/api/me') {status = signedIn ? 200 : 401; data = signedIn ? {id: 'user', name: '테스터', email: 'student@school.example', csrf_token: 'test-csrf'} : {detail: 'not signed in'};}
     else if (url === '/auth/logout-all') {signedIn = false; status = 204;}
     else if (url === '/auth/logout') {signedIn = false; status = 204;}
@@ -29,6 +30,7 @@ const context = {
     else if (url.startsWith('/api/calendar')) data = {items: [item]};
     else if (url === '/api/channels') data = [{id: 'class', name: '예시', enabled: true}];
     else if (url === '/api/settings') data = {preferences: {disabled_kinds: []}, connection: {state:'connected', background_enabled: true}};
+    else if (url === '/api/teams/ingestion-status') data = ingestion;
     else if (url === '/api/assignments') data = {items: [], state: 'permission_required'};
     else if (url === '/api/classroom') data = {connected: true, method: 'google', snapshot: null, announcement_analysis: false};
     else if (url === '/api/push') data = {configured: true, registered: false, background_enabled: true};
@@ -58,6 +60,13 @@ const click = data => listeners.click({target: {closest() {return {dataset: data
   await click({action: 'profile'});
   assert.match(elements.app.innerHTML, /마이페이지/);
   assert.match(elements.app.innerHTML, /student@school\.example/);
+  const teamsNotice = /data-profile-section="teams"[\s\S]+?<\/summary>/.exec(elements.app.innerHTML)[0];
+  assert.match(teamsNotice, /읽기 권한 · 연결됨/);
+  assert.match(teamsNotice, /일부 공지 확인.*15\/62개 채널 확인.*공지 2개 처리 재시도 필요/);
+  ingestion = {state: 'completed', counts: {channels_checked: 62, channels_total: 62, messages_failed: 0}};
+  elements['profile-teams-ingestion'] = {textContent: ''};
+  await click({action: 'profile-refresh'});
+  assert.match(elements['profile-teams-ingestion'].textContent, /최근 수집 완료.*62\/62개 채널 확인/);
   assert.match(elements.app.innerHTML, /Teams 과제 읽기[\s\S]*?승인 필요/);
   assert.match(elements.app.innerHTML, /Google 클래스룸 읽기[\s\S]*?연결됨/);
   assert.match(elements.app.innerHTML, /브라우저 알림[\s\S]*?꺼짐/);

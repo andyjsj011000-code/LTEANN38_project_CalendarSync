@@ -494,7 +494,7 @@
   }
   function ingestionText() {
     if (!plannerStatus) return 'Teams 수집 상태를 확인하고 있어요.';
-    if (plannerStatus.unavailable) return 'Teams 수집 상태를 확인하지 못했어요. 상태 확인을 눌러 다시 확인해 주세요.';
+    if (plannerStatus.unavailable) return '확인할 수 없어요. 새로고침으로 다시 확인해 주세요.';
     const labels = {idle:'수집 기록 없음',queued:'수집 대기 중',running:'공지 확인 중',completed:'최근 수집 완료',partial:'일부 공지 확인 · 남은 항목은 재확인 필요',error:'수집 중단 · 재확인 필요'};
     const counts = plannerStatus.counts;
     const progress = counts && Number.isInteger(counts.channels_checked) && Number.isInteger(counts.channels_total) ? ` · ${counts.channels_checked}/${counts.channels_total}개 채널 확인` : '';
@@ -514,7 +514,13 @@
     const current = () => activeView(epoch) && revision === statusRevision && !document.hidden && !autoReadsPaused && !resumeCheck;
     try {const result = await api('/api/teams/ingestion-status',{signal:controller.signal,timeout:15000}); if (current()) plannerStatus = result;}
     catch (error) {if (activeView(epoch) && [401,403].includes(error.status)) failure(error); else if (current() && error.name !== 'AbortError') plannerStatus = {unavailable:true};}
-    finally {if (statusRequest === controller) statusRequest = null; if (current()) {const el = $('#planner-sync-status'); if (el) el.textContent = ingestionText();}}
+    finally {
+      if (statusRequest === controller) statusRequest = null;
+      if (current()) {
+        const el = S.view === 'profile' ? $('#profile-teams-ingestion') : $('#planner-sync-status');
+        if (el) el.textContent = ingestionText();
+      }
+    }
   }
   function personalForm() {return modal.open && !!$('#task-form') && detailItem?.source !== 'teams';}
   function readCurrentDraft() {
@@ -638,6 +644,7 @@
   function profileState() {
     return {account:{name:S.me.name,email:S.me.email}, service:S.service || {},
       connection:S.profileConnection ?? S.connection, teamsUnverified:S.teamsUnverified,
+      teamsIngestion:plannerEnabled() ? ingestionText() : null,
       assignments:{state:S.assignments.loading ? 'idle' : S.assignments.state},
       classroom:S.classroom && {connected:S.classroom.connected,reauth:S.classroom.reauth,announcement_analysis:S.classroom.announcement_analysis},
       classroomError:!!S.partErrors.classroom, push:S.profilePush,
@@ -1193,8 +1200,8 @@
       if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); draftInputChanged(); return;}
       if (button.dataset.restore !== undefined) {const e = hiddenItems[Number(button.dataset.restore)]; return mutateState(e, {hidden: false}, '일정을 복원했어요.');}
       if (action === 'close') {closeDialog(); return;}
-      if (action === 'profile' && profile && S.me) {S.view = 'profile'; render(); return await loadProfileStatus();}
-      if (action === 'profile-refresh') return await Promise.allSettled([load(),loadProfileStatus()]);
+      if (action === 'profile' && profile && S.me) {S.view = 'profile'; render(); return await Promise.allSettled([loadProfileStatus(),refreshPlannerStatus()]);}
+      if (action === 'profile-refresh') return await Promise.allSettled([load(),loadProfileStatus(),refreshPlannerStatus({force:true})]);
       if (action === 'profile-logout-all') return openDialog('모든 기기에서 로그아웃할까요?', '<p>CalendarSync에 로그인한 모든 기기의 세션과 백그라운드 연동을 종료해요.</p>', '<button class="secondary" data-action="close">취소</button><button class="danger" data-action="logout-all">모든 기기에서 로그아웃</button>');
       if (action === 'today' || action === 'calendar' || (action === 'assignments' && assignmentsEnabled())) {S.view = action; if (S.me) render(); return;}
       if (action === 'refresh') {if (!S.refreshing) return await load(); return;}

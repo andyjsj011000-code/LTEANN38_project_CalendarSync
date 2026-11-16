@@ -42,7 +42,7 @@
   const off = status('꺼짐');
 
   function render(state, openRows) {
-    const {account, service, connection, teamsUnverified, assignments, classroom, classroomError, push, browserPermission} = state;
+    const {account, service, connection, teamsUnverified, teamsIngestion, assignments, classroom, classroomError, push, browserPermission} = state;
     const microsoftApps = link('https://myapplications.microsoft.com/', 'Microsoft 앱 권한 관리', true);
     const deviceEnabled = connection?.background_enabled ?? push?.background_enabled;
     const background = deviceEnabled === true ? '&background=1' : '';
@@ -70,8 +70,10 @@
     const connectClassroom = button(service.classroom_google_enabled ? 'classroom-google-connect' : 'classroom-connect', classroom?.reauth ? '다시 연결' : '클래스룸 연결');
 
     function row(id, iconName, name, description, current, detail, action = '') {
+      const collection = id === 'teams' && teamsIngestion;
+      const subtitle = collection ? `<span class="profile-copy">수집 상태 · <span id="profile-teams-ingestion" role="status">${esc(collection)}</span></span>` : `<span class="profile-copy">${description}</span>`;
       return `<details class="profile-permission" data-profile-section="${id}"${openRows.has(id) ? ' open' : ''}>
-        <summary id="profile-summary-${id}"><span class="profile-icon">${icon(iconName)}</span><span><strong>${name}</strong><span class="profile-copy">${description}</span></span><span class="profile-status ${current.tone}">${current.label}</span><span class="profile-chevron">${icon('chevron')}</span></summary>
+        <summary id="profile-summary-${id}"><span class="profile-icon">${icon(iconName)}</span><span><strong>${name}</strong>${subtitle}</span><span class="profile-status ${current.tone}">${collection ? '읽기 권한 · ' : ''}${current.label}</span><span class="profile-chevron">${icon('chevron')}</span></summary>
         <div class="profile-detail"><p>${detail}</p>${action ? `<div class="profile-actions">${action}</div>` : ''}</div>
       </details>`;
     }
