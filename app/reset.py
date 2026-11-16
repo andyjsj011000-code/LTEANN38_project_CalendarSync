@@ -1,5 +1,6 @@
-#reset.py
+# reset.py
 from app.core.database import Base, engine
+
 
 def resetdb():
     # 모든 테이블 삭제 후 다시 생성

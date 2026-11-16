@@ -1,11 +1,13 @@
 # app/services/bot_service.py
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
-from datetime import datetime, timezone, timedelta
+
 import httpx
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 
 class BotService:
     def __init__(
@@ -51,18 +53,16 @@ class BotService:
         self._access_token = data["access_token"]
         expires_in = data.get("expires_in", 3600)
         self._token_expires_at = now + timedelta(seconds=expires_in)
-        '''
+        """
         logger.info("[BotService] Bot Framework 액세스 토큰 발급완료")
-        '''
+        """
         return self._access_token
 
-    async def send_teams_reply(
-        self, service_url: str, conversation_id: str, message: str
-    ):
+    async def send_teams_reply(self, service_url: str, conversation_id: str, message: str) -> bool:
         """[POST] 기존 봇 대화창(conversation_id)으로 메시지 발송"""
         if not service_url or not conversation_id:
             logger.warning("[BotService] service_url 또는 conversation_id가 누락되었습니다.")
-            return
+            return False
 
         token = await self._get_access_token()
         base_url = service_url.rstrip("/")
@@ -89,15 +89,10 @@ class BotService:
             res = await self._client.post(endpoint, headers=headers, json=payload)
 
         if res.status_code not in (200, 201, 202):
-            logger.error(
-                f"[BotService] 메시지 발송 실패 ({res.status_code}): {res.text}"
-            )
-        else:
-            '''
-            logger.info(
-                f"[BotService] 메시지 발송 성공 (Conversation: {conversation_id})"
-            )
-            '''
+            logger.error(f"[BotService] 메시지 발송 실패 ({res.status_code}): {res.text}")
+            return False
+        return True
+
     async def create_or_get_conversation(
         self, service_url: str, user_id: str, tenant_id: str
     ) -> Optional[str]:

@@ -62,8 +62,8 @@ python -m pytest
 Ruff 버전은 개발 의존성과 설정에서 `0.17.4`로 고정했습니다.
 버전을 올릴 때는 두 설정을 함께 변경하고 검사 결과를 확인합니다.
 
-현재 Ruff 검사 범위는 `web_service`, `tests_web`, `tools`, `beta`와 루트 Python 스크립트입니다.
-별도 운영 중인 Oracle 봇 `app/`은 제외하며, 해당 코드의 검증·정리는 별도로 진행합니다.
+Ruff는 기존 Oracle 봇 `app/`과 `web_service`, `tests_web`, `tools`, `beta`, 루트 Python
+스크립트의 린팅과 포맷을 검사합니다.
 pytest fixture를 다른 테스트 모듈에서 가져올 때는 `from module import fixture as fixture`처럼
 명시적으로 다시 내보내 자동 정리로 삭제되지 않도록 합니다.
 

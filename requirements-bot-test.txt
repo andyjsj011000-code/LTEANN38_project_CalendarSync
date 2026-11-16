@@ -1,0 +1,4 @@
+# Exercise the bot router with SQLite and a local Teams transport.
+-r requirements-web.txt
+SQLAlchemy==2.0.36
+cachetools==5.5.0

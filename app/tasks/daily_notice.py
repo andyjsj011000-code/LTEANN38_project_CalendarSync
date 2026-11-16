@@ -1,11 +1,11 @@
-#app/tasks/daily_notice.py
-import logging
+# app/tasks/daily_notice.py
 import asyncio
-from typing import List, Dict, Any, Tuple
-from collections import defaultdict
+import logging
 from datetime import datetime
-from sqlalchemy.orm import Session
+from typing import Any, Dict, List, Tuple
+
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.core.dependencies import bot_service
@@ -14,10 +14,12 @@ from app.models.domain import User
 from app.models.master_calendar import MasterCalendar, UserSyncLog
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-async def _send_notice_to_single_user(db: Session, user_id: str, schedule_items_info: List[Dict[str, Any]]):
+async def _send_notice_to_single_user(
+    db: Session, user_id: str, schedule_items_info: List[Dict[str, Any]]
+):
     """
     개별 유저 대상 알림 메시지 포맷팅 및 발송 (Primitive Data만 전달받아 실행)
     """
@@ -41,22 +43,26 @@ async def _send_notice_to_single_user(db: Session, user_id: str, schedule_items_
         )
     else:
         notice_message = (
-            f"**[오늘의 일정 알림]**\n\n"
-            f"안녕하세요! 오늘 예정된 공지 일정이 없습니다. 좋은 하루 보내세요!"
+            "**[오늘의 일정 알림]**\n\n"
+            "안녕하세요! 오늘 예정된 공지 일정이 없습니다. 좋은 하루 보내세요!"
         )
 
     try:
-        await bot_service.send_teams_reply(service_url=user.service_url,conversation_id=user.conversation_id,message=notice_message)
+        await bot_service.send_teams_reply(
+            service_url=user.service_url,
+            conversation_id=user.conversation_id,
+            message=notice_message,
+        )
     except Exception as e:
-        '''
+        """
         logger.error(f"User {user_id} 알림 발송 실패: {e}")
-        '''
+        """
         logger.error(f"User 알림 발송 실패: {e}")
 
 
 async def send_daily_notice_task():
     """[매일 1회] 단일 쿼리로 당일 일정 일괄 조회 후 asyncio.gather 병렬 알림 발송"""
-    
+
     with SessionLocal() as db:
         try:
             # 1. KST 기준 오늘 00:00:00 ~ 23:59:59 범위 설정
@@ -65,11 +71,10 @@ async def send_daily_notice_task():
             end_of_day = today_kst.replace(hour=23, minute=59, second=59, microsecond=999999)
 
             all_users_stmt = select(User.id).where(
-                User.conversation_id.isnot(None),
-                User.service_url.isnot(None)
+                User.conversation_id.isnot(None), User.service_url.isnot(None)
             )
             all_user_ids = db.execute(all_users_stmt).scalars().all()
-            
+
             # 2. N+1 쿼리 방지: 단 1회의 JOIN 쿼리로 오늘 일정이 있는 유저들의 스칼라 데이터만 일괄 조회
             #    (EncryptedString 타입인 title, location은 TypeDecorator에 의해 자동 복호화 처리됨)
             stmt = (
@@ -77,18 +82,18 @@ async def send_daily_notice_task():
                     UserSyncLog.user_id,
                     MasterCalendar.title,
                     MasterCalendar.start_datetime,
-                    MasterCalendar.location
+                    MasterCalendar.location,
                 )
                 .select_from(UserSyncLog)
                 .join(MasterCalendar, UserSyncLog.master_schedule_id == MasterCalendar.id)
                 .join(User, UserSyncLog.user_id == User.id)
                 .where(
                     MasterCalendar.start_datetime >= start_of_day,
-                    MasterCalendar.start_datetime <= end_of_day
+                    MasterCalendar.start_datetime <= end_of_day,
                 )
                 .order_by(MasterCalendar.start_datetime.asc())
             )
-            
+
             results: List[Tuple[str, str, datetime, str]] = db.execute(stmt).all()
 
             if not results:
@@ -96,13 +101,13 @@ async def send_daily_notice_task():
                 return
 
             # 3. 조회 결과를 유저 ID별로 Grouping (메모리 내 딕셔너리 정렬)
-            user_schedules_map: Dict[str, List[Dict[str, Any]]] = {u_id: [] for u_id in all_user_ids}
+            user_schedules_map: Dict[str, List[Dict[str, Any]]] = {
+                u_id: [] for u_id in all_user_ids
+            }
             for user_id, title, start_dt, location in results:
-                user_schedules_map[user_id].append({
-                    "title": title,
-                    "start_dt": start_dt,
-                    "location": location
-                })
+                user_schedules_map[user_id].append(
+                    {"title": title, "start_dt": start_dt, "location": location}
+                )
 
             # 4. ORM 객체 생략 및 Primitive 데이터만 태스크로 전달
             tasks = [

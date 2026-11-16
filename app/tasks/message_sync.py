@@ -1,20 +1,20 @@
-#app/tasks/message_sync.py
-import logging
+# app/tasks/message_sync.py
 import asyncio
-from typing import List, Tuple, Dict, Any
-from sqlalchemy.orm import Session
+import logging
+from typing import Any, Dict, List, Tuple
+
 from sqlalchemy import select
-from datetime import datetime
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.dependencies import graph_service, llm_service, sync_service
-from app.services.sync_service import SyncService
-from app.models.domain import Channel
 from app.core.timezone import now_kst
+from app.models.domain import Channel
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 
 async def get_calculated_lookback_minutes(db: Session, channel_id: str) -> int:
     # 1. DB에서 채널 정보 조회
@@ -26,20 +26,20 @@ async def get_calculated_lookback_minutes(db: Session, channel_id: str) -> int:
     if not channel or channel.last_synced_at is None:
         lookback_days = settings.MESSAGE_SYNC_INITIAL_LOOKBACK_DAYS  # 예: 30일
         lookback_minutes = lookback_days * 24 * 60
-        '''
+        """
         logger.info(f"🆕 [Initial Sync] 채널 '{channel_id}' 최초 동기화 실행 ({lookback_days}일 치)")
-        '''
+        """
         return lookback_minutes
 
     # 3. 기존 동기화 이력이 있는 경우 -> 주기적 동기화 (Periodic Sync)
     periodic_lookback_minutes = (
-        settings.MESSAGE_SYNC_INTERVAL_HOURS * 60 
-        + settings.MESSAGE_SYNC_LOOKBACK_BUFFER_MINUTES
+        settings.MESSAGE_SYNC_INTERVAL_HOURS * 60 + settings.MESSAGE_SYNC_LOOKBACK_BUFFER_MINUTES
     )
-    '''
+    """
     logger.info(f"🔄 [Periodic Sync] 채널 '{channel_id}' 주기적 동기화 실행 ({periodic_lookback_minutes}분)")
-    '''
+    """
     return periodic_lookback_minutes
+
 
 async def _process_single_channel_messages(channel_id: str, team_id: str):
     """
@@ -51,9 +51,7 @@ async def _process_single_channel_messages(channel_id: str, team_id: str):
         try:
             lookback_minutes = await get_calculated_lookback_minutes(db, channel_id)
             messages: List[Dict[str, Any]] = await graph_service.get_channel_messages(
-                team_id=team_id,
-                channel_id=channel_id,
-                since_minutes=lookback_minutes
+                team_id=team_id, channel_id=channel_id, since_minutes=lookback_minutes
             )
 
             for msg in messages:
@@ -63,9 +61,7 @@ async def _process_single_channel_messages(channel_id: str, team_id: str):
 
                 # 1. LLM RAG 분석 (내부에서 필드 튜플 조회 및 db.expunge_all 실행됨)
                 rag_result = await llm_service.analyze_message_with_rag(
-                    db=db,
-                    channel_id=channel_id,
-                    message_text=content
+                    db=db, channel_id=channel_id, message_text=content
                 )
 
                 # 2. MasterCalendar DB 반영 및 Fan-out 실행
@@ -74,7 +70,7 @@ async def _process_single_channel_messages(channel_id: str, team_id: str):
                     team_id=team_id,
                     channel_id=channel_id,
                     raw_message_id=msg["id"],
-                    rag_result=rag_result
+                    rag_result=rag_result,
                 )
             # 1. select 구문으로 채널 조회
             stmt = select(Channel).where(Channel.channel_id == channel_id)
@@ -84,22 +80,18 @@ async def _process_single_channel_messages(channel_id: str, team_id: str):
                 channel.last_synced_at = now_kst()
             else:
                 # 채널 레코드가 없다면 신규 생성
-                channel = Channel(
-                    id=channel_id,
-                    team_id=team_id,
-                    last_synced_at=now_kst()
-                )
+                channel = Channel(id=channel_id, team_id=team_id, last_synced_at=now_kst())
                 db.add(channel)
 
             db.commit()  # 최종 커밋
-            '''
+            """
             logger.info(f"✅ 채널 {channel_id} 동기화 완료 및 last_synced_at 업데이트 성공")
-            '''
+            """
 
         except Exception as e:
-            '''
+            """
             logger.error(f"Channel {channel_id} 메시지 동기화 에러: {e}", exc_info=True)
-            '''
+            """
             logger.error(f"Channel 메시지 동기화 에러: {e}", exc_info=True)
 
 
@@ -108,9 +100,8 @@ async def sync_channel_messages_task():
     with SessionLocal() as db:
         try:
             # 1. ORM 객체 전체 대신 필요 필드만 튜플로 스칼라 쿼리 (메모리 경량화)
-            stmt = (
-                select(Channel.channel_id, Channel.team_id)
-                .order_by(Channel.last_synced_at.asc().nullsfirst())
+            stmt = select(Channel.channel_id, Channel.team_id).order_by(
+                Channel.last_synced_at.asc().nullsfirst()
             )
             channels: List[Tuple[str, str]] = db.execute(stmt).all()
 
@@ -119,22 +110,25 @@ async def sync_channel_messages_task():
                 return
 
             total_channels = len(channels)
-            total_batches = (total_channels + settings.MESSAGE_SYNC_BATCH_SIZE - 1) // settings.MESSAGE_SYNC_BATCH_SIZE
-            
+            total_batches = (
+                total_channels + settings.MESSAGE_SYNC_BATCH_SIZE - 1
+            ) // settings.MESSAGE_SYNC_BATCH_SIZE
+
             for i in range(0, total_channels, settings.MESSAGE_SYNC_BATCH_SIZE):
                 batch = channels[i : i + settings.MESSAGE_SYNC_BATCH_SIZE]
                 current_batch_num = (i // settings.MESSAGE_SYNC_BATCH_SIZE) + 1
-                
-                logger.info(f"[Batch {current_batch_num}/{total_batches}] {len(batch)}개 채널 동기화 중...")
-                
+
+                logger.info(
+                    f"[Batch {current_batch_num}/{total_batches}] {len(batch)}개 채널 동기화 중..."
+                )
+
                 # 2. Primitive 값(channel_id, team_id)만 전달하여 병렬 실행
                 tasks = [
-                    _process_single_channel_messages(ch_id, team_id)
-                    for ch_id, team_id in batch
+                    _process_single_channel_messages(ch_id, team_id) for ch_id, team_id in batch
                 ]
-                
+
                 await asyncio.gather(*tasks, return_exceptions=True)
-                
+
                 if i + settings.MESSAGE_SYNC_BATCH_SIZE < total_channels:
                     await asyncio.sleep(settings.BATCH_DELAY_SECONDS)
             logger.info("메시지 및 일정 동기화 태스크 완료 (병렬 처리)")
