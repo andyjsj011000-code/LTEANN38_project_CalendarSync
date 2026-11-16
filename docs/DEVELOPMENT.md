@@ -22,6 +22,20 @@ python -m pip install -r requirements-bot-test.txt
 python -m pytest tests_bot -q
 ```
 
+## 기존 Teams 봇 웹훅
+
+`/api/messages`는 Microsoft 공개 클라우드의 Bot Connector 토큰을 검증합니다.
+운영 반영 전에 기존 프록시가 `Authorization` 헤더를 앱까지 전달하는지 확인하고,
+`AZURE_CLIENT_ID`를 실제 Bot 등록의 앱 ID와 대조합니다. 앱은 Microsoft의 공개
+OpenID 메타데이터와 서명 키 호스트에 HTTPS로 접속할 수 있어야 합니다.
+
+`BOT_CONNECTOR_HOSTS`는 허용할 Teams 발송 호스트의 JSON 배열입니다. 기본값은
+`["smba.trafficmanager.net"]`입니다. 운영 중 수신하는 활동과 기존 DB에 저장된
+발송 주소의 호스트를 확인해, Microsoft가 운영하는 필요한 호스트만 정확히 지정합니다.
+검증은 기존 DB의 주소를 사용하는 예약 알림에도 적용됩니다.
+
+[Bot Connector 인증 명세](https://learn.microsoft.com/en-us/azure/bot-service/rest-api/bot-framework-rest-connector-authentication?view=azure-bot-service-4.0#authenticate-requests-from-the-bot-connector-service-to-your-bot)
+
 ## 타입 검사 범위
 
 `pyproject.toml`의 `tool.basedpyright.include`가 검사 경계를 정의합니다. 현재 범위는

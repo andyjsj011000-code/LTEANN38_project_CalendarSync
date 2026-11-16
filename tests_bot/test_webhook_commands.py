@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base
@@ -26,6 +26,7 @@ CONNECTOR = "https://connector.example.invalid"
 CONVERSATION = "test-conversation"
 NOW = datetime(2026, 11, 16, 12, tzinfo=timezone(timedelta(hours=9)))
 SCHEDULE_TITLE = "테스트 행사"
+AUTH_HEADERS = {"Authorization": "Bearer test"}
 
 
 def load_bot_module(monkeypatch, name):
@@ -51,6 +52,8 @@ def bot(monkeypatch):
     )
     graph = AsyncMock()
     graph.get_user.return_value = {"mail": ACCOUNT}
+    connector_auth = SimpleNamespace(authenticate=AsyncMock())
+    db_calls = []
     responses = deque()
     sent = []
 
@@ -65,16 +68,27 @@ def bot(monkeypatch):
         return httpx.Response(status)
 
     outbound = httpx.AsyncClient(transport=httpx.MockTransport(transport), trust_env=False)
-    sender = BotService("test-app", "test-secret", "test-tenant", outbound)
+    sender = BotService(
+        "test-app",
+        "test-secret",
+        "test-tenant",
+        outbound,
+        allowed_hosts={"connector.example.invalid"},
+    )
 
     def get_db():
+        db_calls.append(True)
         with Session(engine) as db:
             yield db
 
     for name, contents in {
         "app.core.config": {"settings": settings},
         "app.core.database": {"Base": base, "get_db": get_db},
-        "app.core.dependencies": {"bot_service": sender, "graph_service": graph},
+        "app.core.dependencies": {
+            "bot_service": sender,
+            "graph_service": graph,
+            "bot_connector_auth": connector_auth,
+        },
     }.items():
         module = ModuleType(name)
         vars(module).update(contents)
@@ -114,6 +128,8 @@ def bot(monkeypatch):
             yield SimpleNamespace(
                 client=client,
                 graph=graph,
+                connector_auth=connector_auth,
+                db_calls=db_calls,
                 responses=responses,
                 sent=sent,
                 settings=settings,
@@ -136,7 +152,7 @@ def send_command(
     }
     if activity_id is not None:
         activity["id"] = activity_id
-    return bot.client.post("/api/messages", json=activity)
+    return bot.client.post("/api/messages", json=activity, headers=AUTH_HEADERS)
 
 
 @pytest.mark.parametrize("statuses", [(201,), (401, 202)])
@@ -251,16 +267,29 @@ def test_command_does_not_suppress_lifecycle_events(bot):
         "conversation": {"id": CONVERSATION},
         "serviceUrl": CONNECTOR,
     }
-    assert bot.client.post("/api/messages", json=event).status_code == 200
+    assert bot.client.post("/api/messages", json=event, headers=AUTH_HEADERS).status_code == 200
     event["type"] = "installationUpdate"
-    repeated_welcome = bot.client.post("/api/messages", json=event)
+    repeated_welcome = bot.client.post("/api/messages", json=event, headers=AUTH_HEADERS)
     assert repeated_welcome.json() == {"status": "ok", "message": "duplicate_event_ignored"}
     assert len(bot.sent) == 2
     assert "서비스가 정상 연결되었습니다" in bot.sent[1]
 
 
 def test_missing_sender_does_not_call_graph(bot):
-    response = bot.client.post("/api/messages", json={"type": "message"})
+    response = bot.client.post("/api/messages", json={"type": "message"}, headers=AUTH_HEADERS)
 
     assert response.json() == {"status": "ok", "message": "no_user_id_in_activity"}
     bot.graph.get_user.assert_not_awaited()
+
+
+def test_rejected_authentication_precedes_all_command_work(bot):
+    bot.connector_auth.authenticate.side_effect = HTTPException(status_code=403)
+
+    response = send_command(bot, "/schedule")
+
+    assert response.status_code == 403
+    assert not bot.db_calls
+    assert not bot.sent
+    bot.graph.get_user.assert_not_awaited()
+    assert not bot.webhook.RECENT_MESSAGE_ACTIVITIES
+    assert not bot.webhook.RECENT_MESSAGE_REQUESTS

@@ -6,14 +6,14 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from cachetools import TTLCache
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.dependencies import bot_service, graph_service
+from app.core.dependencies import bot_connector_auth, bot_service, graph_service
 from app.models.domain import User
 from app.models.master_calendar import UserSyncLog
 from app.utils.notification import send_today_notice_to_user
@@ -125,12 +125,27 @@ async def cleanup_user_data(user_id: str, db: Session):
         logger.error(f"유저 삭제/정리 중 에러 발생: {e}", exc_info=True)
 
 
+async def authenticated_activity(request: Request) -> dict:
+    authorization = request.headers.getlist("authorization")
+    if len(authorization) != 1:
+        raise HTTPException(403, "Missing Bot Connector authorization")
+    try:
+        activity = await request.json()
+    except ValueError:
+        raise HTTPException(400, "Invalid Teams activity") from None
+    if not isinstance(activity, dict):
+        raise HTTPException(400, "Invalid Teams activity")
+    await bot_connector_auth.authenticate(authorization[0], activity)
+    return activity
+
+
 @router.post("/api/messages")
 async def teams_event_webhook(
-    request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
+    background_tasks: BackgroundTasks,
+    data: dict = Depends(authenticated_activity),
+    db: Session = Depends(get_db),
 ):
-    """Teams Bot Framework 이벤트 수신 및 lightweight select 기반 유저 처리"""
-    data = await request.json()
+    """검증된 Teams 이벤트를 등록된 사용자와 연결해 처리한다."""
     action = data.get("action")
     activity_type = data.get("type")
     now_utc = datetime.now(timezone.utc)

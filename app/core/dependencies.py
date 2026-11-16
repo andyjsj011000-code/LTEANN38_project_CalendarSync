@@ -2,6 +2,7 @@
 import httpx
 from openai import AsyncOpenAI
 
+from app.core.bot_auth import BotConnectorAuth
 from app.core.config import settings
 from app.services.bot_service import BotService
 from app.services.graph_service import GraphService
@@ -22,6 +23,10 @@ bot_service = BotService(
     client_secret=settings.AZURE_CLIENT_SECRET,
     tenant_id=settings.AZURE_TENANT_ID,
     client=global_httpx_client,
+    allowed_hosts=settings.BOT_CONNECTOR_HOSTS,
+)
+bot_connector_auth = BotConnectorAuth(
+    global_httpx_client, settings.AZURE_CLIENT_ID, settings.BOT_CONNECTOR_HOSTS
 )
 
 graph_service = GraphService(
