@@ -1,19 +1,19 @@
 # app/endpoints/webhook.py
-import re
 import logging
+import re
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Request, BackgroundTasks, Depends
-from sqlalchemy.orm import Session
+from cachetools import TTLCache
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
+from app.core.dependencies import bot_service, graph_service
 from app.models.domain import User
 from app.models.master_calendar import UserSyncLog
-from app.core.config import settings
-from app.core.dependencies import bot_service, graph_service, sync_service
-from cachetools import TTLCache
 from app.utils.notification import send_today_notice_to_user
 
 logger = logging.getLogger(__name__)
@@ -21,29 +21,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Webhook"])
 
 RECENT_SYNC_REQUESTS: TTLCache[str, float] = TTLCache(
-    maxsize=100, 
-    ttl=settings.DUPLICATE_WEBHOOK_DEBOUNCE_SECONDS
+    maxsize=100, ttl=settings.DUPLICATE_WEBHOOK_DEBOUNCE_SECONDS
 )
+
 
 def calculate_grade_from_email(email: Optional[str], current_year: int) -> Optional[int]:
     """이메일 아이디의 앞 2자리 숫자를 입학 연도로 판단하여 학년을 계산합니다."""
     if not email:
         return None
-    
-    username = email.split('@')[0].strip()
-    if username in settings.GRADE_OVERRIDES:
-        var = settings.GRADE_OVERRIDES[username]
-        return int(var) if var is not None else None
-    
-    match = re.match(r'^(\d{2})', username)
+
+    username = email.split("@")[0].strip()
+    grade_overrides = settings.GRADE_OVERRIDES or {}
+    if username in grade_overrides:
+        grade = grade_overrides[username]
+        return int(grade) if grade is not None else None
+
+    match = re.match(r"^(\d{2})", username)
     if match:
         entry_year_suffix = int(match.group(1))
         entry_year = 2000 + entry_year_suffix
         grade = current_year - entry_year + 1
-        
+
         if 1 <= grade <= 3:
             return grade
     return None
+
 
 async def cleanup_user_data(user_id: str, db: Session):
     """유저가 앱을 삭제/차단했을 때 Graph API 일정 완전 삭제 및 DB 유저 잔여 데이터 정제"""
@@ -51,7 +53,7 @@ async def cleanup_user_data(user_id: str, db: Session):
         # 1. DB에서 유저 조회
         user_stmt = select(User).where(User.id == user_id)
         db_user = db.execute(user_stmt).scalar_one_or_none()
-        
+
         if not db_user:
             return
 
@@ -59,8 +61,7 @@ async def cleanup_user_data(user_id: str, db: Session):
 
         # 2. DB SyncLog에서 유효한 outlook_event_id 추출 (None 및 빈 문자열 제거)
         log_stmt = select(UserSyncLog.outlook_event_id).where(
-            UserSyncLog.user_id == user_id,
-            UserSyncLog.outlook_event_id.isnot(None)
+            UserSyncLog.user_id == user_id, UserSyncLog.outlook_event_id.isnot(None)
         )
         raw_event_ids = db.execute(log_stmt).scalars().all()
         valid_event_ids = [e_id for e_id in raw_event_ids if e_id and e_id.strip()]
@@ -71,8 +72,7 @@ async def cleanup_user_data(user_id: str, db: Session):
         if valid_event_ids:
             try:
                 deleted_count += await graph_service.delete_events_by_ids(
-                    user_id=target_graph_user, 
-                    event_ids=valid_event_ids
+                    user_id=target_graph_user, event_ids=valid_event_ids
                 )
             except Exception as graph_err:
                 logger.warning(f"ID 기반 Graph API 삭제 중 일부 실패 (Fallback 진행): {graph_err}")
@@ -85,25 +85,24 @@ async def cleanup_user_data(user_id: str, db: Session):
             deleted_count += fallback_deleted
         except Exception as fallback_err:
             logger.warning(f"Extended Property 기반 Fallback 삭제 실패: {fallback_err}")
-        '''
+        """
         logger.info(f"🗑️ [Graph API] 총 {deleted_count}건의 Outlook 일정 최종 삭제 완료")
-        '''
+        """
 
         # 3. DB 유저 삭제 (Cascade 설정으로 관련 SyncLog, ChannelMapping 자동 삭제)
         db.delete(db_user)
         db.commit()
 
-        logger.info(f"[DB 유저 삭제 완료] 데이터 완전 제거")
+        logger.info("[DB 유저 삭제 완료] 데이터 완전 제거")
 
     except Exception as e:
         db.rollback()
         logger.error(f"유저 삭제/정리 중 에러 발생: {e}", exc_info=True)
 
+
 @router.post("/api/messages")
 async def teams_event_webhook(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
 ):
     """Teams Bot Framework 이벤트 수신 및 lightweight select 기반 유저 처리"""
     data = await request.json()
@@ -122,24 +121,25 @@ async def teams_event_webhook(
     last_sync_time = RECENT_SYNC_REQUESTS.get(user_id, 0)
     if now_ts - last_sync_time < settings.DUPLICATE_WEBHOOK_DEBOUNCE_SECONDS:
         return {"status": "ok", "message": "duplicate_event_ignored"}
-    
+
     RECENT_SYNC_REQUESTS[user_id] = now_ts
-    
-    # 이메일 및 학년 계산
+
+    # Graph 조회가 실패해도 계정과 학년을 미확인 상태로 처리한다.
+    user_email = None
     try:
         # graph_service의 유저 정보 조회 메서드 호출 (메서드명은 프로젝트 환경에 맞춰 확인 필요)
         user_info = await graph_service.get_user(user_id)
         if user_info:
             user_email = user_info.get("mail") or user_info.get("userPrincipalName")
-            '''
+            """
             logger.info(f"🔍 [Graph API] Email 조회 성공: User({user_id}) -> {user_email}")
-            '''
+            """
     except Exception as ge:
-        '''
+        """
         logger.warning(f"[Graph API] User({user_id}) 이메일 조회 실패: {ge}")
-        '''
+        """
         logger.warning(f"[Graph API] 이메일 조회 실패: {ge}")
-        
+
     user_grade = calculate_grade_from_email(user_email, now_utc.year)
 
     if not user_id:
@@ -161,7 +161,7 @@ async def teams_event_webhook(
             )
             background_tasks.add_task(cleanup_user_data, user_id, db)
             return {"status": "ok", "message": "user_cleanup_initiated"}
-        
+
         if activity_type in ("installationUpdate", "conversationUpdate"):
             # 2. ORM 객체를 세션에 다 올리지 않고 필요한 필드만 select() 실행하여 메모리 경량화
             stmt_user = select(User.id, User.email, User.grade).where(User.id == user_id)
@@ -177,10 +177,10 @@ async def teams_event_webhook(
                     service_url=service_url,
                 )
                 db.add(new_user)
-                '''
+                """
                 logger.info(f"✨ [신규 유저 등록] User({user_id}) | Email: {user_email} | Grade: {user_grade}")
-                '''
-                logger.info(f"[신규 유저 등록]")
+                """
+                logger.info("[신규 유저 등록]")
             else:
                 # 기존 유저 정보 갱신 (지정 객체만 단건 조작)
                 db_user = db.get(User, user_id)
@@ -193,10 +193,10 @@ async def teams_event_webhook(
                         db_user.conversation_id = user_conversation_id
                     if service_url:
                         db_user.service_url = service_url
-                    '''
+                    """
                     logger.info(f"🔄 [유저 정보 갱신] User({user_id}) | Email: {user_email} | Grade: {user_grade}")
-                    '''
-                    logger.info(f"🔄 [유저 정보 갱신]")
+                    """
+                    logger.info("🔄 [유저 정보 갱신]")
 
             db.commit()
 
@@ -216,14 +216,14 @@ async def teams_event_webhook(
             )
 
         elif activity_type == "message":
-            stmt_user = select(User.id, User.email, User.grade).where(User.id == user_id)
+            stmt_user = select(User.service_url, User.conversation_id).where(User.id == user_id)
             existing_user_row = db.execute(stmt_user).first()
-            
+
             if existing_user_row:
                 # 1. 메시지 텍스트 추출 및 HTML/AtMention 태그 정제
                 raw_text = data.get("text", "") or ""
                 # 팀즈 @봇이름 태그(<at>...</at>) 및 공백 제거
-                clean_text = re.sub(r'<at>.*?</at>', '', raw_text).strip()
+                clean_text = re.sub(r"<at>.*?</at>", "", raw_text).strip()
 
                 # 2. 커맨드 분기 처리
                 if clean_text in ("/help", "help"):
@@ -238,18 +238,31 @@ async def teams_event_webhook(
                     )
 
                 elif clean_text in ("/status", "status"):
+                    grade_text = f"{user_grade}학년" if user_grade else "일반"
                     reply_text = (
                         f"🟢 **CalendarSync 서비스 상태: 정상**\n\n"
                         f"• **등록 계정**: `{user_email or '미확인'}`\n"
-                        f"• **학년 정보**: `{user_grade}학년`" if user_grade else "• **학년 정보**: `일반`"
+                        f"• **학년 정보**: `{grade_text}`"
                     )
-                
+
                 elif clean_text in ("/schedule", "schedule"):
                     try:
                         result = await send_today_notice_to_user(db, user_id)
-                        return
-                    except e:
-                        logger.error("디버깅",exc_info=True)
+                    except Exception:
+                        db.rollback()
+                        logger.exception("오늘 일정 알림 처리 실패")
+                    else:
+                        if result["success"]:
+                            return
+
+                    if existing_user_row.service_url and existing_user_row.conversation_id:
+                        background_tasks.add_task(
+                            bot_service.send_teams_reply,
+                            existing_user_row.service_url,
+                            existing_user_row.conversation_id,
+                            "오늘 일정을 보내지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                        )
+                    return {"status": "error", "message": "schedule_delivery_failed"}
                 else:
                     # 지정된 커맨드가 아닌 일반 메시지를 보냈을 때의 기본 안내
                     reply_text = (

@@ -1,7 +1,8 @@
-#app/core/database.py
+# app/core/database.py
 import oracledb
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import declarative_base, sessionmaker
+
 from app.core.config import settings
 
 # 1. oracledb 라이브러리 활용: Wallet 기본 설정 적용 (oracledb 변수 직접 사용)
@@ -20,11 +21,11 @@ engine = create_engine(
         "wallet_location": settings.WALLET_DIR,
         "wallet_password": settings.DB_PASSWORD,
     },
-    pool_size=30,             # 커넥션 풀 기본 크기
-    max_overflow=50,# 순간 부하 시 추가 허용 커넥션
+    pool_size=30,  # 커넥션 풀 기본 크기
+    max_overflow=50,  # 순간 부하 시 추가 허용 커넥션
     pool_timeout=60,
-    pool_recycle=1800,        # 30분마다 커넥션 재생성 (Oracle Timeout 방지)
-    pool_pre_ping=True        # 끊어진 커넥션 감지 후 자동 재연결
+    pool_recycle=1800,  # 30분마다 커넥션 재생성 (Oracle Timeout 방지)
+    pool_pre_ping=True,  # 끊어진 커넥션 감지 후 자동 재연결
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -36,7 +37,7 @@ def get_db():
     try:
         yield db
     except:
-            db.rollback()
-            raise
+        db.rollback()
+        raise
     finally:
         db.close()

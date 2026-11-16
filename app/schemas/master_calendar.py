@@ -1,10 +1,12 @@
-#app/schemas/master_calendar.py
-from typing import Optional, List
+# app/schemas/master_calendar.py
+from typing import List, Optional
+
 from pydantic import BaseModel, ConfigDict
 
 
 class MasterScheduleContext(BaseModel):
     """RAG 수행 시 LLM에게 전달할 기존 마스터 일정 단위"""
+
     id: str
     title: str
     start_datetime: str

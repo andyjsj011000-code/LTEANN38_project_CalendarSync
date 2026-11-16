@@ -1,16 +1,16 @@
-#app/tasks/channel_sync.py
-import logging
+# app/tasks/channel_sync.py
 import asyncio
-from typing import List, Tuple, Dict, Any, Set
-from sqlalchemy.orm import Session
+import logging
+from typing import Any, Dict, List, Set, Tuple
+
 from sqlalchemy import select, update
 
 from app.core.database import SessionLocal
 from app.core.dependencies import graph_service
-from app.models.domain import User, Channel, UserChannelMapping
+from app.models.domain import Channel, User, UserChannelMapping
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 async def _sync_single_user_channels(user_id: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -21,16 +21,16 @@ async def _sync_single_user_channels(user_id: str) -> Tuple[str, List[Dict[str, 
         joined_channels = await graph_service.get_user_joined_channels(user_id)
         return user_id, joined_channels
     except Exception as e:
-        '''
+        """
         logger.error(f"User {user_id} 채널 조회 실패: {e}")
-        '''
+        """
         logger.error(f"채널 조회 실패: {e}")
         return user_id, []
 
 
 async def sync_user_channels_task():
     """[채널 동기화 태스크] ORM 메모리 누수 방지 및 Bulk DB 반영"""
-    
+
     with SessionLocal() as db:
         try:
             # 1. ORM 인스턴스 대신 user_id(문자열)만 스칼라 쿼리 (메모리 Stash 차단)
@@ -74,9 +74,7 @@ async def sync_user_channels_task():
                     # [케이스 A] 신규 채널 등록
                     if ch_id not in existing_channels and ch_id not in new_channels_dict:
                         new_channels_dict[ch_id] = Channel(
-                            channel_id=ch_id,
-                            team_id=team_id,
-                            channel_name=ch_name
+                            channel_id=ch_id, team_id=team_id, channel_name=ch_name
                         )
 
                     # [케이스 B] 기존 채널 이름 변경 감지
@@ -113,7 +111,7 @@ async def sync_user_channels_task():
 
             db.commit()
             db.expunge_all()  # 세션 캐시 즉시 비우기 (메모리 Stash 차단)
-            
+
             logger.info(
                 f"채널 동기화 완료 "
                 f"(신규 채널: {len(new_channels_dict)}개, "

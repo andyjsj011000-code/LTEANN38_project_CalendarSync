@@ -1,28 +1,26 @@
-#app/tasks/scheduler.py
+# app/tasks/scheduler.py
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.config import settings
 from app.core.timezone import now_kst
 from app.tasks.channel_sync import sync_user_channels_task
-from app.tasks.message_sync import sync_channel_messages_task
 from app.tasks.daily_notice import send_daily_notice_task
 from app.tasks.lifecycle import run_lifecycle_cleanup_task
+from app.tasks.message_sync import sync_channel_messages_task
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # 스케줄러 공통 방어 옵션 설정
 job_defaults = {
-    'coalesce': True,       # 이전 작업 지연 시 누적된 작업은 1회만 병합 실행
-    'max_instances': 1     # 동일 작업 concurrent 중복 실행 방지
+    "coalesce": True,  # 이전 작업 지연 시 누적된 작업은 1회만 병합 실행
+    "max_instances": 1,  # 동일 작업 concurrent 중복 실행 방지
 }
 
-scheduler = AsyncIOScheduler(
-    timezone="Asia/Seoul",
-    job_defaults=job_defaults
-)
+scheduler = AsyncIOScheduler(timezone="Asia/Seoul", job_defaults=job_defaults)
 
 
 def start_scheduler():
@@ -33,44 +31,38 @@ def start_scheduler():
 
     now = now_kst()
     delay_time = now + timedelta(hours=2)
-    debug_time1 = now + timedelta(minutes=1)
-    debug_time2 = now + timedelta(minutes=3)
 
     # 1. 채널 동기화 (기본 4시간 - 앱 시작 즉시 1회 실행 후 주기적 실행)
     scheduler.add_job(
         sync_user_channels_task,
         "interval",
         hours=settings.CHANNEL_SYNC_INTERVAL_HOURS,
-        #minutes=4,
         id="channel_sync_job",
-        next_run_time=now, # 서버 구동 즉시 최초 1회 실행
-        #next_run_time=debug_time1,
-        replace_existing=True
+        next_run_time=now,  # 서버 구동 즉시 최초 1회 실행
+        replace_existing=True,
     )
-    
-    # 2. 메시지 수집 및 일정 C/U/D 파이프라인 (기본 1시간 - 앱 시작 즉시 1회 실행)
+
+    # 2. 메시지 수집 및 일정 C/U/D 파이프라인 (앱 시작 2시간 후 최초 실행, 이후 기본 1시간 간격)
     scheduler.add_job(
         sync_channel_messages_task,
         "interval",
         hours=settings.MESSAGE_SYNC_INTERVAL_HOURS,
-        #minutes=4,
         id="message_sync_job",
-        next_run_time=delay_time,   # 서버 구동 즉시 최초 1회 실행
-        #next_run_time=debug_time2,
-        replace_existing=True
+        next_run_time=delay_time,
+        replace_existing=True,
     )
 
-    # 3. 매일 아침 08:00 당일 일정 알림
+    # 3. 매일 아침 07:00 당일 일정 알림
     scheduler.add_job(
         send_daily_notice_task,
         "cron",
         hour=7,
         minute=0,
         id="daily_notice_job",
-        replace_existing=True
+        replace_existing=True,
     )
 
-    # 4. 매주 일요일 새벽 03:00 라이프사이클 Cleanup
+    # 4. 매주 일요일 새벽 03:05에 오래된 로그 정리
     scheduler.add_job(
         run_lifecycle_cleanup_task,
         "cron",
@@ -78,7 +70,7 @@ def start_scheduler():
         hour=3,
         minute=5,
         id="lifecycle_job",
-        replace_existing=True
+        replace_existing=True,
     )
 
     scheduler.start()

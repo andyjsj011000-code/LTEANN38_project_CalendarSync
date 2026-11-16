@@ -1,11 +1,12 @@
-import logging
-from typing import Optional, Any, Dict, List
-from datetime import datetime, timezone, timedelta
-import httpx
 import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+import httpx
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 class GraphService:
@@ -15,7 +16,7 @@ class GraphService:
         client_id: str,
         client_secret: str,
         client: httpx.AsyncClient,
-        max_concurrent_requests: int = 7
+        max_concurrent_requests: int = 7,
     ):
         self.tenant_id = tenant_id
         self.client_id = client_id
@@ -37,7 +38,7 @@ class GraphService:
                 "grant_type": "client_credentials",
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
-                "scope": "https://graph.microsoft.com/.default"
+                "scope": "https://graph.microsoft.com/.default",
             }
 
             res = await self._client.post(token_url, data=payload)
@@ -49,30 +50,31 @@ class GraphService:
     async def _get_headers(self) -> dict:
         if not self._access_token:
             await self._get_access_token()
-        
-        return {
-            "Authorization": f"Bearer {self._access_token}",
-            "Content-Type": "application/json"
-        }
+
+        return {"Authorization": f"Bearer {self._access_token}", "Content-Type": "application/json"}
 
     # 동시 요청 수를 제한하고 요청 제한·첫 인증 실패·네트워크 오류에 맞춰 Graph 요청을 재시도한다.
     async def _request_with_retry(
-        self, 
-        method: str, 
-        url: str, 
+        self,
+        method: str,
+        url: str,
         json_payload: Optional[Dict[str, Any]] = None,
-        max_retries: int = 5
+        max_retries: int = 5,
     ) -> httpx.Response:
         async with self._semaphore:
             for attempt in range(max_retries):
                 headers = await self._get_headers()
-                
+
                 try:
-                    res = await self._client.request(method, url, headers=headers, json=json_payload)
+                    res = await self._client.request(
+                        method, url, headers=headers, json=json_payload
+                    )
 
                     if res.status_code == 429:
-                        retry_after = int(res.headers.get("Retry-After", 2 ** attempt))
-                        logger.warning(f"[Graph API 429 Throttled] {retry_after}초 후 재시도합니다... ({attempt + 1}/{max_retries})")
+                        retry_after = int(res.headers.get("Retry-After", 2**attempt))
+                        logger.warning(
+                            f"[Graph API 429 Throttled] {retry_after}초 후 재시도합니다... ({attempt + 1}/{max_retries})"
+                        )
                         await asyncio.sleep(retry_after)
                         continue
 
@@ -85,7 +87,9 @@ class GraphService:
                     return res
 
                 except httpx.RequestError as e:
-                    logger.error(f"[Graph API 네트워크 에러] {e} (재시도 중... {attempt + 1}/{max_retries})")
+                    logger.error(
+                        f"[Graph API 네트워크 에러] {e} (재시도 중... {attempt + 1}/{max_retries})"
+                    )
                     await asyncio.sleep(1)
 
             return res
@@ -103,16 +107,16 @@ class GraphService:
         try:
             res = await self._request_with_retry("GET", url)
             if res.status_code == 404:
-                logger.warning(f"[Graph API] 존재하지 않는 사용자 ID")
+                logger.warning("[Graph API] 존재하지 않는 사용자 ID")
                 return None
-            
+
             res.raise_for_status()
             return res.json()
 
         except Exception as e:
             logger.error(f"[Graph API] 조회 중 알 수 없는 에러: {e}")
             return None
-        
+
     # Graph의 다음 페이지 링크가 끝날 때까지 조회해 전체 항목을 하나의 목록으로 모은다.
     async def _get_all_pages(self, url: str) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
@@ -146,11 +150,13 @@ class GraphService:
                 continue
 
             for ch in team_channels:
-                channels.append({
-                    "id": ch["id"],
-                    "team_id": team_id,
-                    "displayName": ch.get("displayName"),
-                })
+                channels.append(
+                    {
+                        "id": ch["id"],
+                        "team_id": team_id,
+                        "displayName": ch.get("displayName"),
+                    }
+                )
 
         return channels
 
@@ -160,7 +166,9 @@ class GraphService:
         channel_id: str,
         since_minutes: int = 90,
     ) -> List[Dict[str, Any]]:
-        url = f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/delta"
+        url = (
+            f"https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages/delta"
+        )
 
         try:
             messages = await self._get_all_pages(url)
@@ -173,7 +181,7 @@ class GraphService:
         for msg in messages:
             if msg.get("messageType") != "message" or msg.get("deletedDateTime"):
                 continue
-            
+
             last_modified = msg.get("lastModifiedDateTime") or msg.get("createdDateTime")
             if last_modified:
                 msg_dt = datetime.fromisoformat(last_modified.replace("Z", "+00:00"))
@@ -192,33 +200,22 @@ class GraphService:
         end_dt: datetime,
         location: Optional[str] = None,
         description: Optional[str] = None,
-        time_zone: str = "Asia/Seoul"
+        time_zone: str = "Asia/Seoul",
     ) -> str:
         url = f"https://graph.microsoft.com/v1.0/users/{user_id}/calendar/events"
 
         payload = {
             "subject": title,
-            "body": {
-                "contentType": "HTML",
-                "content": description or ""
-            },
-            "start": {
-                "dateTime": self._format_datetime_for_graph(start_dt),
-                "timeZone": time_zone
-            },
-            "end": {
-                "dateTime": self._format_datetime_for_graph(end_dt),
-                "timeZone": time_zone
-            },
-            "location": {
-                "displayName": location or ""
-            },
+            "body": {"contentType": "HTML", "content": description or ""},
+            "start": {"dateTime": self._format_datetime_for_graph(start_dt), "timeZone": time_zone},
+            "end": {"dateTime": self._format_datetime_for_graph(end_dt), "timeZone": time_zone},
+            "location": {"displayName": location or ""},
             "singleValueExtendedProperties": [
                 {
                     "id": "String {fbd4ec16-7f0f-46d2-a9db-f32258a48607} Name CalendarSyncApp",
-                    "value": "CalendarSync_2026"
+                    "value": "CalendarSync_2026",
                 }
-            ]
+            ],
         }
 
         res = await self._request_with_retry("POST", url, json_payload=payload)
@@ -235,52 +232,37 @@ class GraphService:
         end_dt: datetime,
         location: Optional[str] = None,
         description: Optional[str] = None,
-        time_zone: str = "Asia/Seoul"
+        time_zone: str = "Asia/Seoul",
     ):
         url = f"https://graph.microsoft.com/v1.0/users/{user_id}/calendar/events/{event_id}"
 
         payload = {
             "subject": title,
-            "body": {
-                "contentType": "HTML",
-                "content": description or ""
-            },
-            "start": {
-                "dateTime": self._format_datetime_for_graph(start_dt),
-                "timeZone": time_zone
-            },
-            "end": {
-                "dateTime": self._format_datetime_for_graph(end_dt),
-                "timeZone": time_zone
-            },
-            "location": {
-                "displayName": location or ""
-            }
+            "body": {"contentType": "HTML", "content": description or ""},
+            "start": {"dateTime": self._format_datetime_for_graph(start_dt), "timeZone": time_zone},
+            "end": {"dateTime": self._format_datetime_for_graph(end_dt), "timeZone": time_zone},
+            "location": {"displayName": location or ""},
         }
 
         res = await self._request_with_retry("PATCH", url, json_payload=payload)
         res.raise_for_status()
 
-    async def delete_user_calendar_event(
-        self,
-        user_id: str,
-        event_id: str
-    ):
+    async def delete_user_calendar_event(self, user_id: str, event_id: str):
         url = f"https://graph.microsoft.com/v1.0/users/{user_id}/calendar/events/{event_id}"
 
         res = await self._request_with_retry("DELETE", url)
 
         if res.status_code == 404:
-            logger.warning(f"[Graph API] 삭제 대상 이벤트가 존재하지 않음")
+            logger.warning("[Graph API] 삭제 대상 이벤트가 존재하지 않음")
             return
 
         res.raise_for_status()
 
     async def delete_user_synced_events(
-        self, 
-        user_id: str, 
-        property_name: str = "CalendarSyncApp", 
-        property_value: str = "CalendarSync_2026"
+        self,
+        user_id: str,
+        property_name: str = "CalendarSyncApp",
+        property_value: str = "CalendarSync_2026",
     ) -> int:
         """Extended Property 식별자를 Expand하여 안전하게 일괄 삭제"""
         property_guid = "fbd4ec16-7f0f-46d2-a9db-f32258a48607"
@@ -296,7 +278,7 @@ class GraphService:
 
         try:
             fetched_events = await self._get_all_pages(url)
-            
+
             # App 식별자 속성값이 일치하는 일정만 필터링
             events_to_delete = []
             for ev in fetched_events:
@@ -307,7 +289,7 @@ class GraphService:
                         break
 
             if not events_to_delete:
-                logger.info(f"[Graph API] 삭제할 동기화 일정이 없습니다.")
+                logger.info("[Graph API] 삭제할 동기화 일정이 없습니다.")
                 return 0
 
             total_count = len(events_to_delete)
@@ -324,7 +306,9 @@ class GraphService:
             failed_count = total_count - success_count
 
             if failed_count > 0:
-                logger.warning(f"[Graph API] 일정 삭제 완료 (성공: {success_count}건, 실패: {failed_count}건)")
+                logger.warning(
+                    f"[Graph API] 일정 삭제 완료 (성공: {success_count}건, 실패: {failed_count}건)"
+                )
             else:
                 logger.info(f"[Graph API] 모든 동기화 일정 삭제 성공 (총 {success_count}건)")
 
@@ -340,8 +324,7 @@ class GraphService:
             return 0
 
         delete_tasks = [
-            self.delete_user_calendar_event(user_id=user_id, event_id=eid)
-            for eid in valid_ids
+            self.delete_user_calendar_event(user_id=user_id, event_id=eid) for eid in valid_ids
         ]
 
         results = await asyncio.gather(*delete_tasks, return_exceptions=True)

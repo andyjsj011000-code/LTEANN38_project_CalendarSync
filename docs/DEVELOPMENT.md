@@ -14,6 +14,14 @@ Windows 제한 환경에서는 `python -I -S tools/run_restricted_tests.py`로 �
 실행할 수 있습니다. 베타 ZIP 실행기 테스트는 별도로 `python -m pytest
 tests_web/test_beta_package.py -q`로 실행합니다.
 
+기존 Teams 봇의 명령어 테스트는 임시 SQLite와 테스트 전용 HTTP 전송을 사용합니다.
+GitHub Actions의 품질 검사에서도 아래 명령으로 실행합니다.
+
+```powershell
+python -m pip install -r requirements-bot-test.txt
+python -m pytest tests_bot -q
+```
+
 ## 타입 검사 범위
 
 `pyproject.toml`의 `tool.basedpyright.include`가 검사 경계를 정의합니다. 현재 범위는

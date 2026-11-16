@@ -1,5 +1,6 @@
 # app/core/config.py
-from typing import Optional, Dict
+from typing import Dict, Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,7 +8,7 @@ class Settings(BaseSettings):
     # App General Config
     APP_NAME: str = "Teams-Outlook Sync Engine"
     ENV: str = "development"
-    
+
     # DB 초기화 및 재설정 플래그
     RESET_DB: bool = False
 
@@ -38,14 +39,10 @@ class Settings(BaseSettings):
     MESSAGE_SYNC_INITIAL_LOOKBACK_DAYS: int = 30
     MESSAGE_SYNC_BATCH_SIZE: int = 30
     BATCH_DELAY_SECONDS: int = 10
-    
+
     DUPLICATE_WEBHOOK_DEBOUNCE_SECONDS: int = 30
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
 settings = Settings()

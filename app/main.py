@@ -1,16 +1,16 @@
-#main.py
-import os
+# main.py
 import logging
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
-from app.tasks.scheduler import start_scheduler, stop_scheduler
-from app.reset import resetdb
+
 from app.core.config import settings
 from app.endpoints.webhook import router as webhook_router
-import sys
+from app.reset import resetdb
+from app.tasks.scheduler import start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 # 설정에 따른 DB 초기화 후 스케줄러를 시작하고 앱이 종료될 때 스케줄러도 중지한다.
@@ -19,21 +19,20 @@ async def lifespan(app: FastAPI):
     if settings.RESET_DB:
         logger.warning("Resetting DB...")
         resetdb()
-        
+
     logger.info("Initializing APScheduler...")
     start_scheduler()
-    
+
     yield
-    
+
     logger.info("Shutting down APScheduler...")
     stop_scheduler()
 
-app = FastAPI(
-    title="Teams Sync Service",
-    lifespan=lifespan
-)
+
+app = FastAPI(title="Teams Sync Service", lifespan=lifespan)
 
 app.include_router(webhook_router)
+
 
 @app.get("/health")
 def health_check():

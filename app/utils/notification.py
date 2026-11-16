@@ -1,9 +1,10 @@
 # app/services/user_notice_service.py
 import logging
-from typing import List, Dict, Any
 from datetime import datetime
-from sqlalchemy.orm import Session
+from typing import Any, Dict, List
+
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.dependencies import bot_service
 from app.core.timezone import now_kst
@@ -11,7 +12,8 @@ from app.models.domain import User
 from app.models.master_calendar import MasterCalendar, UserSyncLog
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 
 def get_single_user_today_schedules(db: Session, user_id: str) -> List[Dict[str, Any]]:
     """단일 유저의 오늘(KST) 일정을 쿼리하여 Primitive Dict 리스트로 반환"""
@@ -24,7 +26,7 @@ def get_single_user_today_schedules(db: Session, user_id: str) -> List[Dict[str,
             MasterCalendar.title,
             MasterCalendar.start_datetime,
             MasterCalendar.location,
-            MasterCalendar.description
+            MasterCalendar.description,
         )
         .select_from(UserSyncLog)
         .join(MasterCalendar, UserSyncLog.master_schedule_id == MasterCalendar.id)
@@ -32,7 +34,7 @@ def get_single_user_today_schedules(db: Session, user_id: str) -> List[Dict[str,
         .where(
             UserSyncLog.user_id == user_id,
             MasterCalendar.start_datetime >= start_of_day,
-            MasterCalendar.start_datetime <= end_of_day
+            MasterCalendar.start_datetime <= end_of_day,
         )
         .order_by(MasterCalendar.start_datetime.asc())
     )
@@ -40,12 +42,7 @@ def get_single_user_today_schedules(db: Session, user_id: str) -> List[Dict[str,
     results = db.execute(stmt).all()
 
     return [
-        {
-            "title": title,
-            "start_dt": start_dt,
-            "location": location,
-            "description": description
-        }
+        {"title": title, "start_dt": start_dt, "location": location, "description": description}
         for title, start_dt, location, description in results
     ]
 
@@ -74,21 +71,23 @@ async def send_today_notice_to_user(db: Session, user_id: str) -> Dict[str, Any]
     try:
         user_stmt = select(User).where(User.id == user_id)
         user = db.execute(user_stmt).scalar_one_or_none()
-    
+
         if not user or not user.conversation_id or not user.service_url:
-            '''
+            """
             logger.warning(f"User {user_id}의 Bot 대화 정보(conversation_id / service_url)가 없습니다.")
-            '''
-            logger.warning(f"User의 Bot 대화 정보(conversation_id / service_url)가 없습니다.")
+            """
+            logger.warning("User의 Bot 대화 정보(conversation_id / service_url)가 없습니다.")
             return {"success": False, "reason": "Bot conversation info missing", "count": 0}
         schedules = get_single_user_today_schedules(db, user_id)
         notice_message = format_schedule_message(schedules)
 
-        await bot_service.send_teams_reply(
+        sent = await bot_service.send_teams_reply(
             service_url=user.service_url,
             conversation_id=user.conversation_id,
             message=notice_message,
         )
+        if not sent:
+            return {"success": False, "reason": "Teams delivery failed", "count": 0}
 
         return {"success": True, "count": len(schedules), "message": notice_message}
     except Exception as e:

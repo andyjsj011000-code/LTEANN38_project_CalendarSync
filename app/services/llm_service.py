@@ -1,46 +1,44 @@
+import asyncio
 import json
 import logging
-import asyncio
-from typing import List, Optional
-from sqlalchemy.orm import Session
-from sqlalchemy import select
-from openai import AsyncOpenAI
 from datetime import timedelta
-from starlette.concurrency import run_in_threadpool  # Async 내 Sync DB 처리용
+from typing import List, Optional
 
-from app.models.master_calendar import MasterCalendar
-from app.schemas.master_calendar import MasterScheduleContext
-from app.schemas.llm_schema import RAGAnalysisResult
-from app.core.timezone import now_kst
-
-from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
 import openai
+from openai import AsyncOpenAI
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool  # Async 내 Sync DB 처리용
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
+
+from app.core.timezone import now_kst
+from app.models.master_calendar import MasterCalendar
+from app.schemas.llm_schema import RAGAnalysisResult
+from app.schemas.master_calendar import MasterScheduleContext
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 class LLMService:
     def __init__(self, openai_client: AsyncOpenAI, max_concurrent_requests: int = 4):
         self.client = openai_client
         self._semaphore = asyncio.Semaphore(max_concurrent_requests)
-        
+
     @retry(
         retry=retry_if_exception_type(openai.RateLimitError),
-        wait=wait_random_exponential(min=1, max=60), # 1초~60초 사이 지수적으로 대기시간 증가
-        stop=stop_after_attempt(5), # 최대 5회 재시도
+        wait=wait_random_exponential(min=1, max=60),  # 1초~60초 사이 지수적으로 대기시간 증가
+        stop=stop_after_attempt(5),  # 최대 5회 재시도
         before_sleep=lambda retry_state: logger.warning(
             f"[OpenAI RateLimit] 429 에러 발생. {retry_state.next_action.sleep}초 후 재시도합니다... (시도 {retry_state.attempt_number})"
-        )
+        ),
     )
     async def _call_gpt_with_retry(self, **kwargs):
         """Semaphore와 Retry가 적용된 GPT 호출 internal 메서드"""
         async with self._semaphore:
             return await self.client.chat.completions.parse(**kwargs)
 
-    def _get_existing_schedules_context(
-        self, db: Session, channel_id: str
-    ) -> List[dict]:
+    def _get_existing_schedules_context(self, db: Session, channel_id: str) -> List[dict]:
         """[RAG Retrieval] ORM 메모리 Overhead 없이 핀포인트 select 프로젝션 수행.
         EncryptedString에 의해 title, location, description은 이미 자동으로 복호화된 상태입니다.
         """
@@ -59,9 +57,10 @@ class LLMService:
                 MasterCalendar.grade2,
                 MasterCalendar.grade3,
             )
-            .where(MasterCalendar.source_channel_id == channel_id,
-                    MasterCalendar.end_datetime >= search_start,
-                    MasterCalendar.start_datetime <= search_end,
+            .where(
+                MasterCalendar.source_channel_id == channel_id,
+                MasterCalendar.end_datetime >= search_start,
+                MasterCalendar.start_datetime <= search_end,
             )
             .order_by(MasterCalendar.start_datetime.asc())
         )
@@ -72,11 +71,14 @@ class LLMService:
         for row in rows:
             row_dict = dict(row)
             target_grades = []
-            if row_dict.pop("grade1", False): target_grades.append(1)
-            if row_dict.pop("grade2", False): target_grades.append(2)
-            if row_dict.pop("grade3", False): target_grades.append(3)
+            if row_dict.pop("grade1", False):
+                target_grades.append(1)
+            if row_dict.pop("grade2", False):
+                target_grades.append(2)
+            if row_dict.pop("grade3", False):
+                target_grades.append(3)
             row_dict["target_grades"] = target_grades
-            
+
             if row_dict.get("start_datetime"):
                 row_dict["start_datetime"] = row_dict["start_datetime"].isoformat()
             if row_dict.get("end_datetime"):
@@ -103,10 +105,8 @@ class LLMService:
         existing_schedules = await run_in_threadpool(
             self._get_existing_schedules_context, db, channel_id
         )
-        
-        context_json_str = json.dumps(
-            existing_schedules, ensure_ascii=False, indent=2
-        )
+
+        context_json_str = json.dumps(existing_schedules, ensure_ascii=False, indent=2)
 
         # 2. RAG System Prompt 작성 (키워드 actions 통일 및 f-string 중괄호 버그 수정)
         system_prompt = f"""너는 대학 및 학사 공지사항을 분석하여 마스터 캘린더를 최신 상태로 관리하는 고성능 AI 도우미다.
@@ -199,12 +199,12 @@ class LLMService:
             )
 
             result: RAGAnalysisResult = response.choices[0].message.parsed
-            
-            '''
+
+            """
             logger.info(
                 f"[{channel_id}] RAG 분석 완료 - 추출된 액션 수: {len(result.actions)}개"
             )
-            '''
+            """
             return result
 
         except Exception as e:

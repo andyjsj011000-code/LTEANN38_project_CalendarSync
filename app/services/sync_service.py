@@ -1,22 +1,17 @@
-import logging
-import hashlib
 import asyncio
-from typing import List, Optional
-from datetime import datetime
-from sqlalchemy.orm import Session
-from sqlalchemy import select
-from typing import Dict, Any, List, Tuple
-from bs4 import BeautifulSoup
+import hashlib
 import json
-import httpx
-import base64
-import pytesseract
-from PIL import Image
-import io
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+from bs4 import BeautifulSoup
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.models.domain import User, UserChannelMapping
 from app.models.master_calendar import MasterCalendar, UserSyncLog
-from app.schemas.llm_schema import ScheduleAction, RAGAnalysisResult
+from app.schemas.llm_schema import RAGAnalysisResult, ScheduleAction
 from app.services.graph_service import GraphService
 from app.services.ocr_service import EasyOCRService
 from app.utils.teams import build_teams_message_link
@@ -51,16 +46,17 @@ def _build_full_description(description: Optional[str], teams_link: Optional[str
     if description and description.strip():
         formatted_desc = description.strip().replace("\n", "<br>")
         desc_parts.append(f"<div>{formatted_desc}</div>")
-    
+
     if teams_link:
         link_html = (
             f'<br><br><a href="{teams_link}" target="_blank" '
             f'style="font-weight: bold; color: #005A9E; text-decoration: underline;">'
-            f'Teams 원본 게시물 바로가기</a>'
+            f"Teams 원본 게시물 바로가기</a>"
         )
         desc_parts.append(link_html)
-        
+
     return "".join(desc_parts)
+
 
 def _split_long_term_actions(actions: List[ScheduleAction]) -> List[ScheduleAction]:
     """
@@ -105,6 +101,7 @@ def _split_long_term_actions(actions: List[ScheduleAction]) -> List[ScheduleActi
 
     return processed_actions
 
+
 class SyncService:
     def __init__(self, graph_service: GraphService, ocr_service: EasyOCRService):
         self.graph = graph_service
@@ -121,14 +118,12 @@ class SyncService:
         team_id: str,
         channel_id: str,
         raw_message_id: str,
-        rag_result: RAGAnalysisResult
+        rag_result: RAGAnalysisResult,
     ):
         stmt = (
             select(User.id, User.grade)
             .join(UserChannelMapping, User.id == UserChannelMapping.user_id)
-            .where(
-                UserChannelMapping.channel_id == channel_id
-            )
+            .where(UserChannelMapping.channel_id == channel_id)
         )
         channel_users = db.execute(stmt).all()
 
@@ -136,7 +131,7 @@ class SyncService:
         teams_link = build_teams_message_link(team_id, channel_id, raw_message_id)
 
         actions_to_process = _split_long_term_actions(rag_result.actions)
-        
+
         for action in actions_to_process:
             if action.action == "SKIP":
                 logger.info(f"[SKIP] 사유: {action.reason}")
@@ -166,11 +161,11 @@ class SyncService:
         end_dt: datetime,
         location: Optional[str],
         full_description: Optional[str],
-        target_grades: List[int]
+        target_grades: List[int],
     ) -> Optional[UserSyncLog]:
         if not _is_target_user(user_grade, target_grades):
-            return None 
-        
+            return None
+
         try:
             outlook_event_id = await self.graph.create_user_calendar_event(
                 user_id=user_id,
@@ -178,18 +173,18 @@ class SyncService:
                 start_dt=start_dt,
                 end_dt=end_dt,
                 location=location,
-                description=full_description
+                description=full_description,
             )
 
             return UserSyncLog(
                 user_id=user_id,
                 master_schedule_id=master_item_id,
-                outlook_event_id=outlook_event_id
+                outlook_event_id=outlook_event_id,
             )
         except Exception as e:
-            '''
+            """
             logger.error(f"User {user_id} 캘린더 CREATE Fan-out 실패: {e}")
-            '''
+            """
             logger.error(f"캘린더 CREATE Fan-out 실패: {e}")
             return None
 
@@ -201,13 +196,15 @@ class SyncService:
         raw_message_id: str,
         teams_link: str,
         action: ScheduleAction,
-        target_users: List[tuple]
+        target_users: List[tuple],
     ):
         start_dt = _parse_datetime(action.start_datetime)
         end_dt = _parse_datetime(action.end_datetime)
 
         if not start_dt or not end_dt:
-            logger.warning(f"[CREATE SKIP] 유효하지 않은 날짜 (start: '{action.start_datetime}', end: '{action.end_datetime}')")
+            logger.warning(
+                f"[CREATE SKIP] 유효하지 않은 날짜 (start: '{action.start_datetime}', end: '{action.end_datetime}')"
+            )
             return
 
         formatted_title = action.title.strip()
@@ -216,7 +213,7 @@ class SyncService:
 
         stmt = select(MasterCalendar.id).where(
             MasterCalendar.source_channel_id == channel_id,
-            MasterCalendar.content_hash == content_hash
+            MasterCalendar.content_hash == content_hash,
         )
         duplicate_id = db.execute(stmt).scalar_one_or_none()
 
@@ -235,16 +232,23 @@ class SyncService:
             grade1=(1 in action.target_grades),
             grade2=(2 in action.target_grades),
             grade3=(3 in action.target_grades),
-            content_hash=content_hash
+            content_hash=content_hash,
         )
-        
+
         db.add(master_item)
         db.flush()
 
         tasks = [
             self._create_single_user_event(
-                u_id, u_grade, master_item.id, formatted_title, start_dt, end_dt,
-                action.location, full_description, action.target_grades
+                u_id,
+                u_grade,
+                master_item.id,
+                formatted_title,
+                start_dt,
+                end_dt,
+                action.location,
+                full_description,
+                action.target_grades,
             )
             for u_id, u_grade in target_users
         ]
@@ -269,7 +273,7 @@ class SyncService:
         end_dt: datetime,
         location: Optional[str],
         full_description: Optional[str],
-        target_grades: List[int]
+        target_grades: List[int],
     ) -> Optional[UserSyncLog]:
         if _is_target_user(user_grade, target_grades):
             if existing_event_id:
@@ -281,12 +285,12 @@ class SyncService:
                         start_dt=start_dt,
                         end_dt=end_dt,
                         location=location,
-                        description=full_description
+                        description=full_description,
                     )
                 except Exception as e:
-                    '''
+                    """
                     logger.error(f"User {user_id} 캘린더 UPDATE Fan-out 실패: {e}")
-                    '''
+                    """
                     logger.error(f"캘린더 UPDATE Fan-out 실패: {e}")
                 return None
             else:
@@ -297,28 +301,24 @@ class SyncService:
                         start_dt=start_dt,
                         end_dt=end_dt,
                         location=location,
-                        description=full_description
+                        description=full_description,
                     )
                     return UserSyncLog(
                         user_id=user_id,
                         master_schedule_id=master_id,
-                        outlook_event_id=outlook_event_id
+                        outlook_event_id=outlook_event_id,
                     )
                 except Exception as e:
-                    '''
+                    """
                     logger.error(f"User {user_id} 캘린더 신규 등록 Fan-out 실패: {e}")
-                    '''
+                    """
                     logger.error(f"캘린더 신규 등록 Fan-out 실패: {e}")
                     return None
         return None
 
     # 기존 마스터 일정을 갱신하고 사용자별 기존 Outlook 일정 ID에 맞춰 변경을 전달한다.
     async def _handle_update(
-        self,
-        db: Session,
-        teams_link: str,
-        action: ScheduleAction,
-        target_users: List[tuple]
+        self, db: Session, teams_link: str, action: ScheduleAction, target_users: List[tuple]
     ):
         if not action.master_schedule_id:
             logger.warning("[UPDATE] master_schedule_id 누락 스킵")
@@ -326,14 +326,14 @@ class SyncService:
 
         master_item = db.get(MasterCalendar, action.master_schedule_id)
         if not master_item:
-            logger.error(f"[UPDATE] 기존 마스터 일정 없음")
+            logger.error("[UPDATE] 기존 마스터 일정 없음")
             return
 
         start_dt = _parse_datetime(action.start_datetime)
         end_dt = _parse_datetime(action.end_datetime)
 
         if not start_dt or not end_dt:
-            logger.warning(f"[UPDATE SKIP] 유효하지 않은 날짜")
+            logger.warning("[UPDATE SKIP] 유효하지 않은 날짜")
             return
 
         formatted_title = action.title.strip()
@@ -344,9 +344,9 @@ class SyncService:
         master_item.end_datetime = end_dt
         master_item.location = action.location
         master_item.description = full_description
-        master_item.grade1 = (1 in action.target_grades)
-        master_item.grade2 = (2 in action.target_grades)
-        master_item.grade3 = (3 in action.target_grades)
+        master_item.grade1 = 1 in action.target_grades
+        master_item.grade2 = 2 in action.target_grades
+        master_item.grade3 = 3 in action.target_grades
         master_item.content_hash = self._generate_content_hash(formatted_title, action)
 
         stmt = select(UserSyncLog.user_id, UserSyncLog.outlook_event_id).where(
@@ -357,9 +357,16 @@ class SyncService:
 
         tasks = [
             self._update_single_user_event(
-                u_id, u_grade, master_item.id, log_map.get(u_id),
-                formatted_title, start_dt, end_dt, action.location,
-                full_description, action.target_grades
+                u_id,
+                u_grade,
+                master_item.id,
+                log_map.get(u_id),
+                formatted_title,
+                start_dt,
+                end_dt,
+                action.location,
+                full_description,
+                action.target_grades,
             )
             for u_id, u_grade in target_users
         ]
@@ -376,14 +383,11 @@ class SyncService:
     # ------------------------------------------------------------------
     async def _delete_single_user_event(self, user_id: str, outlook_event_id: str):
         try:
-            await self.graph.delete_user_calendar_event(
-                user_id=user_id,
-                event_id=outlook_event_id
-            )
+            await self.graph.delete_user_calendar_event(user_id=user_id, event_id=outlook_event_id)
         except Exception as e:
-            '''
+            """
             logger.error(f"User {user_id} 캘린더 DELETE Fan-out 실패: {e}")
-            '''
+            """
             logger.error(f"캘린더 DELETE Fan-out 실패: {e}")
 
     async def _handle_delete(self, db: Session, action: ScheduleAction):
@@ -393,7 +397,7 @@ class SyncService:
 
         master_item = db.get(MasterCalendar, action.master_schedule_id)
         if not master_item:
-            logger.error(f"[DELETE] 기존 마스터 일정 없음")
+            logger.error("[DELETE] 기존 마스터 일정 없음")
             return
 
         stmt = select(UserSyncLog.user_id, UserSyncLog.outlook_event_id).where(
@@ -402,16 +406,14 @@ class SyncService:
         sync_logs = db.execute(stmt).all()
 
         tasks = [
-            self._delete_single_user_event(u_id, evt_id)
-            for u_id, evt_id in sync_logs if evt_id
+            self._delete_single_user_event(u_id, evt_id) for u_id, evt_id in sync_logs if evt_id
         ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
         db.delete(master_item)
         db.commit()
-        
-    
+
     async def extract_message_content(
         self,
         msg_payload: Dict[str, Any],
@@ -433,18 +435,22 @@ class SyncService:
                 if self.graph._access_token:
                     img_tags = soup.find_all("img")
                     headers = {"Authorization": f"Bearer {self.graph._access_token}"}
-                    
+
                     for img in img_tags:
                         img_url = img.get("src")
                         if img_url and "hostedContents" in img_url:
                             try:
-                                res = await self.graph._client.get(img_url, headers=headers, follow_redirects=True)
+                                res = await self.graph._client.get(
+                                    img_url, headers=headers, follow_redirects=True
+                                )
                                 if res.status_code == 200:
                                     # EasyOCRService를 사용하여 bytes에서 바로 텍스트 추출
                                     extracted_text = self.ocr_service.extract_text(res.content)
-                                    
+
                                     if extracted_text:
-                                        ocr_texts.append(f"[첨부 이미지 내 텍스트]:\n{extracted_text}")
+                                        ocr_texts.append(
+                                            f"[첨부 이미지 내 텍스트]:\n{extracted_text}"
+                                        )
                             except Exception as e:
                                 logger.warning(f"이미지 다운로드 및 OCR 실패 ({img_url}): {e}")
 

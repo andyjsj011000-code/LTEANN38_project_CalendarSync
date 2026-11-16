@@ -1,10 +1,12 @@
-#app/core/security.py
+# app/core/security.py
 import logging
+
 from cryptography.fernet import Fernet
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # DATA_ENCRYPTION_KEY는 config.py에서 필수(Required) 필드로 강제되므로
 # 값이 없으면 앱 기동 시점(Settings 로드 단계)에서 즉시 실패한다.
@@ -25,5 +27,7 @@ def decrypt_text(cipher_text: str) -> str:
     try:
         return cipher_suite.decrypt(cipher_text.encode("utf-8")).decode("utf-8")
     except Exception:
-        logger.warning("복호화 실패: 키 불일치 또는 손상된 데이터일 수 있음 (원본 값을 그대로 반환)")
+        logger.warning(
+            "복호화 실패: 키 불일치 또는 손상된 데이터일 수 있음 (원본 값을 그대로 반환)"
+        )
         return cipher_text  # 복호화 실패 시 원본 반환 (기존 평문 호환용)
