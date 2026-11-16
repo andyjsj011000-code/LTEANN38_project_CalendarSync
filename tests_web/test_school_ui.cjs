@@ -7,27 +7,32 @@ const vm = require('node:vm');
 const dir = path.resolve(__dirname, '../web_service/static');
 const source = name => fs.readFileSync(path.join(dir, name), 'utf8');
 const listeners = {};
-const elements = Object.fromEntries(['app', 'modal', 'topbar', 'account-name', 'nav-today', 'nav-calendar', 'toast', 'login-error'].map(id => [id, {innerHTML: '', textContent: '', hidden: true, classList: {toggle() {}}, replaceChildren() {this.innerHTML = '';}}]));
+const elements = Object.fromEntries(['app', 'modal', 'topbar', 'account-name', 'nav-today', 'nav-calendar', 'nav-profile', 'toast', 'login-error'].map(id => [id, {innerHTML: '', textContent: '', hidden: true, classList: {toggle() {}}, setAttribute() {}, removeAttribute() {}, replaceChildren() {this.innerHTML = '';}}]));
 elements.modal.close = function () {this.open = false;};
 elements.modal.showModal = function () {this.open = true;};
 const requests = [];
 let signedIn = false;
+const storage = new Map();
 const item = {id: 'sample', source: 'teams', title: '<img src=x onerror=alert(1)>', notes: '<script>bad()</script>', channel: '예시 공지', start_date: '2026-10-20', end_date: '2026-10-25', time: null, kind: 'assignment', completed: false, cancelled: false};
 const context = {
-  window: {}, location: {protocol: 'https:', search: ''}, URL, console, Intl, Date, Set, AbortController, DOMException,
+  window: {localStorage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value)}}, location: {protocol: 'https:', search: ''}, URL, console, Intl, Date, Set, AbortController, DOMException,
   setTimeout() {return 1;}, clearTimeout() {},
   document: {documentElement: {dataset: {mode: 'school'}}, querySelector(s) {return elements[s.slice(1)] || null;}, querySelectorAll() {return [];}, addEventListener(type, handler) {listeners[type] = handler;}},
   async fetch(url, options) {
     requests.push({url, options});
     let status = 200, data;
-    if (url === '/api/service') data = {synthetic_data_only: true};
-    else if (url === '/api/me') {status = signedIn ? 200 : 401; data = signedIn ? {id: 'user', name: '테스터', csrf_token: 'test-csrf'} : {detail: 'not signed in'};}
+    if (url === '/api/service') data = {synthetic_data_only: true, assignments_enabled: true, classroom_enabled: true, classroom_google_enabled: true, mode: 'test-server'};
+    else if (url === '/api/me') {status = signedIn ? 200 : 401; data = signedIn ? {id: 'user', name: '테스터', email: 'student@school.example', csrf_token: 'test-csrf'} : {detail: 'not signed in'};}
     else if (url === '/auth/logout-all') {signedIn = false; status = 204;}
     else if (url === '/auth/logout') {signedIn = false; status = 204;}
     else if (url === '/api/today') data = {date: '2026-10-22', teams: [item], personal: []};
     else if (url.startsWith('/api/calendar')) data = {items: [item]};
     else if (url === '/api/channels') data = [{id: 'class', name: '예시', enabled: true}];
-    else if (url === '/api/settings') data = {preferences: {disabled_kinds: []}, connection: {state:'connected'}};
+    else if (url === '/api/settings') data = {preferences: {disabled_kinds: []}, connection: {state:'connected', background_enabled: true}};
+    else if (url === '/api/assignments') data = {items: [], state: 'permission_required'};
+    else if (url === '/api/classroom') data = {connected: true, method: 'google', snapshot: null, announcement_analysis: false};
+    else if (url === '/api/push') data = {configured: true, registered: false, background_enabled: true};
+    else if (url === '/api/changes') data = {items: []};
     else if (url === '/api/tasks' && options.method === 'POST') {status = 201; data = {id: 'saved-task'};}
     else throw new Error('Unexpected request: ' + url);
     return {status, ok: status < 400, async json() {return data;}};
@@ -35,6 +40,8 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(source('beta-calendar.js'), context);
+vm.runInContext(source('beta-assignments.js'), context);
+vm.runInContext(source('beta-profile.js'), context);
 vm.runInContext(source('beta.js'), context);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const click = data => listeners.click({target: {closest() {return {dataset: data};}}});
@@ -48,6 +55,17 @@ const click = data => listeners.click({target: {closest() {return {dataset: data
   assert.match(elements.app.innerHTML, /오늘 할 일/);
   assert.match(elements.app.innerHTML, /&lt;img/); assert.ok(!elements.app.innerHTML.includes('<img'));
   assert.equal(elements['account-name'].textContent, '테스터');
+  await click({action: 'profile'});
+  assert.match(elements.app.innerHTML, /마이페이지/);
+  assert.match(elements.app.innerHTML, /student@school\.example/);
+  assert.match(elements.app.innerHTML, /Teams 과제 읽기[\s\S]*?승인 필요/);
+  assert.match(elements.app.innerHTML, /Google 클래스룸 읽기[\s\S]*?연결됨/);
+  assert.match(elements.app.innerHTML, /브라우저 알림[\s\S]*?꺼짐/);
+  assert.ok(requests.some(request => request.url === '/api/push'));
+  listeners.change({target: {name: 'profile-theme', value: 'dark', dataset: {}}});
+  assert.equal(context.document.documentElement.dataset.theme, 'dark');
+  vm.runInContext(source('beta-profile.js'), context);
+  assert.equal(context.document.documentElement.dataset.theme, 'dark');
   await click({action: 'calendar'});
   assert.match(elements.app.innerHTML, /range-event/); assert.match(elements.app.innerHTML, /마감/);
   assert.match(elements.app.innerHTML, /2026년 10월/);

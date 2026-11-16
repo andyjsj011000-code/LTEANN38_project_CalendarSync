@@ -128,6 +128,7 @@ REQUIRED_FILES = (
     "web_service/static/beta-task-drafts.js",
     "web_service/static/beta.css",
     "web_service/static/beta.js",
+    "web_service/static/beta-profile.js",
     "web_service/static/icon.svg",
     "web_service/static/index.html",
     "web_service/static/manifest.webmanifest",

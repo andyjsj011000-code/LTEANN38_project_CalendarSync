@@ -19,6 +19,8 @@
   const C = window.BetaCalendar;
   const L = window.BetaListControls;
   const A = window.BetaAssignments;
+  const profile = window.BetaProfile;
+  let profileRequest = null;
   let assignmentRequest = null, assignmentSequence = 0;
   const assignmentsEnabled = () => !!(S.service?.assignments_enabled && A);
   const assignmentCalendar = () => [...(S.assignments.items || []),...classroomAssignments()].filter(e => e.end_date);
@@ -29,6 +31,7 @@
   S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
   S.listFilters = L?.createState() || {query:'',unfinishedOnly:false};
   S.classroom = null;
+  S.profilePush = null; S.profileConnection = undefined;
   let classroomRevision = 0, classroomTimer = null, classroomRequest = null;
   const plannerEnabled = () => !!S.service?.planner_enhancements;
   const shownItems = items => plannerEnabled() && L ? L.filter(items,S.listFilters) : items;
@@ -122,6 +125,9 @@
     }
   }
   function clearPrivate() {
+    profileRequest?.abort(); profileRequest = null;
+    S.profilePush = null; S.profileConnection = undefined;
+    if (S.view === 'profile') S.view = 'today';
     assignmentRequest?.abort(); assignmentRequest = null; assignmentSequence++;
     S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
     stopClassroomRefresh(); S.classroom = null; classroomRevision++;
@@ -151,7 +157,7 @@
   function renderLoadState(error = S.loadError) {
     lastRenderKey = null;
     if (!S.me) return;
-    if (assignmentsEnabled() && S.view === 'assignments') return renderContent();
+    if ((assignmentsEnabled() && S.view === 'assignments') || (profile && S.view === 'profile')) return renderContent();
     if ($('#nav-assignments')) $('#nav-assignments').hidden = !assignmentsEnabled();
     const pending = !!S.permissionPending, failed = error && !pending;
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
@@ -629,10 +635,37 @@
     if (button) {button.disabled = !!(S.syncing || S.busy); button.textContent = S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'; button.setAttribute('aria-busy', String(!!S.syncing));}
     if (status) status.textContent = S.syncMessage || '';
   }
+  function profileState() {
+    return {account:{name:S.me.name,email:S.me.email}, service:S.service || {},
+      connection:S.profileConnection ?? S.connection, teamsUnverified:S.teamsUnverified,
+      assignments:{state:S.assignments.loading ? 'idle' : S.assignments.state},
+      classroom:S.classroom && {connected:S.classroom.connected,reauth:S.classroom.reauth,announcement_analysis:S.classroom.announcement_analysis},
+      classroomError:!!S.partErrors.classroom, push:S.profilePush,
+      browserPermission:window.Notification?.permission, hasPreferences:!!S.prefs};
+  }
+  async function loadProfileStatus() {
+    if (!S.me || profileRequest) return;
+    const epoch = authEpoch;
+    const controller = new AbortController(); profileRequest = controller;
+    try {
+      const options = {signal:controller.signal};
+      const [settings, push] = await Promise.allSettled([api('/api/settings', options), api('/api/push', options)]);
+      if (!activeView(epoch) || controller.signal.aborted) return;
+      const lostSession = [settings,push].find(result => result.status === 'rejected' && [401,403].includes(result.reason?.status));
+      if (lostSession) return failure(lostSession.reason);
+      if (settings.status === 'fulfilled') {
+        S.profileConnection = settings.value.connection ?? {state:'not_connected'};
+        S.prefs ??= settings.value.preferences;
+      } else S.profileConnection = {state:'refresh_unavailable'};
+      S.profilePush = push.status === 'fulfilled' ? push.value : false;
+      if (S.view === 'profile') render();
+    } finally {if (profileRequest === controller) profileRequest = null;}
+  }
   function render() {
     rememberQuickDraft();
     if (S.me && listControls?.isComposing()) return;
-    const key = JSON.stringify([S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.teamsUnverified,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,S.assignments,S.assignmentFilter,S.classroom,plannerStatus,!!draftUi?.available,undoTrash?.id]);
+    const key = JSON.stringify(S.me && S.view === 'profile' ? ['profile',S.me.id,profileState()]
+      : [S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.teamsUnverified,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,S.assignments,S.assignmentFilter,S.classroom,plannerStatus,!!draftUi?.available,undoTrash?.id]);
     if (key === lastRenderKey) {updateRefreshStatus(); updateSyncStatus(); return;}
     const searchFocus = listControls?.captureFocus();
     const input = $('#quick-form')?.elements?.title;
@@ -644,7 +677,22 @@
   }
   function renderContent() {
     if (!S.me) return;
+    const profileNav = $('#nav-profile');
+    if (profileNav) {
+      profileNav.classList.toggle('active', S.view === 'profile');
+      if (S.view === 'profile') profileNav.setAttribute('aria-current', 'page');
+      else profileNav.removeAttribute('aria-current');
+    }
     if ($('#nav-assignments')) {$('#nav-assignments').hidden = !assignmentsEnabled(); $('#nav-assignments').classList.toggle('active',S.view === 'assignments');}
+    if (profile && S.view === 'profile') {
+      topbar.hidden = false; $('#account-name').textContent = S.me.name;
+      $('#nav-today').classList.toggle('active',false); $('#nav-calendar').classList.toggle('active',false);
+      const openRows = new Set(Array.from(root.querySelectorAll?.('[data-profile-section][open]') || [], row => row.dataset.profileSection));
+      const focus = document.activeElement?.id;
+      root.innerHTML = profile.render(profileState(), openRows);
+      if (focus?.startsWith('profile-summary-')) document.getElementById(focus)?.focus({preventScroll:true});
+      return;
+    }
     if (assignmentsEnabled() && S.view === 'assignments') {
       topbar.hidden = false; $('#account-name').textContent = S.me.name;
       $('#nav-today').classList.toggle('active',false); $('#nav-calendar').classList.toggle('active',false);
@@ -1081,11 +1129,11 @@
     const button = event.target.closest('button'); if (!button || button.disabled) return;
     const action = button.dataset.action;
     if (S.busy && !['logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
-    if (!S.today && !['today', 'calendar', 'assignments', 'refresh-assignments', 'refresh', 'retry-boot', 'logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
+    if (!S.today && S.view !== 'profile' && !['today', 'calendar', 'assignments', 'profile', 'refresh-assignments', 'refresh', 'retry-boot', 'logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
     const sessionEpoch = authEpoch, ownerDialog = dialogEpoch;
     try {
-      const leavesForm = button.dataset.detail || ['close','today','calendar','assignments','new','filters','hidden','feedback','changes','notifications','security','task-trash','classroom-courses','classroom-analysis'].includes(action);
-      if (leavesForm && personalForm()) {if (!await leaveTaskForm() || !activeView(sessionEpoch) || ownerDialog !== dialogEpoch) return; if (['today','calendar','assignments'].includes(action)) closeDialog();}
+      const leavesForm = button.dataset.detail || ['close','today','calendar','assignments','profile','new','filters','hidden','feedback','changes','notifications','security','task-trash','classroom-courses','classroom-analysis'].includes(action);
+      if (leavesForm && personalForm()) {if (!await leaveTaskForm() || !activeView(sessionEpoch) || ownerDialog !== dialogEpoch) return; if (['today','calendar','assignments','profile'].includes(action)) closeDialog();}
       if (plannerEnabled() && action === 'task-trash') return await openTrash();
       if (plannerEnabled() && action === 'restore-trash') {if (trashItems.some(item => item.id === button.dataset.trashId)) return await restoreTrash(button.dataset.trashId); return;}
       if (plannerEnabled() && action === 'undo-trash') return await restoreTrash(undoTrash?.id);
@@ -1145,6 +1193,9 @@
       if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); draftInputChanged(); return;}
       if (button.dataset.restore !== undefined) {const e = hiddenItems[Number(button.dataset.restore)]; return mutateState(e, {hidden: false}, '일정을 복원했어요.');}
       if (action === 'close') {closeDialog(); return;}
+      if (action === 'profile' && profile && S.me) {S.view = 'profile'; render(); return await loadProfileStatus();}
+      if (action === 'profile-refresh') return await Promise.allSettled([load(),loadProfileStatus()]);
+      if (action === 'profile-logout-all') return openDialog('모든 기기에서 로그아웃할까요?', '<p>CalendarSync에 로그인한 모든 기기의 세션과 백그라운드 연동을 종료해요.</p>', '<button class="secondary" data-action="close">취소</button><button class="danger" data-action="logout-all">모든 기기에서 로그아웃</button>');
       if (action === 'today' || action === 'calendar' || (action === 'assignments' && assignmentsEnabled())) {S.view = action; if (S.me) render(); return;}
       if (action === 'refresh') {if (!S.refreshing) return await load(); return;}
       if (action === 'retry-boot') return await boot();
@@ -1177,6 +1228,7 @@
   });
   document.addEventListener('change', event => {
     const el = event.target;
+    if (el.name === 'profile-theme') {profile?.setTheme(el.value); return;}
     if (!S.today || S.loading) return;
     if (el.dataset.complete) {
       const e = find(el.dataset.complete, el.dataset.source); if (!e) return; const checked = el.checked; el.checked = e.completed;
@@ -1316,6 +1368,8 @@
   async function notificationsPanel() {
     const push = await readDialog('/api/push');
     if (!push) return;
+    S.profilePush = push;
+    if (S.view === 'profile') render();
     openDialog('이 기기의 알림', `<p>알림 상태: <strong>${push.registered ? '켜짐' : '꺼짐'}</strong></p><p class="muted">화면이 닫혀 있어도 지원되는 브라우저에서 알림을 받아요. 잠금화면에는 일정 제목 대신 확인 안내만 표시해요.</p>${!push.configured ? '<p class="error-message">서버의 Web Push 키가 아직 설정되지 않았어요.</p>' : ''}${!push.background_enabled ? '<p class="error-message">알림을 받으려면 다시 로그인할 때 이 기기 연동 유지를 선택해 주세요.</p>' : ''}<form id="notification-form"><label class="toggle-row">아침 요약 알림<input name="morning_enabled" type="checkbox" ${S.prefs.morning_enabled ? 'checked' : ''}></label><label class="field"><span class="field-label">아침 알림 시각</span><input name="morning_time" type="time" required value="${esc(S.prefs.morning_time || '07:00')}"></label><button class="secondary" type="submit">아침 설정 저장</button></form><p class="fine muted">아이폰·아이패드는 홈 화면에 추가한 웹앱에서 알림을 켜야 할 수 있어요. 브라우저·기기 설정에 따라 수신이 제한될 수 있어요.</p>`, `<button class="secondary" data-action="push-disable">이 기기 알림 끄기</button><button class="secondary" data-action="push-test" ${!push.registered ? 'disabled' : ''}>테스트 알림</button><button class="primary" data-action="push-enable" ${!push.configured || !push.background_enabled ? 'disabled' : ''}>이 기기 알림 켜기</button>`);
   }
   async function enablePush() {
