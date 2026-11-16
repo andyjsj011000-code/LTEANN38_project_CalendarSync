@@ -123,18 +123,20 @@ def bot(monkeypatch):
         engine.dispose()
 
 
-def send_command(bot, text):
-    return bot.client.post(
-        "/api/messages",
-        json={
-            "type": "message",
-            "id": "test-activity",
-            "from": {"aadObjectId": STUDENT},
-            "conversation": {"id": CONVERSATION},
-            "serviceUrl": CONNECTOR,
-            "text": text,
-        },
-    )
+def send_command(
+    bot, text, *, activity_id="test-activity", channel="msteams", conversation=CONVERSATION
+):
+    activity = {
+        "type": "message",
+        "channelId": channel,
+        "from": {"aadObjectId": STUDENT},
+        "conversation": {"id": conversation},
+        "serviceUrl": CONNECTOR,
+        "text": text,
+    }
+    if activity_id is not None:
+        activity["id"] = activity_id
+    return bot.client.post("/api/messages", json=activity)
 
 
 @pytest.mark.parametrize("statuses", [(201,), (401, 202)])
@@ -192,3 +194,73 @@ def test_status_keeps_service_and_account_lines_without_grade(bot, profile):
 def test_grade_can_be_inferred_without_override_configuration(bot):
     bot.settings.GRADE_OVERRIDES = None
     assert bot.webhook.calculate_grade_from_email("25student@example.invalid", 2026) == 2
+
+
+@pytest.mark.parametrize("activity_ids", [("help-1", "schedule-1"), (None, None)])
+def test_separate_commands_from_same_user_are_processed(bot, activity_ids):
+    help_reply = send_command(bot, "/help", activity_id=activity_ids[0])
+    schedule_reply = send_command(bot, "/schedule", activity_id=activity_ids[1])
+
+    assert help_reply.json() == {"status": "ok"}
+    assert schedule_reply.json() is None
+    assert len(bot.sent) == 2
+    assert "사용 안내" in bot.sent[0]
+    assert SCHEDULE_TITLE in bot.sent[1]
+
+
+def test_repeat_delivery_is_ignored_in_the_same_channel_only(bot):
+    assert send_command(bot, "/help").json() == {"status": "ok"}
+    repeated = send_command(bot, "/help")
+    assert repeated.json() == {"status": "ok", "message": "duplicate_event_ignored"}
+    assert send_command(bot, "/help", channel="other-test-channel").json() == {"status": "ok"}
+    assert len(bot.sent) == 2
+    assert bot.graph.get_user.await_count == 2
+
+
+def test_activity_id_is_scoped_to_conversation(bot):
+    assert send_command(bot, "/schedule").json() is None
+    assert send_command(bot, "/schedule", conversation="other-conversation").json() is None
+    assert len(bot.sent) == 2
+
+
+def test_burst_limit_is_separate_from_retry_deduplication(bot, monkeypatch):
+    now = [100.0]
+    cache = bot.webhook.TTLCache(maxsize=1024, ttl=30, timer=lambda: now[0])
+    monkeypatch.setattr(bot.webhook, "RECENT_MESSAGE_REQUESTS", cache)
+    for index in range(5):
+        activity_id = f"activity-{index}"
+        assert send_command(bot, "/help", activity_id=activity_id).json() == {"status": "ok"}
+        retry = send_command(bot, "/help", activity_id=activity_id)
+        assert retry.json() == {"status": "ok", "message": "duplicate_event_ignored"}
+
+    limited = send_command(bot, "/help", activity_id="another-event")
+    assert limited.status_code == 429
+    assert limited.headers["Retry-After"] == "30"
+    assert len(bot.sent) == 5
+
+    now[0] += 30
+    assert send_command(bot, "/help", activity_id="another-event").json() == {"status": "ok"}
+    assert len(bot.sent) == 6
+
+
+def test_command_does_not_suppress_lifecycle_events(bot):
+    assert send_command(bot, "/help").json() == {"status": "ok"}
+    event = {
+        "type": "conversationUpdate",
+        "from": {"aadObjectId": STUDENT},
+        "conversation": {"id": CONVERSATION},
+        "serviceUrl": CONNECTOR,
+    }
+    assert bot.client.post("/api/messages", json=event).status_code == 200
+    event["type"] = "installationUpdate"
+    repeated_welcome = bot.client.post("/api/messages", json=event)
+    assert repeated_welcome.json() == {"status": "ok", "message": "duplicate_event_ignored"}
+    assert len(bot.sent) == 2
+    assert "서비스가 정상 연결되었습니다" in bot.sent[1]
+
+
+def test_missing_sender_does_not_call_graph(bot):
+    response = bot.client.post("/api/messages", json={"type": "message"})
+
+    assert response.json() == {"status": "ok", "message": "no_user_id_in_activity"}
+    bot.graph.get_user.assert_not_awaited()

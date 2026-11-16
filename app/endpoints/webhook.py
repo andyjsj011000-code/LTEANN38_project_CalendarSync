@@ -1,11 +1,13 @@
 # app/endpoints/webhook.py
 import logging
 import re
+from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
 from cachetools import TTLCache
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,9 +22,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Webhook"])
 
-RECENT_SYNC_REQUESTS: TTLCache[str, float] = TTLCache(
+RECENT_LIFECYCLE_USERS: TTLCache[str, None] = TTLCache(
     maxsize=100, ttl=settings.DUPLICATE_WEBHOOK_DEBOUNCE_SECONDS
 )
+RECENT_MESSAGE_ACTIVITIES: TTLCache[tuple[str, str, str], None] = TTLCache(
+    maxsize=1024, ttl=settings.DUPLICATE_WEBHOOK_DEBOUNCE_SECONDS
+)
+MESSAGE_RATE_LIMIT = 5
+MESSAGE_RATE_WINDOW_SECONDS = 30
+RECENT_MESSAGE_REQUESTS: TTLCache[str, deque[float]] = TTLCache(
+    maxsize=1024, ttl=MESSAGE_RATE_WINDOW_SECONDS
+)
+
+
+def record_message_request(user_id: str) -> bool:
+    """사용자별 최근 30초의 메시지 요청을 세고 허용한 요청만 기록한다."""
+    now = RECENT_MESSAGE_REQUESTS.timer()
+    requests = RECENT_MESSAGE_REQUESTS.get(user_id)
+    if requests is None:
+        requests = deque()
+    while requests and requests[0] <= now - MESSAGE_RATE_WINDOW_SECONDS:
+        requests.popleft()
+    if len(requests) >= MESSAGE_RATE_LIMIT:
+        return False
+    requests.append(now)
+    RECENT_MESSAGE_REQUESTS[user_id] = requests
+    return True
 
 
 def calculate_grade_from_email(email: Optional[str], current_year: int) -> Optional[int]:
@@ -109,20 +134,40 @@ async def teams_event_webhook(
     action = data.get("action")
     activity_type = data.get("type")
     now_utc = datetime.now(timezone.utc)
-    now_ts = now_utc.timestamp()
 
-    from_user = data.get("from", {})
+    from_user = data.get("from") or {}
     user_id = from_user.get("aadObjectId") or from_user.get("id")
+    if not isinstance(user_id, str) or not user_id.strip():
+        return {"status": "ok", "message": "no_user_id_in_activity"}
     user_conversation = data.get("conversation") or {}
     user_conversation_id = user_conversation.get("id")
     service_url = data.get("serviceUrl")
 
-    # 1. 중복 이벤트 검증
-    last_sync_time = RECENT_SYNC_REQUESTS.get(user_id, 0)
-    if now_ts - last_sync_time < settings.DUPLICATE_WEBHOOK_DEBOUNCE_SECONDS:
-        return {"status": "ok", "message": "duplicate_event_ignored"}
-
-    RECENT_SYNC_REQUESTS[user_id] = now_ts
+    if activity_type == "message":
+        # 활동 ID가 있을 때만 동일한 Teams 이벤트의 재전송으로 판단한다.
+        channel_id = data.get("channelId") or "msteams"
+        activity_id = data.get("id")
+        identity = (channel_id, user_conversation_id, activity_id)
+        activity_key = (
+            identity
+            if all(isinstance(value, str) and value.strip() for value in identity)
+            else None
+        )
+        if activity_key is not None and activity_key in RECENT_MESSAGE_ACTIVITIES:
+            return {"status": "ok", "message": "duplicate_event_ignored"}
+        if not record_message_request(user_id):
+            return JSONResponse(
+                status_code=429,
+                content={"status": "error", "message": "message_rate_limited"},
+                headers={"Retry-After": str(MESSAGE_RATE_WINDOW_SECONDS)},
+            )
+        if activity_key is not None:
+            RECENT_MESSAGE_ACTIVITIES[activity_key] = None
+    else:
+        # 설치 시 함께 오는 두 이벤트의 안내 중복은 기존처럼 묶어서 처리한다.
+        if user_id in RECENT_LIFECYCLE_USERS:
+            return {"status": "ok", "message": "duplicate_event_ignored"}
+        RECENT_LIFECYCLE_USERS[user_id] = None
 
     # Graph 조회가 실패해도 계정과 학년을 미확인 상태로 처리한다.
     user_email = None
@@ -141,9 +186,6 @@ async def teams_event_webhook(
         logger.warning(f"[Graph API] 이메일 조회 실패: {ge}")
 
     user_grade = calculate_grade_from_email(user_email, now_utc.year)
-
-    if not user_id:
-        return {"status": "ok", "message": "no_user_id_in_activity"}
 
     try:
         if activity_type == "installationUpdate" and action == "remove":
@@ -234,7 +276,7 @@ async def teams_event_webhook(
                         "  - '/help': 도움말 출력\n"
                         "  - '/status': 서비스 연결 상태 및 서버 상태 확인\n"
                         "  - '/schedule': 오늘의 일정 불러오기\n\n"
-                        "서버 과부화 방지를 위해 명령어는 30초 타임아웃이 있습니다"
+                        f"명령어는 {MESSAGE_RATE_WINDOW_SECONDS}초에 {MESSAGE_RATE_LIMIT}회까지 사용할 수 있습니다."
                     )
 
                 elif clean_text in ("/status", "status"):
