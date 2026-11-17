@@ -237,3 +237,73 @@ input, select, textarea { color: var(--ink); }
   .notification-layout { grid-template-columns: minmax(0, 1fr); }
   .notification-layout form { padding-top: 12px; border-top: 1px solid var(--line); }
 }
+
+@media (forced-colors: none) {
+  input[type="checkbox"] {
+    appearance: none;
+    display: inline-grid;
+    place-items: center;
+    width: 17px;
+    height: 17px;
+    flex: none;
+    border: 1px solid var(--muted);
+    border-radius: 4px;
+    background: var(--surface);
+    --checkbox-fill: var(--primary-fill);
+  }
+  .task-row.personal input[type="checkbox"] { --checkbox-fill: var(--green); }
+  input[type="checkbox"]:checked {
+    border-color: var(--checkbox-fill);
+    background: var(--checkbox-fill);
+  }
+  input[type="checkbox"]:checked::before {
+    content: "";
+    width: 13px;
+    height: 13px;
+    background: var(--primary-text);
+    clip-path: polygon(5% 50%, 19% 36%, 39% 56%, 81% 15%, 95% 29%, 39% 85%);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .toast:not([hidden]) { animation: motion-fade-in 240ms ease-out; }
+  .toast.toast-leaving:not([hidden]) { animation: motion-fade-out 200ms ease-in both; }
+  dialog[open] { animation: dialog-enter 280ms ease-out; }
+  dialog[open]::backdrop { animation: motion-fade-in 280ms ease-out; }
+  dialog[open].dialog-leaving { animation: dialog-exit 200ms ease-in both; }
+  dialog[open].dialog-leaving::backdrop { animation: motion-fade-out 200ms ease-in both; }
+  .page-title-enter { animation: heading-enter 240ms ease-out; }
+  .page-subtitle-enter { animation: heading-enter 240ms ease-out 80ms both; }
+
+  .loading::before,
+  .boot-status::before,
+  [data-load-state="loading"] > [role="status"] h2::before,
+  .assignment-intro [aria-busy="true"]::before {
+    content: "";
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    flex: none;
+    margin-inline-end: 7px;
+    vertical-align: -2px;
+    border: 2px solid var(--line);
+    border-top-color: var(--blue);
+    border-radius: 50%;
+    animation: loading-spin 400ms linear infinite;
+  }
+  @media (forced-colors: none) {
+    input[type="checkbox"][data-check-motion]:checked::before {
+      mask: linear-gradient(#000 0 0) left center / 100% 100% no-repeat;
+      animation: check-draw 240ms ease-in-out;
+      animation-delay: var(--check-motion-delay, 0ms);
+    }
+  }
+}
+
+@keyframes motion-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes motion-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes dialog-enter { from { opacity: 0; scale: .9; } to { opacity: 1; scale: 1; } }
+@keyframes dialog-exit { from { opacity: 1; scale: 1; } to { opacity: 0; scale: .96; } }
+@keyframes heading-enter { from { opacity: 0; translate: 0 4px; } to { opacity: 1; translate: 0 0; } }
+@keyframes loading-spin { to { transform: rotate(360deg); } }
+@keyframes check-draw { from { mask-size: 0 100%; } to { mask-size: 100% 100%; } }

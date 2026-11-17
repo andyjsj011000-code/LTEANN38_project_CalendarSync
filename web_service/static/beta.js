@@ -6,12 +6,15 @@
   let activeLoad = null, monthRequest = null, monthEpoch = 0;
   let mutationSettled = Promise.resolve(), mutationRevision = 0;
   let dialogEpoch = 0, dialogRequestId = 0, lastRenderKey = null, dialogContainsTeams = false;
+  let lastHeadingView = null;
+  let checkMotion = null;
   const pausedFilters = new WeakMap();
   let ingestionTimer = null, ingestionAttempts = 0, ingestionDeadline = 0, ingestionRefresh = false, ingestionFinalNeeded = false;
   let checkingTimer = null, checkingAttempts = 0, checkingDeadline = 0, checkingRefresh = false, teamsAccessRevision = 0;
   const readRequests = new Set();
   let reminderRules = null, reminderCustomInitial = '';
   const activeView = epoch => epoch === authEpoch && !!S.me;
+  const motionEnabled = () => !!window.matchMedia?.('(prefers-reduced-motion: no-preference)').matches;
   const testServer = () => ['test-server','preview'].includes(S.service?.mode);
   let reviewItems = [], reviewDialogItems = new Map();
   const connectionText = {refresh_unavailable:'일시적으로 연결을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.', connected:'Teams 권한과 일정 연결을 확인했어요.', checking:'Teams 접근 권한을 확인하고 있어요.', not_connected:'Teams 연결을 확인해 주세요.', source_not_configured:'공지 수집 설정이 아직 준비되지 않았어요. 연결 상태에서 확인해 주세요.', source_unavailable:'학교 일정을 가져오지 못해 Teams 표시를 중단했어요. 개인 할 일은 사용할 수 있어요.', verification_failed:'Teams 접근 권한을 확인하지 못해 표시를 중단했어요.', reauth_required:'Microsoft 계정으로 다시 로그인해 주세요.', account_not_allowed:'학교 소속 계정인지 확인해 주세요.', refresh_busy:'Microsoft 연동을 갱신 중이에요. 잠시 후 다시 확인해 주세요.'};
@@ -80,10 +83,19 @@
     return C.mergeClassroomSchedules(source === 'all' ? items : items.filter(item => calendarSourceOf(item) === source));
   }
   const period = e => e.start_date === e.end_date ? pretty(e.start_date) : `${pretty(e.start_date)} ~ ${pretty(e.end_date)}`;
-  let toastTimer;
+  let toastTimer, toastFadeTimer;
   function toast(message, error = false) {
-    const el = $('#toast'); el.textContent = message; el.className = 'toast' + (error ? ' error' : ''); el.hidden = false;
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => {el.hidden = true;}, 6000);
+    const el = $('#toast');
+    clearTimeout(toastTimer);
+    clearTimeout(toastFadeTimer);
+    el.textContent = message;
+    el.className = 'toast' + (error ? ' error' : '');
+    el.hidden = false;
+    if (motionEnabled()) {
+      // CSS의 200ms Fade out을 포함해 기존 6초 표시 시간을 유지한다.
+      toastFadeTimer = setTimeout(() => {el.className += ' toast-leaving';}, 5800);
+    }
+    toastTimer = setTimeout(() => {el.hidden = true;}, 6000);
   }
   // CSRF 헤더·취소·시간 제한을 공통 적용하며, 쓰기 시간 초과는 서버 처리 실패로 단정하지 않는다.
   async function api(path, options = {}) {
@@ -134,6 +146,8 @@
     }
   }
   function clearPrivate() {
+    lastHeadingView = null;
+    checkMotion = null;
     profileRequest?.abort(); profileRequest = null;
     S.profilePush = null; S.profileConnection = undefined;
     if (S.view === 'profile') S.view = 'today';
@@ -507,7 +521,15 @@
   function row(e) {
     if ((e.source === 'assignment' || e.source === 'classroom') && A) return A.row(e);
     if (e.source === 'classroom-event') return `<div class="task-row ${e.cancelled ? 'cancelled' : ''}"><span class="assignment-mark">일정</span><button class="task-main" data-detail="${esc(e.id)}" data-source="classroom-event"><span class="task-title">${esc(e.title)}${e.cancelled ? ' · 취소' : ''}</span><span class="task-meta">${esc(e.channel)} · Google Classroom</span></button><span class="task-time">${esc(e.time || '종일')}</span></div>`;
-    return `<div class="task-row ${e.source === 'personal' ? 'personal' : ''} ${e.completed ? 'done' : ''} ${e.cancelled ? 'cancelled' : ''}"><input aria-label="${esc(e.title)} 완료" type="checkbox" data-complete="${esc(e.id)}" data-source="${e.source}" ${e.completed ? 'checked' : ''} ${e.cancelled ? 'disabled' : ''}><button class="task-main" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="task-title">${esc(e.title)} ${e.cancelled ? '<span class="badge">취소</span>' : ''}</span><span class="task-meta">${esc(e.channel || '개인 할 일')} · ${esc(e.start_date !== e.end_date ? period(e) : kindName[e.kind] || e.kind)}</span></button><span class="task-time">${esc(e.time || '종일')}</span></div>`;
+    return `<div class="task-row ${e.source === 'personal' ? 'personal' : ''} ${e.completed ? 'done' : ''} ${e.cancelled ? 'cancelled' : ''}"><input aria-label="${esc(e.title)} 완료" type="checkbox" data-complete="${esc(e.id)}" data-source="${e.source}" ${e.completed ? 'checked' : ''} ${e.cancelled ? 'disabled' : ''}${checkedMotionAttributes(e)}><button class="task-main" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="task-title">${esc(e.title)} ${e.cancelled ? '<span class="badge">취소</span>' : ''}</span><span class="task-meta">${esc(e.channel || '개인 할 일')} · ${esc(e.start_date !== e.end_date ? period(e) : kindName[e.kind] || e.kind)}</span></button><span class="task-time">${esc(e.time || '종일')}</span></div>`;
+  }
+  function checkedMotionAttributes(item) {
+    if (!item.completed || !checkMotion || checkMotion.view !== S.view ||
+      checkMotion.id !== item.id || checkMotion.source !== item.source) return '';
+    // 새로고침으로 행을 다시 그려도 이미 지난 애니메이션 구간은 반복하지 않는다.
+    checkMotion.startedAt ??= Date.now();
+    const elapsed = Math.max(0, Date.now() - checkMotion.startedAt);
+    return elapsed < 240 ? ` data-check-motion style="--check-motion-delay: -${elapsed}ms"` : '';
   }
   function list(items, empty = '표시할 할 일이 없어요.') {return items.length ? items.map(row).join('') : `<div class="empty">${empty}</div>`;}
   function filteredEmpty(fallback, available) {return plannerEnabled() && L ? L.emptyText(S.listFilters,fallback,available) : fallback;}
@@ -581,7 +603,28 @@
     if (!result.ok) {toast('임시저장하지 못했어요. 현재 입력은 열어 두었어요. 다시 저장하거나 임시저장을 선택해 주세요.',true); return false;}
     return true;
   }
-  function closeDialog() {dialogEpoch++; dialogRequestId++; modal.close(); modal.replaceChildren();}
+  function closeDialog() {
+    dialogEpoch++; dialogRequestId++;
+    modal.close();
+    modal.replaceChildren();
+    modal.classList?.remove?.('dialog-leaving');
+    modal.inert = false;
+  }
+  function dismissDialog() {
+    if (!modal.open || !motionEnabled() || $('#classroom-connection-token')) {
+      closeDialog();
+      return;
+    }
+    if (modal.classList.contains('dialog-leaving')) return;
+    // 사용자가 닫은 창의 응답은 즉시 무효화하고, 강제 종료 경로는 그대로 동기 처리한다.
+    const epoch = ++dialogEpoch;
+    dialogRequestId++;
+    modal.inert = true;
+    modal.classList.add('dialog-leaving');
+    setTimeout(() => {
+      if (dialogEpoch === epoch && modal.open) closeDialog();
+    }, 200);
+  }
   async function resumeDraft() {
     if (!plannerEnabled() || !taskDrafts || draftRestoring) return;
     if (personalForm() && taskDrafts.hasUnsaved() && !confirm('현재 입력 대신 서버에 임시저장된 내용을 열까요?')) return;
@@ -702,9 +745,21 @@
     const input = $('#quick-form')?.elements?.title;
     const focused = input && document.activeElement === input ? {start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection} : null;
     renderContent(); lastRenderKey = key;
+    if (S.me && S.view !== lastHeadingView) animatePageHeading();
     if (S.busy) lockWriteControls();
     if (focused && S.me && S.view === 'today') {const next = $('#quick-form')?.elements?.title; next?.focus?.({preventScroll:true}); if (focused.start !== null && focused.start !== undefined) next?.setSelectionRange?.(focused.start,focused.end,focused.direction);}
     listControls?.restoreFocus(searchFocus); updateDraftStatus();
+  }
+  function animatePageHeading() {
+    const title = root.querySelector?.('.intro h1');
+    if (!title) return;
+    if (checkMotion?.view !== S.view) checkMotion = null;
+    lastHeadingView = S.view;
+    title.classList.add('page-title-enter');
+    const subtitle = title.nextElementSibling;
+    if (subtitle?.matches('p') && subtitle.textContent.trim()) {
+      subtitle.classList.add('page-subtitle-enter');
+    }
   }
   function renderContent() {
     if (!S.me) return;
@@ -1002,6 +1057,8 @@
     dialogContainsTeams = containsTeams;
     dialogEpoch++; dialogRequestId++;
     if (modal.open) modal.close();
+    modal.classList?.remove?.('dialog-leaving');
+    modal.inert = false;
     modal.innerHTML = `<div class="dialog-head"><h2 id="dialog-title">${esc(title)}</h2><button class="dialog-close" aria-label="닫기" data-action="close">×</button></div><div class="dialog-body">${content}<p id="mutation-status" class="muted fine" role="status" aria-live="polite" hidden></p></div>${footer ? `<div class="dialog-foot">${footer}</div>` : ''}`;
     modal.showModal();
   }
@@ -1016,7 +1073,18 @@
       return null;
     }
   }
-  document.addEventListener('cancel', async event => {if (event.target !== modal) return; if (plannerEnabled() && personalForm()) {event.preventDefault(); if (!S.busy && await leaveTaskForm()) closeDialog();} else {dialogEpoch++; dialogRequestId++;}}, true);
+  document.addEventListener('cancel', async event => {
+    if (event.target !== modal) return;
+    const draftIsOpen = plannerEnabled() && personalForm();
+    if (!draftIsOpen && !motionEnabled()) {
+      dialogEpoch++; dialogRequestId++;
+      return;
+    }
+    event.preventDefault();
+    const epoch = dialogEpoch;
+    if (draftIsOpen && (S.busy || !await leaveTaskForm())) return;
+    if (dialogEpoch === epoch) dismissDialog();
+  }, true);
   modal.addEventListener?.('close', () => {
     if (!modal.open && $('#classroom-connection-token')) modal.replaceChildren();
   });
@@ -1167,12 +1235,18 @@
     if (!item) return;
     const original = {...item};
     const pending = values.hidden === true ? '숨기는 중…' : values.hidden === false ? '복원하는 중…' : '완료 상태를 저장하는 중…';
+    const epoch = authEpoch, view = S.view;
+    const save = async () => {
+      const result = await changeEventSources(original, id => setState({...original, id}, values));
+      if (values.completed === true && activeView(epoch) && S.view === view && motionEnabled()) {
+        checkMotion = {id:original.id, source:original.source, view};
+      }
+      return result;
+    };
     if (original.calendar_members) {
-      return mutate(() => changeEventSources(original, id => setState({...original, id}, values)),
-        message, false, undefined, pending);
+      return mutate(save, message, false, undefined, pending);
     }
-    return mutate(() => changeEventSources(original, id => setState({...original, id}, values)),
-      message, false, result => applyConfirmedState(original, values, result), pending);
+    return mutate(save, message, false, result => applyConfirmedState(original, values, result), pending);
   }
   async function changeEventSources(item, write) {
     if (!item.related_sources) return write(item.id);
@@ -1343,7 +1417,7 @@
       }
       if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); draftInputChanged(); return;}
       if (button.dataset.restore !== undefined) {const e = hiddenItems[Number(button.dataset.restore)]; return mutateState(e, {hidden: false}, '일정을 복원했어요.');}
-      if (action === 'close') {closeDialog(); return;}
+      if (action === 'close') {dismissDialog(); return;}
       if (action === 'profile' && profile && S.me) {S.view = 'profile'; render(); return await Promise.allSettled([loadProfileStatus(),refreshPlannerStatus()]);}
       if (action === 'profile-refresh') return await Promise.allSettled([load(),loadProfileStatus(),refreshPlannerStatus({force:true})]);
       if (action === 'profile-logout-all') return openDialog('모든 기기에서 로그아웃할까요?', '<p>모든 기기의 Microsoft 연동과 브라우저 알림을 종료해요. 연결된 클래스룸, 개인 할 일과 표시 설정은 남아요.</p>', '<button class="secondary" data-action="close">취소</button><button class="danger" data-action="logout-all">모든 기기에서 로그아웃</button>');
@@ -1391,6 +1465,7 @@
       const e = find(el.dataset.complete, el.dataset.source); if (!e) return; const checked = el.checked; el.checked = e.completed;
       return mutateState(e, {completed: checked}, checked ? '완료했어요.' : '완료 표시를 해제했어요.');
     }
+    if (el.type === 'checkbox') el.toggleAttribute('data-check-motion', el.checked);
     if (el.closest('#task-form')) {if (['start_date','end_date','display_mode'].includes(el.name)) syncDates(); draftInputChanged();}
   });
   document.addEventListener('input', event => {
@@ -1463,7 +1538,7 @@
   async function boot() {
     const epoch = authEpoch;
     if (location.protocol === 'file:') {root.innerHTML = '<section class="login-wrap"><div class="login-card"><h1>실행 파일로 시작해 주세요</h1><p>압축을 푼 뒤 start_beta.cmd를 실행하면 브라우저가 열려요. HTML 파일만 열면 데이터를 저장할 서버가 실행되지 않아요.</p></div></section>'; return;}
-    root.innerHTML = '<section class="card"><div class="card-head"><h1>계정을 확인하고 있어요</h1></div><p class="empty" role="status">연결이 확인되면 일정 화면으로 이동해요.</p></section>';
+    root.innerHTML = '<section class="card"><div class="card-head"><h1>계정을 확인하고 있어요</h1></div><p class="empty boot-status" role="status">연결이 확인되면 일정 화면으로 이동해요.</p></section>';
     try {
       const service = await api(SCHOOL ? '/api/service' : '/api/beta/info');
       if (epoch !== authEpoch) return; S.service = service;
