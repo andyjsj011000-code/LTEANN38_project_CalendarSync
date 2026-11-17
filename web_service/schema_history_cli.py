@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from .postgres_connection import PostgresConnectionFactory
-from .schema_catalog import PROFILES, HistoryRejected, schema_plan
+from .schema_catalog import FEATURES, PROFILES, HistoryRejected, schema_plan
 from .schema_history import PostgresHistory, SQLiteHistory
 
 
@@ -19,10 +19,9 @@ def main():
     actions.add_argument(
         "--baseline", action="store_true", help="Record the observed existing schema"
     )
-    actions.add_argument("--upgrade", choices=("planner", "shared-ingestion"))
-    parser.add_argument(
-        "--feature", choices=("planner", "shared-ingestion"), help="Feature for an offline plan"
-    )
+    features = sorted({name for profile_features in FEATURES.values() for name in profile_features})
+    actions.add_argument("--upgrade", choices=features)
+    parser.add_argument("--feature", choices=features, help="Feature for an offline plan")
     parser.add_argument("--expected-sha256", help="Required reviewed plan hash for a write")
     parser.add_argument("--database", type=Path, help="Existing SQLite database file")
     parser.add_argument("--schema", help="Dedicated PostgreSQL namespace")

@@ -13,7 +13,8 @@
       if (!item || item.hidden) return false;
       if (value.unfinishedOnly && (item.completed || item.cancelled)) return false;
       if (!words.length) return true;
-      const text = [item.title,item.notes,item.channel].map(normalize).join('\n');
+      const text = (item.calendar_members || [item])
+        .flatMap(member => [member.title,member.notes,member.channel]).map(normalize).join('\n');
       return words.every(word => text.includes(word));
     });
   }

@@ -1318,11 +1318,66 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     const h=harness({overrides:{'/api/service':personalService}});await settle();
     const allowed={...h.item,channel_id:'allowed',title:'Still authorized schedule'};
     const revoked={...h.item,id:'revoked',channel_id:'revoked',title:'Revoked channel schedule'};
-    h.overrides['/api/calendar']=()=>response({items:[allowed,revoked]});await h.click({action:'refresh'});await h.click({action:'calendar'});
+    const grouped={...allowed,id:'group',title:'Cross-channel repost',related_sources:[
+      {id:'group',channel_id:'allowed',url:'https://teams.microsoft.com/l/message/allowed/1'},
+      {id:'extra',channel_id:'revoked',url:'https://teams.microsoft.com/l/message/revoked/2'}
+    ]};
+    h.overrides['/api/calendar']=()=>response({items:[allowed,revoked,grouped]});await h.click({action:'refresh'});await h.click({action:'calendar'});
+    assert.match(h.elements.app.innerHTML,/Cross-channel repost/);
     h.overrides['/api/today']=()=>response({code:'permission_check_pending',teams_access_unverified:true,
       connection_state:'connected',retryable:true,retain_teams_snapshot:true,snapshot_channel_ids:['allowed']},503);
     await h.click({action:'refresh'});
     assert.match(h.elements.app.innerHTML,/Still authorized schedule/);assert.doesNotMatch(h.elements.app.innerHTML,/Revoked channel schedule/);
+    assert.doesNotMatch(h.elements.app.innerHTML,/Cross-channel repost/);
+  }
+  // A new Classroom snapshot replaces the card without redrawing the agenda.
+  {
+    const oldTime = Date.UTC(2026,10,7,0,0);
+    let snapshot = {captured_at:oldTime,items:[{kind:'announcement',course:'Science',title:'Old Classroom notice'}]};
+    const h = harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,classroom_enabled:true}),
+      '/api/classroom':() => response({connected:true,snapshot})
+    }});
+    await settle();
+    const before = h.elements.app.innerHTML;
+    assert.match(before,/Old Classroom notice/);
+    snapshot = {captured_at:oldTime+900000,items:[
+      {kind:'announcement',course:'Science',title:'New Classroom notice'},
+      {kind:'assignment',course:'Science',title:'New Classroom assignment'}
+    ]};
+    await h.advance(30000);
+    assert.match(h.elements.classroomCard.outerHTML,/New Classroom notice/);
+    assert.doesNotMatch(h.elements.classroomCard.outerHTML,/New Classroom assignment/);
+    assert.match(h.elements.classroomCard.outerHTML,/최근 동기화.*9:15/);
+    assert.equal(h.elements.app.innerHTML,before);
+    h.visibility(true);
+    const requests = h.requests.length;
+    await h.advance(60000);
+    assert.equal(h.requests.length,requests);
+    h.visibility(false);
+    await settle();
+    await h.advance(0);
+    assert.equal(h.requests.at(-1).url,'/api/classroom');
+  }
+  // A configured Google client offers a consent button even for an existing Apps Script user.
+  {
+    const consentUrl = 'https://accounts.google.com/o/oauth2/v2/auth?scope=classroom';
+    let navigated;
+    const h = harness({overrides:{
+      '/api/service':() => response({mode:'test-server',idle_seconds:1800,classroom_enabled:true,classroom_google_enabled:true}),
+      '/api/classroom':() => response({connected:true,snapshot:null}),
+      '/api/classroom/google/connect':() => response({authorization_url:consentUrl})
+    }});
+    h.context.location.assign = url => {navigated = url;};
+    await settle();
+    assert.match(h.elements.app.innerHTML,/Google Classroom 연결/);
+    await h.click({action:'classroom-google-connect'});
+    assert.equal(navigated,undefined);
+    assert.match(h.elements.modal.innerHTML,/수업 목록·공지·내 과제/);
+    await h.click({action:'classroom-google-confirm'});
+    assert.equal(navigated,consentUrl);
+    assert.equal(writes(h).at(-1).url,'/api/classroom/google/connect');
+    assert.doesNotMatch(h.elements.modal.innerHTML,/CALENDARSYNC_TOKEN/);
   }
   console.log('Usability UI: synthetic scenarios passed (incremental snapshots, permission renewal, redaction and prior regressions).');
 })().catch(error => {console.error(error); process.exitCode = 1;});
@@ -1380,6 +1435,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
       removeAttribute(name) {delete this.attributes[name];},
       replaceChildren() {this.innerHTML = '';}}];
   }));
+  elements.classroomCard = {outerHTML:''};
   elements.modal.close = function () {this.open = false;};
   elements.modal.showModal = function () {this.open = true;};
   const item = {id: 'fixture', source: 'teams', title: 'Fixture assignment', notes: 'Fixture notes', channel: 'Fixture channel',
@@ -1390,7 +1446,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
     setTimeout(callback, delay = 0) {const id = ++timerId; timers.set(id, {callback, at: now + Number(delay)}); return id;},
     clearTimeout(id) {timers.delete(id);},
     document: {hidden: false, documentElement: {dataset: {mode: 'school'}},
-      querySelector(selector) {return selector === '[data-action="sync-teams"]' ? elements['sync-button'] : selector === '[data-action="refresh"]' ? elements['refresh-button'] : elements[selector.slice(1)] || null;},
+      querySelector(selector) {return selector === '.classroom-card' ? elements.classroomCard : selector === '[data-action="sync-teams"]' ? elements['sync-button'] : selector === '[data-action="refresh"]' ? elements['refresh-button'] : elements[selector.slice(1)] || null;},
       querySelectorAll(selector) {return selector === '[data-locked]' ? controls.filter(control => control.dataset.locked) : selector === 'button,input,select,textarea' ? controls : [];},
       addEventListener(type, handler) {listeners[type] = handler;}},
     async fetch(url, options = {}) {

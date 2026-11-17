@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>개인정보 안내 · CalendarSync</title>
+  <script src="/assets/beta-profile.js"></script>
+  <link rel="stylesheet" href="/assets/beta.css">
+</head>
+<body>
+  <main class="app privacy-page">
+    <a href="/">← CalendarSync로 돌아가기</a>
+    <h1>개인정보 안내</h1>
+    <p>CalendarSync 베타 웹에서 학교 계정으로 로그인하고 일정과 과제를 연결할 때 어떤 데이터를 쓰는지 설명합니다. 연결 상태와 해제 방법은 로그인 후 <strong>마이페이지 → 연결 및 권한</strong>에서 확인할 수 있습니다.</p>
+    <nav aria-label="개인정보 안내 목차">
+      <a href="#account">로그인과 계정</a>
+      <a href="#connections">연결별 데이터</a>
+      <a href="#storage">저장과 삭제</a>
+    </nav>
+    <section class="card" id="account">
+      <h2>로그인과 계정</h2>
+      <p>Microsoft에서 학교 계정을 인증합니다. CalendarSync는 계정 이름, 이메일, 학교 조직과 계정 식별자를 사용해 본인의 일정과 설정을 표시합니다. 비밀번호는 Microsoft 화면에서 입력합니다.</p>
+      <p>첫 로그인 때 Google 연결 안내가 열리면 학교 이메일이 계정 선택 힌트로 Google에 전달될 수 있습니다. 클래스룸 읽기 권한을 Google에서 승인하거나 건너뛸 수 있습니다.</p>
+      <p>기기 연동 유지를 선택하면 암호화한 Microsoft 연결 정보로 최대 30일 동안 Teams 공지를 갱신합니다. 직접 로그아웃하면 선택한 범위의 기기 세션, Microsoft 연결 정보와 서버 알림 등록을 종료합니다. 개인 할 일, 수정 내용, 표시 설정, 피드백 및 이미 연결한 Google 클래스룸은 남습니다.</p>
+    </section>
+    <section class="card" id="connections">
+      <h2>연결별 데이터와 해제 결과</h2>
+      <h3 id="teams">Teams 공지와 과제</h3>
+      <p><!-- teams-notice-processing --></p>
+      <p>과제 읽기 권한은 수업 이름, 과제 제목과 설명, 마감일, 원문 링크, 내 제출 상태를 표시하는 데 사용합니다. Teams 과제 데이터는 공지 AI 분석에 사용하지 않습니다.</p>
+      <p>Microsoft에서 앱 권한을 관리할 수 있습니다. 권한이 해제되면 해당 데이터의 조회와 표시가 중단됩니다. Teams 원본과 서버에 저장된 수집 결과, 최근 과제 목록, 내 개인 수정은 남을 수 있습니다.</p>
+      <h3 id="classroom">Google 클래스룸</h3>
+      <p>참여 중인 수업 이름, 최근 공지와 과제, 마감일, 원문 링크와 내 제출 상태를 읽습니다. Google 직접 연결은 연결 갱신 정보를, Apps Script 연결은 연동 키의 검증 정보를 사용합니다. 가져온 최근 목록은 암호화해 저장하고, 24시간 동안 갱신되지 않으면 화면에서 숨깁니다.</p>
+      <p>마이페이지에서 연결을 해제하면 CalendarSync에 저장한 연결 정보와 가져온 목록이 삭제됩니다. Google 직접 연결은 Google에도 권한 취소를 요청하며, 재연결 여부를 기억하는 표시와 수업 표시 설정은 남습니다. Google 클래스룸 원본과 개인 할 일도 남습니다.</p>
+      <h3 id="classroom-ai">클래스룸 공지 AI 분석</h3>
+      <p>Google로 직접 연결하고 별도로 AI 분석을 켜면 최근 공지 본문과 작성일을 OpenAI API로 보내 일정과 요약을 만듭니다. 숨긴 수업은 새 분석에서 제외합니다. 내 제출 상태나 성적은 전송 대상에 포함하지 않습니다. 분석을 끄면 새 전송을 중단하고 CalendarSync에 저장한 추출 결과를 지웁니다. 클래스룸 연결과 가져온 원본 목록은 남습니다.</p>
+      <p><a href="https://developers.google.com/workspace/workspace-api-user-data-developer-policy">Google Workspace API 사용자 데이터 정책</a></p>
+      <h3 id="notifications">브라우저 알림</h3>
+      <p>이 기기의 알림 수신 주소와 암호화 키를 저장합니다. 브라우저 알림 서비스로는 일정 확인 안내를 보내고 학교 일정의 제목과 본문은 포함하지 않습니다. 기기 알림을 끄면 서버 알림 등록이 삭제됩니다. 일정과 할 일은 남으며, 브라우저의 사이트 권한은 브라우저 설정에서 따로 변경할 수 있습니다.</p>
+    </section>
+    <section class="card" id="storage">
+      <h2>저장과 삭제</h2>
+      <p>개인 할 일과 메모, 일정 수정, 표시 설정, 변경 검토와 보낸 피드백은 서비스에 저장됩니다. 프로필과 일정 내용, 연결 정보, 알림 등록 정보는 암호화하여 보관합니다. 조회용 날짜와 내부 식별자 일부는 데이터베이스에 일반 필드로 저장됩니다.</p>
+      <p>개인 할 일 임시저장과 휴지통은 7일 동안 유지됩니다. 보안 기록은 공지 원문 없이 가명 식별자로 기록하며 7일이 지나면 정리합니다.</p>
+      <p>공개 베타에서는 종료일이 7일 넘게 지난 Teams 일정 중 정리 조건을 충족한 항목을 유지보수 중 삭제합니다. 검토 중인 변경이나 남은 알림이 있는 경우, 또는 연장된 종료일이 정리 기준에 도달하지 않은 경우에는 일정을 유지합니다. 이미 정리한 일정을 다시 가져오지 않도록 식별 기록은 남을 수 있습니다.</p>
+      <p>현재 공개 베타는 Render의 무료 PostgreSQL을 사용합니다. 이 플랜에는 Render 관리형 백업과 시점 복구가 제공되지 않습니다. <a href="https://render.com/docs/postgresql-backups">Render 백업 안내</a></p>
+    </section>
+  </main>
+</body>
+</html>
