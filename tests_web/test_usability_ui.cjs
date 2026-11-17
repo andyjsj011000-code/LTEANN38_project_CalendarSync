@@ -1375,18 +1375,20 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
     await h.advance(0);
     assert.equal(h.requests.at(-1).url,'/api/classroom');
   }
-  // A configured Google client offers a consent button even for an existing Apps Script user.
+  // My Page offers Google consent to an existing Apps Script user.
   {
     const consentUrl = 'https://accounts.google.com/o/oauth2/v2/auth?scope=classroom';
     let navigated;
     const h = harness({overrides:{
       '/api/service':() => response({mode:'test-server',idle_seconds:1800,classroom_enabled:true,classroom_google_enabled:true}),
-      '/api/classroom':() => response({connected:true,snapshot:null}),
+      '/api/classroom':() => response({connected:true,method:'apps_script',snapshot:null}),
+      '/api/push':() => response({configured:false}),
       '/api/classroom/google/connect':() => response({authorization_url:consentUrl})
     }});
     h.context.location.assign = url => {navigated = url;};
     await settle();
-    assert.match(h.elements.app.innerHTML,/Google Classroom 연결/);
+    await h.click({action:'profile'});
+    assert.match(h.elements.app.innerHTML,/data-action="classroom-google-connect"[^>]*>Google 계정으로 연결/);
     await h.click({action:'classroom-google-connect'});
     assert.equal(navigated,undefined);
     assert.match(h.elements.modal.innerHTML,/수업 목록·공지·내 과제/);
@@ -1484,6 +1486,7 @@ function harness({overrides = {}, ignoreAbort = new Set(), ignoreBodyAbort = new
     }};
   vm.createContext(context);
   vm.runInContext(source('beta-calendar.js'), context);
+  vm.runInContext(source('beta-profile.js'), context);
   vm.runInContext(source('beta.js'), context);
   return {elements, requests, history, controls, overrides, item, today, context,
     click(data) {return listeners.click({preventDefault() {}, target: {closest() {return {dataset: data, disabled: false};}}});},
