@@ -1,9 +1,13 @@
 """Sign-in and sign-out HTTP adapters; preserve the existing cookie contract."""
 
+import logging
+
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from .identity import Unavailable, validate_identity
+
+logger = logging.getLogger(__name__)
 
 
 def install_auth_routes(
@@ -81,6 +85,12 @@ def install_auth_routes(
             )
             return response
         response = RedirectResponse("/", status_code=303)
+        classroom = getattr(app.state, "classroom_google", None)
+        if classroom is not None:
+            try:
+                response = classroom.continue_sign_in(db.session(raw), profile["email"]) or response
+            except Exception:
+                logger.warning("Could not start Classroom authorization after Microsoft sign-in")
         response.delete_cookie(
             flow_cookie, path="/", secure=settings.secure_cookies, httponly=True, samesite="lax"
         )

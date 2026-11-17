@@ -176,6 +176,35 @@ def server(tmp_path):
         c.close()
 
 
+@pytest.mark.parametrize("direct", [False, True])
+def test_privacy_before_login_describes_the_active_notice_source(server, direct):
+    if direct:
+        server.source.collect = lambda *_: None
+        app = create_test_server(
+            server.settings,
+            server.db,
+            server.identity,
+            server.graph,
+            server.source,
+            server.sender,
+            worker=False,
+        )
+    else:
+        app = server.app
+    with TestClient(app, base_url=server.settings.origin) as client:
+        page = client.get("/privacy")
+        assert page.status_code == 200
+        assert page.headers["content-type"].startswith("text/html")
+        assert 'id="classroom"' in page.text
+        if direct:
+            assert "지원되는 이미지를 OpenAI API로" in page.text
+            assert client.get("/api/service").json()["teams_notice_processing"] == "openai"
+        else:
+            assert "기존 수집기가 추출한 일정 결과" in page.text
+            assert "지원되는 이미지를 OpenAI API로" not in page.text
+            assert client.get("/api/service").json()["teams_notice_processing"] == "existing"
+
+
 def test_independent_connection_survives_view_expiry_but_explicit_logout_revokes(server):
     c = server.client()
     session = server.db.session(c.cookies.get("__Host-calendarsync_session"))

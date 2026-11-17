@@ -19,15 +19,22 @@
   const C = window.BetaCalendar;
   const L = window.BetaListControls;
   const A = window.BetaAssignments;
+  const profile = window.BetaProfile;
+  let profileRequest = null;
   let assignmentRequest = null, assignmentSequence = 0;
-  const assignmentsEnabled = () => !!(S.service?.assignments_enabled && A);
-  const assignmentCalendar = () => assignmentsEnabled() ? (S.assignments?.items || []).filter(e => e.start_date && e.end_date) : [];
+  const teamsAssignmentsEnabled = () => !!(S.service?.assignments_enabled && A);
+  const assignmentsEnabled = () => !!A && (teamsAssignmentsEnabled() || !!S.service?.classroom_enabled);
+  const assignmentCalendar = () => [...(S.assignments.items || []),...classroomAssignments()].filter(e => e.end_date);
   let listControls = null, taskDrafts = null, draftUi = null;
   let plannerStatus = null, statusRequest = null, statusReadAt = 0, statusRevision = 0;
   let trashItems = [], undoTrash = null, draftRestoring = false, taskMissing = false, taskFormRevision = 0;
   const S = {me: null, view: 'today', day: '', month: '', selected: '', today: null, items: [], upcoming: [], channels: [], prefs: null, busy: false, loading: false, loadError: false, epoch: 0};
   S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
   S.listFilters = L?.createState() || {query:'',unfinishedOnly:false};
+  S.calendarSource = 'all';
+  S.classroom = null;
+  S.profilePush = null; S.profileConnection = undefined;
+  let classroomRevision = 0, classroomTimer = null, classroomRequest = null;
   const plannerEnabled = () => !!S.service?.planner_enhancements;
   const shownItems = items => plannerEnabled() && L ? L.filter(items,S.listFilters) : items;
   const partNames = ['personal','today','calendar','upcoming','channels','settings','changes'];
@@ -35,6 +42,43 @@
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const kindName = {personal: '개인', assignment: '과제', application: '신청', event: '행사·일정'};
   const pretty = d => new Intl.DateTimeFormat('ko-KR', {month: 'long', day: 'numeric', weekday: 'short', timeZone: 'UTC'}).format(new Date(d + 'T00:00:00Z'));
+  const classroomDateTime = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+  function classroomAssignments() {
+    return (S.classroom?.snapshot?.items || []).flatMap((item, index) => {
+      if (item.kind !== 'assignment') return [];
+      let day = item.due || '', time = '', dueAt = '';
+      if (day.length === 10) {
+        dueAt = new Date(`${day}T23:59:59.999+09:00`).toISOString();
+      } else if (day) {
+        const date = new Date(day);
+        if (Number.isNaN(date.getTime())) day = '';
+        else {
+          const parts = Object.fromEntries(classroomDateTime.formatToParts(date).map(part => [part.type,part.value]));
+          day = `${parts.year}-${parts.month}-${parts.day}`;
+          time = `${parts.hour}:${parts.minute}`;
+          dueAt = date.toISOString();
+        }
+      }
+      const submission_status = item.submission_status || 'unknown';
+      const id = item.url || JSON.stringify([item.course_id,item.assignment_id || [item.title,item.due,index]]);
+      return [{id, source:'classroom',
+        kind:'assignment', title:item.title, channel:item.course, course_id:item.course_id, notes:item.description, source_url:item.url,
+        start_date:day, end_date:day, time, due_at:dueAt, submission_status,
+        completed:submission_status === 'submitted' || submission_status === 'returned'}];
+    });
+  }
+  const classroomSchedule = () => (S.classroom?.snapshot?.events || []).map(event => ({
+    ...event, source:'classroom-event', channel:event.course, source_url:event.url,
+  }));
+  const isClassroom = item => item.source === 'classroom' || item.source === 'classroom-event';
+  function calendarSourceOf(item) {
+    if (isClassroom(item)) return 'classroom';
+    return item.source === 'personal' ? 'personal' : 'teams';
+  }
+  function calendarEntries(source = 'all') {
+    const items = [...S.items, ...assignmentCalendar(), ...classroomSchedule()];
+    return C.mergeClassroomSchedules(source === 'all' ? items : items.filter(item => calendarSourceOf(item) === source));
+  }
   const period = e => e.start_date === e.end_date ? pretty(e.start_date) : `${pretty(e.start_date)} ~ ${pretty(e.end_date)}`;
   let toastTimer;
   function toast(message, error = false) {
@@ -90,11 +134,16 @@
     }
   }
   function clearPrivate() {
+    profileRequest?.abort(); profileRequest = null;
+    S.profilePush = null; S.profileConnection = undefined;
+    if (S.view === 'profile') S.view = 'today';
     assignmentRequest?.abort(); assignmentRequest = null; assignmentSequence++;
     S.assignments = {items:[],state:'idle'}; S.assignmentFilter = 'upcoming';
+    stopClassroomRefresh(); S.classroom = null; classroomRevision++;
     taskDrafts?.reset(); draftUi = null; plannerStatus = null; statusRequest?.abort(); statusRequest = null; statusReadAt = 0; statusRevision++;
     trashItems = []; undoTrash = null; draftRestoring = false; taskMissing = false; taskFormRevision++;
     S.listFilters = L?.createState() || {query:'',unfinishedOnly:false}; listControls?.reset();
+    S.calendarSource = 'all';
     clearTimeout(ingestionTimer); ingestionTimer = null; ingestionAttempts = 0; ingestionDeadline = 0; ingestionRefresh = false; ingestionFinalNeeded = false; lastRenderKey = null;
     S.ready = Object.fromEntries(partNames.map(name => [name,false])); S.partErrors = {};
     dialogEpoch++; dialogRequestId++;
@@ -112,13 +161,27 @@
   }
   function loginScreen() {
     lastRenderKey = null;
-    if (SCHOOL) {root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC</p><h1>학교 일정과 할 일,<br>한눈에.</h1><p>${S.service?.mode === 'preview' ? '학교 계정 없이 예시 화면을 확인하세요.' : '학교 Microsoft 계정으로 로그인하세요.'}</p><a class="primary school-signin" href="/auth/login?background=1">${S.service?.mode === 'preview' ? '예시 데이터로 시작하기 →' : 'Microsoft 로그인 · 이 기기 연동 유지 →'}</a><p class="fine muted">공유 기기에서는 <a href="/auth/login">이번 사용만 로그인</a>을 선택하세요.</p><p class="login-note">Microsoft 로그인 화면에서 인증해요. 이 서비스는 계정 비밀번호를 받지 않아요. 기기 연동을 유지하면 최대 30일 동안 서버가 공지를 갱신하며, 직접 로그아웃하면 이 기기의 연동과 알림을 끊어요. 본인이 접근할 수 있는 Teams 일정만 표시하며, 웹 알림은 로그인 후 이 기기에서 따로 켤 수 있어요. 외부 캘린더 등록은 아직 제공하지 않아요.</p><p><a href="/privacy">개인정보 안내</a></p>${testServer() ? '<button class="secondary" type="button" data-action="disconnect-device">이 기기 연결 해제</button>' : ''}<p class="error-message" id="login-error" role="alert">${location.search?.includes('login=failed') ? '로그인을 완료하지 못했어요. 학교 계정과 앱 권한을 확인하고 다시 시도해 주세요.' : ''}</p></div></section>`; return;}
+    if (SCHOOL) {
+      const preview = S.service?.mode === 'preview';
+      const teamsAi = S.service?.teams_notice_processing === 'openai'
+        ? '<p>Teams 공지와 답글에서 일정을 찾기 위해 본문과 지원되는 이미지를 OpenAI로 보낼 수 있어요.</p>' : '';
+      const classroomOffer = S.service?.classroom_google_enabled
+        ? '<p>첫 로그인 때 학교 이메일을 Google에 계정 선택 힌트로 보낼 수 있어요. 수업 목록·공지·내 과제 읽기 권한은 Google에서 승인하거나 건너뛸 수 있어요.</p>' : '';
+      const privacy = preview ? '' : `<section class="login-note privacy-summary" aria-labelledby="signin-privacy"><h2 id="signin-privacy">로그인 전에 확인해 주세요</h2>
+        <p>학교 계정 이름·이메일·식별자와 읽을 수 있는 Teams 채널 정보를 사용해요. 비밀번호는 Microsoft에서 입력해요.</p>${teamsAi}${classroomOffer}
+        <p>기기 연동을 유지하면 암호화한 Microsoft 연결 정보로 최대 30일 동안 공지를 갱신해요.</p><a href="/privacy">개인정보 상세 안내</a></section>`;
+      root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC</p><h1>학교 일정과 할 일,<br>한눈에.</h1><p>${preview ? '학교 계정 없이 예시 화면을 확인하세요.' : '학교 Microsoft 계정으로 로그인하세요.'}</p>${privacy}
+        <a class="primary school-signin" href="/auth/login?background=1">${preview ? '예시 데이터로 시작하기 →' : 'Microsoft 로그인 · 이 기기 연동 유지 →'}</a>
+        ${preview ? '' : '<p class="fine muted">공유 기기에서는 <a href="/auth/login">이번 사용만 로그인</a>을 선택하세요.</p>'}
+        ${testServer() ? '<button class="secondary" type="button" data-action="disconnect-device">이 기기 연결 해제</button>' : ''}
+        <p class="error-message" id="login-error" role="alert">${location.search?.includes('login=failed') ? '로그인을 완료하지 못했어요. 학교 계정과 앱 권한을 확인하고 다시 시도해 주세요.' : ''}</p></div></section>`; return;
+    }
     root.innerHTML = `<section class="login-wrap"><div class="login-card"><div class="login-logo">C</div><p class="eyebrow">CALENDARSYNC · BETA</p><h1>오늘 해야 할 일,<br>한눈에.</h1><p class="muted">학교 로그인 없이 초대 코드로 먼저 써보세요.</p><form id="login-form"><label class="field"><span class="field-label">테스트 계정 초대 코드</span><input name="code" type="password" required minlength="16" maxlength="128" autocomplete="off" spellcheck="false" placeholder="실행 창에 표시된 코드를 입력하세요"></label><p class="error-message" id="login-error" role="alert"></p><button class="primary" type="submit">베타 시작하기 →</button></form><p class="login-note">Teams 공지는 예시 데이터입니다. 개인 할 일은 계정별로 서버에 저장됩니다. 같은 코드로 로그인하면 같은 계정이 열려요.</p></div></section>`;
   }
   function renderLoadState(error = S.loadError) {
     lastRenderKey = null;
     if (!S.me) return;
-    if (assignmentsEnabled() && S.view === 'assignments') return renderContent();
+    if ((assignmentsEnabled() && S.view === 'assignments') || (profile && S.view === 'profile')) return renderContent();
     if ($('#nav-assignments')) $('#nav-assignments').hidden = !assignmentsEnabled();
     const pending = !!S.permissionPending, failed = error && !pending;
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
@@ -174,7 +237,10 @@
     // New reads and writes still require the server's unchanged permission proof.
     S.teamsUnverified = true; S.teamsSnapshotPending = true; teamsAccessRevision++;
     if (Array.isArray(channels)) {
-      const allowed = new Set(channels), visible = item => item.source === 'personal' || allowed.has(item.channel_id);
+      const allowed = new Set(channels);
+      const visible = item => item.source === 'personal' || (
+        allowed.has(item.channel_id) && (item.related_sources || []).every(source => allowed.has(source.channel_id))
+      );
       if (S.today) S.today = {...S.today,teams:S.today.teams.filter(visible)};
       S.items = S.items.filter(visible); S.upcoming = S.upcoming.filter(visible); hiddenItems = hiddenItems.filter(visible);
     }
@@ -242,11 +308,59 @@
       finally {if (activeView(epoch)) {ingestionRefresh = false; scheduleIngestionRefresh();}}
     }, 3000);
   }
+  function stopClassroomRefresh() {
+    clearTimeout(classroomTimer); classroomTimer = null;
+    classroomRequest?.abort(); classroomRequest = null;
+  }
+  function canRefreshClassroom() {
+    return S.me && S.service?.classroom_enabled && S.classroom?.connected !== false &&
+      !document.hidden && !autoReadsPaused;
+  }
+  function scheduleClassroomRefresh(delay = 30000) {
+    if (!canRefreshClassroom() || classroomTimer !== null || classroomRequest) return;
+    classroomTimer = setTimeout(refreshClassroom, delay);
+  }
+  async function refreshClassroom() {
+    classroomTimer = null;
+    if (!canRefreshClassroom() || expireIdle()) return;
+    if (activeLoad || S.busy) {scheduleClassroomRefresh(); return;}
+    const epoch = authEpoch, version = classroomRevision;
+    const controller = new AbortController(); classroomRequest = controller;
+    const current = () => activeView(epoch) && version === classroomRevision &&
+      !controller.signal.aborted && canRefreshClassroom() && !expireIdle();
+    try {
+      const value = await api('/api/classroom', {signal:controller.signal, timeout:15000});
+      if (!current()) return;
+      if (S.classroom?.connected === value.connected && S.classroom?.method === value.method &&
+          S.classroom?.reauth === value.reauth &&
+          S.classroom?.announcement_analysis === value.announcement_analysis &&
+          S.classroom?.snapshot?.captured_at === value.snapshot?.captured_at &&
+          JSON.stringify(S.classroom?.courses) === JSON.stringify(value.courses)) return;
+      updateClassroom(value);
+      delete S.partErrors.classroom;
+      if (S.view !== 'today') render();
+      else {
+        const card = $('.classroom-card'), due = $('.today-assignments-card');
+        const school = $('.today-school-events'), upcoming = $('.today-upcoming');
+        if (card) card.outerHTML = classroomCard();
+        if (due) due.outerHTML = assignmentToday();
+        if (school && S.today) school.outerHTML = todaySchoolEvents();
+        if (upcoming && S.today) upcoming.outerHTML = todayUpcoming();
+      }
+    } catch (error) {
+      if (current() && [401,403].includes(error.status)) failure(error);
+    } finally {
+      if (classroomRequest === controller) {
+        classroomRequest = null;
+        scheduleClassroomRefresh();
+      }
+    }
+  }
   // 개인 일정을 별도로 불러오고, 현재 로그인·수정 세대와 맞는 조회 결과만 화면에 반영한다.
   async function load({background = false, afterSync = false, checkingRetry = false, ingestionRetry = false, mutationVersion} = {}) {
     if (!S.me) return;
     if (S.syncing && !afterSync) {if (!S.busy) toast('Teams 공지를 가져온 뒤 화면을 갱신해요. 현재 일정은 계속 볼 수 있어요.'); return;}
-    if (assignmentsEnabled()) void loadAssignments();
+    if (teamsAssignmentsEnabled()) void loadAssignments();
     const initialSession = authEpoch;
     if (!checkingRetry) await ensureCollectionReady();
     if (!activeView(initialSession) || ((checkingRetry || ingestionRetry) && (autoReadsPaused || resumeCheck))) return;
@@ -255,6 +369,7 @@
     if (!background) {monthRequest?.abort(); monthRequest = null; monthEpoch++; S.pendingMonth = '';}
     const calendarEpoch = monthEpoch;
     activeLoad?.abort();
+    stopClassroomRefresh();
     const controller = new AbortController(); activeLoad = controller;
     const timer = setTimeout(() => controller.abort(), 100000), errors = [], applied = new Set();
     let teamsRejected = false; const accessRevision = teamsAccessRevision;
@@ -292,6 +407,12 @@
         if (S.today) render();
       }
     };
+    const classroomVersion = classroomRevision;
+    const classroom = S.service?.classroom_enabled
+      ? part('classroom', '/api/classroom', value => {
+        if (classroomVersion !== classroomRevision) return false;
+        updateClassroom(value);
+      }) : null;
     const personal = S.service?.personal_agenda ? part('personal', '/api/personal/today', value => {
       // A combined snapshot owns both sources once it has arrived in this load.
       if (applied.has('today') || (S.today?.date && value.date < S.today.date)) return false;
@@ -337,6 +458,7 @@
         await Promise.allSettled(jobs);
       }
       if (!applied.has('today')) await personal;
+      await classroom;
       const failures = errors.filter(({name}) => name !== 'personal' || !applied.has('today'));
       if (current() && failures.length) {
         if (!S.today) {S.loadError = true; renderLoadState(true);}
@@ -350,12 +472,12 @@
       clearTimeout(timer);
       if (activeLoad === controller) {
         activeLoad = null; S.loading = false; S.refreshing = false; updateRefreshStatus();
-        if (current()) {scheduleCheckingRefresh(); scheduleIngestionRefresh(); refreshPlannerStatus();}
+        if (current()) {scheduleCheckingRefresh(); scheduleIngestionRefresh(); scheduleClassroomRefresh(); refreshPlannerStatus();}
       }
     }
   }
   async function loadAssignments(force = false) {
-    if (!S.me || !assignmentsEnabled() || assignmentRequest) return;
+    if (!S.me || !teamsAssignmentsEnabled() || assignmentRequest) return;
     const epoch = authEpoch, sequence = ++assignmentSequence;
     const controller = new AbortController(); assignmentRequest = controller;
     S.assignments = {...S.assignments,loading:true}; render();
@@ -376,10 +498,15 @@
   function assignmentToday() {
     if (!assignmentsEnabled()) return '';
     const items = assignmentCalendar().filter(e => e.end_date === S.day);
-    return '<section class="card"><div class="card-head"><h2>오늘 마감 과제 <span class="count">'+items.length+'</span></h2><button class="text-button" data-action="assignments">과제 전체 보기 →</button></div><div class="list">'+(items.length ? items.map(A.row).join('') : '<div class="empty">'+(S.assignments.loading ? '과제를 확인하고 있어요.' : S.assignments.state === 'connected' ? '오늘 마감인 과제가 없어요.' : '과제 탭에서 연결 상태를 확인해 주세요.')+'</div>')+'</div></section>';
+    const link = '<button class="text-button" data-action="assignments">과제 전체 보기 →</button>';
+    const empty = S.assignments.loading ? '과제를 확인하고 있어요.'
+      : S.assignments.state !== 'connected' && !S.classroom?.snapshot
+        ? '과제 탭에서 연결 상태를 확인해 주세요.' : '오늘 마감인 과제가 없어요.';
+    return `<section class="card today-assignments-card"><div class="card-head"><h2>오늘 마감 과제 <span class="count">${items.length}</span></h2>${link}</div><div class="list">${list(items,empty)}</div></section>`;
   }
   function row(e) {
-    if (e.source === 'assignment' && A) return A.row(e);
+    if ((e.source === 'assignment' || e.source === 'classroom') && A) return A.row(e);
+    if (e.source === 'classroom-event') return `<div class="task-row ${e.cancelled ? 'cancelled' : ''}"><span class="assignment-mark">일정</span><button class="task-main" data-detail="${esc(e.id)}" data-source="classroom-event"><span class="task-title">${esc(e.title)}${e.cancelled ? ' · 취소' : ''}</span><span class="task-meta">${esc(e.channel)} · Google Classroom</span></button><span class="task-time">${esc(e.time || '종일')}</span></div>`;
     return `<div class="task-row ${e.source === 'personal' ? 'personal' : ''} ${e.completed ? 'done' : ''} ${e.cancelled ? 'cancelled' : ''}"><input aria-label="${esc(e.title)} 완료" type="checkbox" data-complete="${esc(e.id)}" data-source="${e.source}" ${e.completed ? 'checked' : ''} ${e.cancelled ? 'disabled' : ''}><button class="task-main" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="task-title">${esc(e.title)} ${e.cancelled ? '<span class="badge">취소</span>' : ''}</span><span class="task-meta">${esc(e.channel || '개인 할 일')} · ${esc(e.start_date !== e.end_date ? period(e) : kindName[e.kind] || e.kind)}</span></button><span class="task-time">${esc(e.time || '종일')}</span></div>`;
   }
   function list(items, empty = '표시할 할 일이 없어요.') {return items.length ? items.map(row).join('') : `<div class="empty">${empty}</div>`;}
@@ -391,7 +518,7 @@
   }
   function ingestionText() {
     if (!plannerStatus) return 'Teams 수집 상태를 확인하고 있어요.';
-    if (plannerStatus.unavailable) return 'Teams 수집 상태를 확인하지 못했어요. 상태 확인을 눌러 다시 확인해 주세요.';
+    if (plannerStatus.unavailable) return '확인할 수 없어요. 새로고침으로 다시 확인해 주세요.';
     const labels = {idle:'수집 기록 없음',queued:'수집 대기 중',running:'공지 확인 중',completed:'최근 수집 완료',partial:'일부 공지 확인 · 남은 항목은 재확인 필요',error:'수집 중단 · 재확인 필요'};
     const counts = plannerStatus.counts;
     const progress = counts && Number.isInteger(counts.channels_checked) && Number.isInteger(counts.channels_total) ? ` · ${counts.channels_checked}/${counts.channels_total}개 채널 확인` : '';
@@ -411,7 +538,13 @@
     const current = () => activeView(epoch) && revision === statusRevision && !document.hidden && !autoReadsPaused && !resumeCheck;
     try {const result = await api('/api/teams/ingestion-status',{signal:controller.signal,timeout:15000}); if (current()) plannerStatus = result;}
     catch (error) {if (activeView(epoch) && [401,403].includes(error.status)) failure(error); else if (current() && error.name !== 'AbortError') plannerStatus = {unavailable:true};}
-    finally {if (statusRequest === controller) statusRequest = null; if (current()) {const el = $('#planner-sync-status'); if (el) el.textContent = ingestionText();}}
+    finally {
+      if (statusRequest === controller) statusRequest = null;
+      if (current()) {
+        const el = S.view === 'profile' ? $('#profile-teams-ingestion') : $('#planner-sync-status');
+        if (el) el.textContent = ingestionText();
+      }
+    }
   }
   function personalForm() {return modal.open && !!$('#task-form') && detailItem?.source !== 'teams';}
   function readCurrentDraft() {
@@ -532,10 +665,38 @@
     if (button) {button.disabled = !!(S.syncing || S.busy); button.textContent = S.syncing ? 'Teams 공지 가져오는 중…' : 'Teams 공지 가져오기'; button.setAttribute('aria-busy', String(!!S.syncing));}
     if (status) status.textContent = S.syncMessage || '';
   }
+  function profileState() {
+    return {account:{name:S.me.name,email:S.me.email}, service:S.service || {},
+      connection:S.profileConnection ?? S.connection, teamsUnverified:S.teamsUnverified,
+      teamsIngestion:plannerEnabled() ? ingestionText() : null,
+      assignments:{state:S.assignments.loading ? 'idle' : S.assignments.state},
+      classroom:S.classroom && {connected:S.classroom.connected,reauth:S.classroom.reauth,announcement_analysis:S.classroom.announcement_analysis},
+      classroomError:!!S.partErrors.classroom, push:S.profilePush,
+      browserPermission:window.Notification?.permission, hasPreferences:!!S.prefs};
+  }
+  async function loadProfileStatus() {
+    if (!S.me || profileRequest) return;
+    const epoch = authEpoch;
+    const controller = new AbortController(); profileRequest = controller;
+    try {
+      const options = {signal:controller.signal};
+      const [settings, push] = await Promise.allSettled([api('/api/settings', options), api('/api/push', options)]);
+      if (!activeView(epoch) || controller.signal.aborted) return;
+      const lostSession = [settings,push].find(result => result.status === 'rejected' && [401,403].includes(result.reason?.status));
+      if (lostSession) return failure(lostSession.reason);
+      if (settings.status === 'fulfilled') {
+        S.profileConnection = settings.value.connection ?? {state:'not_connected'};
+        S.prefs ??= settings.value.preferences;
+      } else S.profileConnection = {state:'refresh_unavailable'};
+      S.profilePush = push.status === 'fulfilled' ? push.value : false;
+      if (S.view === 'profile') render();
+    } finally {if (profileRequest === controller) profileRequest = null;}
+  }
   function render() {
     rememberQuickDraft();
     if (S.me && listControls?.isComposing()) return;
-    const key = JSON.stringify([S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.teamsUnverified,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,S.assignments,S.assignmentFilter,plannerStatus,!!draftUi?.available,undoTrash?.id]);
+    const key = JSON.stringify(S.me && S.view === 'profile' ? ['profile',S.me.id,profileState()]
+      : [S.me?.id,S.me?.name,S.view,S.day,S.month,S.selected,S.today,S.items,S.upcoming,S.channels,S.prefs,S.connection,S.teamsUnverified,S.ready,S.partErrors,reviewItems,S.pendingMonth,S.syncing,S.syncMessage,S.listFilters,S.calendarSource,S.assignments,S.assignmentFilter,S.classroom,plannerStatus,!!draftUi?.available,undoTrash?.id]);
     if (key === lastRenderKey) {updateRefreshStatus(); updateSyncStatus(); return;}
     const searchFocus = listControls?.captureFocus();
     const input = $('#quick-form')?.elements?.title;
@@ -547,39 +708,269 @@
   }
   function renderContent() {
     if (!S.me) return;
+    const profileNav = $('#nav-profile');
+    if (profileNav) {
+      profileNav.classList.toggle('active', S.view === 'profile');
+      if (S.view === 'profile') profileNav.setAttribute('aria-current', 'page');
+      else profileNav.removeAttribute('aria-current');
+    }
     if ($('#nav-assignments')) {$('#nav-assignments').hidden = !assignmentsEnabled(); $('#nav-assignments').classList.toggle('active',S.view === 'assignments');}
+    if (profile && S.view === 'profile') {
+      topbar.hidden = false; $('#account-name').textContent = S.me.name;
+      $('#nav-today').classList.toggle('active',false); $('#nav-calendar').classList.toggle('active',false);
+      const openRows = new Set(Array.from(root.querySelectorAll?.('[data-profile-section][open]') || [], row => row.dataset.profileSection));
+      const focus = document.activeElement?.id;
+      root.innerHTML = profile.render(profileState(), openRows);
+      if (focus?.startsWith('profile-summary-')) document.getElementById(focus)?.focus({preventScroll:true});
+      return;
+    }
     if (assignmentsEnabled() && S.view === 'assignments') {
       topbar.hidden = false; $('#account-name').textContent = S.me.name;
       $('#nav-today').classList.toggle('active',false); $('#nav-calendar').classList.toggle('active',false);
-      const connect = '/auth/login?assignments=1' + (S.connection?.background_enabled === true ? '&background=1' : '');
-      root.innerHTML = A.render(S.assignments,S.assignmentFilter,connect); return;
+      const connect = teamsAssignmentsEnabled()
+        ? '/auth/login?assignments=1' + (S.connection?.background_enabled === true ? '&background=1' : '')
+        : '';
+      const snapshot = {...S.assignments,items:[...(S.assignments.items || []),...classroomAssignments()]};
+      root.innerHTML = A.render(snapshot,S.assignmentFilter,connect,Date.now(),classroomCard(true)); return;
     }
     if (!S.today) return renderLoadState();
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
     $('#nav-today').classList.toggle('active', S.view === 'today'); $('#nav-calendar').classList.toggle('active', S.view === 'calendar');
     if (S.view === 'calendar') return renderCalendar();
     const all = [...S.today.teams, ...S.today.personal].filter(e => !e.cancelled), done = all.filter(e => e.completed).length;
-    const teams = shownItems(S.today.teams), personal = shownItems(S.today.personal);
-    const upcoming = shownItems(S.upcoming.filter(e => e.end_date > S.day && !e.completed && !e.cancelled)).sort((a, b) => a.end_date.localeCompare(b.end_date) || (a.time || '').localeCompare(b.time || '')).slice(0, 5);
+    const personal = shownItems(S.today.personal);
+    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + plannerTools() + listTools('today',[...S.today.teams,...S.today.personal,...S.upcoming]) + `<div class="today-layout"><div class="stack">${assignmentToday()}${todaySchoolEvents()}${classroomCard()}<section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${personal.length}</span></h2></div><div class="list">${list(personal, filteredEmpty('오늘 할 일을 가볍게 적어보세요.',S.today.personal.length))}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">${S.ready.today ? '완료한 항목은 원래 위치에 남아요.' : '먼저 확인된 개인 할 일 기준이에요. Teams 일정은 확인 중이에요.'}</p></section>${todayUpcoming()}<section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
+  }
+  function todaySchoolEvents() {
+    const classroom = classroomSchedule().filter(e => e.start_date <= S.day && S.day <= e.end_date);
+    const teams = shownItems([...S.today.teams,...classroom]);
     const teamsPending = S.teamsUnverified || !S.ready.today || (SCHOOL && S.service?.mode !== 'preview' && (!S.ready.settings || S.connection?.ingestion_pending || S.connection?.state !== 'connected'));
-    const teamsCount = teamsPending && !S.today.teams.length ? (!S.ready.today || !S.ready.settings || S.connection?.ingestion_pending || S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : teams.length;
+    const teamsCount = teamsPending && !teams.length ? (!S.ready.today || !S.ready.settings || S.connection?.ingestion_pending || S.connection?.state === 'checking' ? '확인 중' : '확인 필요') : teams.length;
     const teamsEmpty = S.teamsUnverified ? '권한을 다시 확인하는 동안 Teams 일정을 잠시 숨겼어요. 확인되면 다시 표시돼요.' : !S.ready.today ? (S.partErrors.today || 'Teams 일정을 확인하는 대로 표시해요.') : teamsPending ? (S.connection?.ingestion_pending || !S.ready.settings ? 'Teams 일정을 확인하는 대로 표시해요.' : connectionText[S.connection?.state] || 'Teams 일정을 확인하고 있어요.') : '오늘의 Teams 일정이 없어요.';
-    root.innerHTML = intro('오늘 할 일', pretty(S.day)) + plannerTools() + listTools('today',[...S.today.teams,...S.today.personal,...S.upcoming]) + `<div class="today-layout"><div class="stack">${assignmentToday()}<section class="card"><div class="card-head"><h2><span class="dot"></span>Teams 일정 <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${!S.ready.today && !S.today.teams.length ? `<div class="empty" role="${S.partErrors.today && !S.permissionPending ? 'alert' : 'status'}">${esc(teamsEmpty)}</div>` : list(teams, filteredEmpty(teamsEmpty,S.today.teams.length))}</div></section><section class="card"><div class="card-head"><h2><span class="dot personal"></span>개인 할 일 <span class="count">${personal.length}</span></h2></div><div class="list">${list(personal, filteredEmpty('오늘 할 일을 가볍게 적어보세요.',S.today.personal.length))}</div><form class="quick-form" id="quick-form"><input value="${esc(S.quickDraft || '')}" name="title" aria-label="오늘 할 일" maxlength="500" required placeholder="오늘 할 일 빠르게 추가"><button class="primary" type="submit">추가</button></form></section></div><aside class="stack"><section class="card progress-card"><p class="eyebrow">오늘의 진행</p><h2>${done}<span class="muted"> / ${all.length} 완료</span></h2><div class="progress-track"><div class="progress-fill" style="width:${all.length ? Math.round(done / all.length * 100) : 0}%"></div></div><p class="muted fine">${S.ready.today ? '완료한 항목은 원래 위치에 남아요.' : '먼저 확인된 개인 할 일 기준이에요. Teams 일정은 확인 중이에요.'}</p></section><section class="card"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : `<div class="empty">${esc(filteredEmpty('일주일 안에 다가오는 마감이 없어요.',S.upcoming.length))}</div>`}</div></section><section class="card help-card"><h2>${SCHOOL ? '내 일정 관리' : '함께 시험해 보세요'}</h2><p class="muted">기간을 정해 할 일을 추가하고, 캘린더에서 이어지는 막대를 확인해 보세요.</p><div class="button-row"><button class="secondary small" data-action="hidden">숨긴 일정</button>${SCHOOL ? '<button class="secondary small" data-action="security">연결 및 보안</button>' : '<button class="secondary small" data-action="feedback">의견 남기기</button>'}</div></section></aside></div>`;
+    return `<section class="card today-school-events"><div class="card-head"><h2><span class="dot"></span>${S.classroom?.announcement_analysis ? '학교 일정' : 'Teams 일정'} <span class="count">${esc(teamsCount)}</span></h2><span class="muted fine">${SCHOOL ? '학교 공지' : '예시 공지'}</span></div><div class="list">${!S.ready.today && !teams.length ? `<div class="empty" role="${S.partErrors.today && !S.permissionPending ? 'alert' : 'status'}">${esc(teamsEmpty)}</div>` : list(teams, filteredEmpty(teamsEmpty,S.today.teams.length))}</div></section>`;
+  }
+  function todayUpcoming() {
+    const last = C.addDays(S.day,7);
+    const classroom = classroomSchedule().filter(e => e.end_date <= last);
+    const upcoming = shownItems([...S.upcoming,...classroom].filter(e =>
+      e.end_date > S.day && !e.completed && !e.cancelled
+    )).sort((a,b) => a.end_date.localeCompare(b.end_date) || (a.time || '').localeCompare(b.time || '')).slice(0,5);
+    return `<section class="card today-upcoming"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming && !upcoming.length ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(isClassroom(e) ? 'Google Classroom' : e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : `<div class="empty">${esc(filteredEmpty('일주일 안에 다가오는 마감이 없어요.',S.upcoming.length))}</div>`}</div></section>`;
+  }
+  function classroomCard(connectionOnly = false) {
+    if (!S.service?.classroom_enabled) return '';
+    const connection = S.classroom;
+    const google = connection?.method === 'google';
+    const actions = [];
+    if (connection && S.service.classroom_google_enabled && (!google || connection.reauth)) {
+      actions.push(`<button class="secondary small" data-action="classroom-google-connect">${google ? 'Google Classroom 다시 연결' : 'Google Classroom 연결'}</button>`);
+    }
+    if (connection?.connected) {
+      actions.push('<button class="text-button" data-action="classroom-disconnect">연결 해제</button>');
+    } else if (connection && !S.service.classroom_google_enabled) {
+      actions.push('<button class="secondary small" data-action="classroom-connect">Classroom 연결</button>');
+    }
+    if (connection?.courses?.length) actions.unshift(classroomCoursesButton());
+    if (typeof connection?.announcement_analysis === 'boolean') {
+      actions.unshift(`<button class="secondary small" data-action="classroom-analysis">${connection.announcement_analysis ? 'AI 일정 추출 끄기' : 'AI 일정 추출 켜기'}</button>`);
+    }
+    let body;
+    if (!connection) {
+      body = esc(S.partErrors.classroom || 'Classroom 연결을 확인하고 있어요.');
+    } else if (!connection.connected) {
+      body = '학교 Google 계정을 연결하면 공지와 과제가 여기에 표시돼요.';
+    } else if (connection.reauth) {
+      body = 'Google 읽기 권한을 다시 승인하면 공지와 과제를 가져올 수 있어요.';
+    } else if (!connection.snapshot) {
+      body = google ? 'Google Classroom에서 공지와 과제를 가져오고 있어요.'
+        : '최근 동기화 기록이 없어요. Apps Script에서 실행 결과를 확인해 주세요.';
+    }
+    if (body) body = `<p class="empty" role="status">${body}</p>`;
+    else {
+      const dateTime = new Intl.DateTimeFormat('ko-KR', {
+        dateStyle:'short', timeStyle:'short', timeZone:'Asia/Seoul'
+      });
+      const statusOnly = connectionOnly || connection.announcement_analysis;
+      const items = statusOnly ? [] : connection.snapshot.items.filter(item => item.kind === 'announcement');
+      const rows = items.map(item => {
+        const link = item.url ? ` <a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">원문</a>` : '';
+        return `<div class="upcoming-item"><div class="upcoming-text"><strong>${esc(item.title)}</strong><small>${esc(item.course)} · 공지${link}</small>${item.description ? `<p class="fine">${esc(item.description)}</p>` : ''}</div></div>`;
+      }).join('');
+      body = `<p class="fine muted">최근 동기화 ${esc(dateTime.format(connection.snapshot.captured_at))}</p>${statusOnly ? '' : rows || '<p class="empty">표시할 구글 클래스룸 공지가 없어요.</p>'}`;
+    }
+    return `<section class="card classroom-card"><div class="card-head"><h2>Google Classroom</h2><div class="actions">${actions.join('')}</div></div><div class="list">${body}</div></section>`;
+  }
+  function classroomCoursesButton() {
+    return '<button class="secondary small" data-action="classroom-courses">구클 수업 표시</button>';
+  }
+  function classroomConnectionDialog(google) {
+    const explanation = google ? '수업 목록·공지·내 과제와 제출 상태를 읽어 CalendarSync에 표시해요. 동기화에 쓰는 Google 연결 정보와 최근 목록은 암호화해 저장해요.'
+      : '내 Apps Script가 수업 목록·공지·내 과제와 제출 상태를 CalendarSync로 보내요. 가져온 최근 목록은 암호화해 저장해요.';
+    const ai = google ? '<p>공지 AI 분석은 연결한 뒤 따로 켤 수 있어요.</p>' : '';
+    openDialog('Google 클래스룸을 연결할까요?', `<p>${explanation}</p>${ai}<p><a href="/privacy#classroom" target="_blank" rel="noopener noreferrer">클래스룸 개인정보 안내</a></p>`,
+      `<button class="secondary" data-action="close">취소</button><button class="primary" data-action="${google ? 'classroom-google-confirm' : 'classroom-script-confirm'}">${google ? 'Google에서 읽기 권한 확인' : 'Apps Script 연결 계속'}</button>`);
+  }
+  function classroomAnalysisDialog() {
+    const enabled = S.classroom?.announcement_analysis;
+    if (typeof enabled !== 'boolean') return;
+    const explanation = enabled
+      ? '끄면 새 공지 본문 전송이 중단되고, 추출한 구클 일정이 CalendarSync에서 삭제돼요.'
+      : '구글 클래스룸 공지 본문과 작성일을 OpenAI API에 보내 일정과 요약을 만들어요. 확인된 일정은 오늘 할 일과 캘린더에 표시돼요. 언제든 이 설정을 끌 수 있어요.';
+    openDialog('구글 클래스룸 AI 일정 추출', `<p>${explanation}</p><p class="fine"><a href="/privacy" target="_blank" rel="noopener noreferrer">개인정보 안내</a></p>`,
+      `<button class="secondary" data-action="close">취소</button><button class="primary" data-action="classroom-analysis-confirm" data-enabled="${!enabled}">${enabled ? '추출 끄기' : '동의하고 추출 켜기'}</button>`);
+  }
+  function changeClassroomAnalysis(choice) {
+    if (typeof S.classroom?.announcement_analysis !== 'boolean' || !['true','false'].includes(choice)) return;
+    const enabled = choice === 'true';
+    const message = enabled ? '구클 공지에서 일정을 확인하고 있어요.' : '구클 AI 일정 추출을 껐어요.';
+    return mutate(() => api('/api/classroom/google/announcement-analysis',{method:'PUT',body:{enabled}}), message, false, () => {
+      classroomRevision++;
+      stopClassroomRefresh();
+      S.classroom = {...S.classroom,announcement_analysis:enabled};
+      if (!enabled && S.classroom.snapshot) S.classroom.snapshot = {...S.classroom.snapshot,events:[]};
+      render();
+    });
+  }
+  function showClassroomCourses() {
+    const courses = (S.classroom?.courses || []).slice().sort((a,b) => a.name.localeCompare(b.name,'ko'));
+    const nameCounts = new Map();
+    for (const course of courses) nameCounts.set(course.name,(nameCounts.get(course.name) || 0) + 1);
+    const rows = courses.map(course => {
+      const label = nameCounts.get(course.name) > 1 ? `${course.name} (${course.key.replace(/^id:/,'')})` : course.name;
+      const action = course.hidden ? '다시 표시' : '숨기기';
+      return `<div class="hidden-item"><strong>${esc(label)}</strong><button class="secondary small" data-action="classroom-course-visibility" data-course-key="${esc(course.key)}" aria-label="${esc(label)} ${action}">${action}</button></div>`;
+    }).join('');
+    openDialog('Google Classroom 수업 표시', `<p class="fine muted">숨긴 수업의 공지와 과제는 내 CalendarSync 화면에서 빠져요.</p><div class="hidden-list">${rows || '<p>표시할 구글 클래스룸 수업이 없어요.</p>'}</div>`, '<button class="secondary" data-action="close">닫기</button>');
+  }
+  function changeClassroomCourse(key) {
+    const course = S.classroom?.courses?.find(item => item.key === key);
+    if (!course) return;
+    const dialog = dialogEpoch;
+    const message = course.hidden ? '구글 클래스룸 수업을 다시 표시했어요.' : '구글 클래스룸 수업을 숨겼어요.';
+    return mutate(() => api('/api/classroom/courses/preference',{method:'PUT',body:{key,hidden:!course.hidden}}), message, false, value => {
+      classroomRevision++;
+      stopClassroomRefresh();
+      S.classroom = value;
+      render();
+      if (modal.open && dialog === dialogEpoch) showClassroomCourses();
+    });
+  }
+  async function connectClassroom() {
+    const epoch = authEpoch;
+    const result = await api('/api/classroom/connection', {method:'POST'});
+    if (!activeView(epoch)) return;
+    classroomRevision++;
+    S.classroom = {connected:true,snapshot:null};
+    render();
+    scheduleClassroomRefresh();
+    openDialog('Google Classroom 연결', `
+      <ol>
+        <li>학교 계정의 개인 Apps Script 프로젝트에 <a href="/assets/classroom-sync.gs" download>Code.gs 코드</a>와 <a href="/assets/classroom-appsscript.json" download>appsscript.json 설정</a>을 붙여넣으세요.</li>
+        <li>프로젝트 설정의 스크립트 속성에 아래 두 값을 저장하세요.</li>
+        <li><strong>startClassroomSync</strong>를 실행하고 Google 권한을 승인하세요. 첫 전송이 성공하면 15분마다 갱신돼요.</li>
+      </ol>
+      <label class="field"><span class="field-label">CALENDARSYNC_ORIGIN</span><input readonly value="${esc(location.origin)}"></label>
+      <label class="field"><span class="field-label">CALENDARSYNC_TOKEN</span><input id="classroom-connection-token" readonly value="${esc(result.token)}"></label>
+      <p class="fine muted">연결 키는 이 창에서 한 번만 표시돼요.</p>`,
+      '<button class="secondary" data-action="close">닫기</button>');
+  }
+  function calendarDateButton(day, column, count) {
+    const selected = day === S.selected;
+    const today = day === S.day;
+    return `<button type="button" aria-label="${esc(pretty(day))}, 일정 ${count}개"
+      aria-pressed="${selected}"${today ? ' aria-current="date"' : ''}
+      class="cal-day${selected ? ' selected' : ''}" data-day="${day}" style="grid-column:${column};grid-row:1 / -1">
+      <span aria-hidden="true" class="cal-date${day.slice(0, 7) !== S.month ? ' outside' : ''}${today ? ' today' : ''}">${Number(day.slice(8))}</span>
+    </button>`;
+  }
+  function calendarEventButton(item, segment = null) {
+    const title = item.title + (item.cancelled ? ' · 취소' : '');
+    const classes = [
+      segment ? 'range-event' : 'single-event', calendarSourceOf(item),
+      segment?.before ? 'before' : '', segment?.after ? 'after' : '',
+      item.completed ? 'done' : '', item.cancelled ? 'cancelled' : '',
+    ].filter(Boolean).join(' ');
+    const placement = segment ? ` style="grid-column:${segment.first + 1} / ${segment.last + 2};grid-row:${segment.lane + 2}"` : '';
+    const label = `${title} · ${period(item)}${item.time ? ' ' + item.time : ''}`;
+    return `<button type="button" class="${classes}" data-detail="${esc(item.id)}" data-source="${esc(item.source)}"
+      aria-label="${esc(label)}" title="${esc(label)}"${placement}>
+      <span class="${segment ? 'range-title' : 'single-title'}">${segment?.before ? '‹ ' : ''}${esc(title)}${segment?.after ? ' ›' : ''}</span>
+      ${segment?.endsHere ? '<span class="deadline-tag">마감</span>' : ''}
+      ${!segment && item.time ? `<span class="single-time">${esc(item.time)}</span>` : ''}
+    </button>`;
+  }
+  function calendarWeek(week, items) {
+    const ranges = week.segments.map(segment => calendarEventButton(segment.item, segment)).join('');
+    const dates = week.days.map((day, index) => {
+      const count = items.filter(item => item.start_date <= day && day <= item.end_date).length;
+      return calendarDateButton(day, index + 1, count);
+    }).join('');
+    const singleDays = week.days.map((day, index) => {
+      const events = items.filter(item => item.start_date === day && item.end_date === day);
+      if (!events.length) return '';
+      return `<div class="single-day" style="grid-column:${index + 1};grid-row:${week.lanes + 2}">${events.map(item => calendarEventButton(item)).join('')}</div>`;
+    }).join('');
+    const rangeRows = week.lanes ? `repeat(${week.lanes},var(--calendar-band-height)) ` : '';
+    return `<div class="calweek" style="grid-template-rows:var(--calendar-date-height) ${rangeRows}minmax(var(--calendar-day-gap),auto)">${dates}${ranges}${singleDays}</div>`;
   }
   function renderCalendar() {
     if (!S.ready.calendar) {
       root.innerHTML = intro('캘린더', '확인된 일정부터 표시해요.') + `<section class="card"><div class="card-head"><h2>${esc(S.month)}</h2></div><div class="empty" role="status">${esc(S.partErrors.calendar || '달력 일정을 불러오고 있어요.')}</div></section>`;
       return;
     }
-    const visibleItems = shownItems([...S.items,...assignmentCalendar()]);
-    const weeks = C.layoutRanges(visibleItems, S.month);
-    const gridHtml = weeks.map(week => {
-      const rows = week.lanes + 2;
-      return `<div class="calweek" style="grid-template-rows:30px ${week.lanes ? `repeat(${week.lanes},30px) ` : ''}minmax(55px,auto)">${week.days.map((day, i) => `<button aria-label="${esc(pretty(day))}" class="cal-day ${day === S.selected ? 'selected' : ''}" data-day="${day}" style="grid-column:${i + 1};grid-row:1 / span ${rows}"></button><span class="cal-date ${day.slice(0, 7) !== S.month ? 'outside' : ''} ${day === S.day ? 'today' : ''}" style="grid-column:${i + 1};grid-row:1">${Number(day.slice(8))}</span>`).join('')}${week.segments.map(s => `<button title="${esc(s.item.title + ' · ' + period(s.item))}" aria-label="${esc(s.item.title + ' · ' + period(s.item))}" data-detail="${esc(s.item.id)}" data-source="${s.item.source}" class="range-event ${s.item.source === 'personal' ? 'personal' : ''} ${s.before ? 'before' : ''} ${s.after ? 'after' : ''} ${s.item.completed ? 'done' : ''} ${s.item.cancelled ? 'cancelled' : ''}" style="grid-column:${s.first + 1} / ${s.last + 2};grid-row:${s.lane + 2}"><span class="range-title">${s.before ? '‹ ' : ''}${esc(s.item.title)}${s.item.cancelled ? ' · 취소' : ''}${s.after ? ' ›' : ''}</span>${s.endsHere ? '<span class="deadline-tag">마감</span>' : ''}</button>`).join('')}${week.days.map((day, i) => `<div class="single-day" style="grid-column:${i + 1};grid-row:${rows}">${visibleItems.filter(e => e.start_date === day && e.end_date === day).map(e => `<button data-detail="${esc(e.id)}" data-source="${e.source}" title="${esc(e.title)}" class="single-event ${e.source === 'personal' ? 'personal' : ''} ${e.completed ? 'done' : ''} ${e.cancelled ? 'cancelled' : ''}"><span class="single-title">${esc(e.title)}${e.cancelled ? ' · 취소' : ''}</span><span class="single-time">${esc(e.time || '')}</span></button>`).join('')}</div>`).join('')}</div>`;
-    }).join('');
-    const selected = visibleItems.filter(e => e.start_date <= S.selected && e.end_date >= S.selected);
+    const calendarItems = calendarEntries(S.calendarSource);
+    const visibleItems = shownItems(calendarItems);
+    const onSelectedDay = item => item.start_date <= S.selected && item.end_date >= S.selected;
+    const selected = visibleItems.filter(onSelectedDay);
     const monthLabel = `${S.month.slice(0, 4)}년 ${Number(S.month.slice(5))}월`;
-    root.innerHTML = intro('캘린더', '기간이 있는 일정은 시작일부터 마감일까지 이어져요.') + plannerTools() + listTools('calendar',S.items) + `<section class="card calendar-card"><div class="calendar-toolbar"><h2>${monthLabel}</h2><span role="status" aria-live="polite">${S.pendingMonth ? esc(S.pendingMonth + ' 일정을 불러오는 중…') : ''}</span><div class="month-actions"><button class="secondary small" data-action="hidden">숨긴 일정</button><button class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button><button class="secondary small" data-action="this-month">이번 달</button><button class="icon-button" aria-label="다음 달" data-action="next-month">›</button></div></div><div class="calendar-legend"><span><i class="dot"></i>${SCHOOL ? 'Teams' : 'Teams 예시'}</span><span><i class="dot personal"></i>개인 할 일</span><span class="muted">날짜를 누르면 아래에 상세 목록이 보여요.</span></div><div class="calendar-grid"><div class="weekdays">${['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="weekday">${d}</div>`).join('')}</div>${gridHtml}</div></section><section class="card" style="margin-top:20px"><div class="card-head selected-heading"><h2>${esc(pretty(S.selected))}</h2><span class="muted fine">기간 전체 기준 · 오늘 표시는 선택한 날짜를 따릅니다</span></div><div class="date-detail">${list(selected, S.teamsUnverified ? 'Teams 일정은 권한을 다시 확인한 뒤 표시돼요. 현재 확인된 개인 할 일은 없어요.' : filteredEmpty('이 날짜에는 표시할 일정이 없어요.',S.items.filter(e => e.start_date <= S.selected && e.end_date >= S.selected).length))}</div></section>`;
+    const sources = [['teams', SCHOOL ? 'Teams' : 'Teams 예시']];
+    if (S.service?.classroom_enabled) sources.push(['classroom', 'Google Classroom']);
+    sources.push(['personal', '개인 할 일']);
+    const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
+    const empty = S.teamsUnverified && S.calendarSource === 'all'
+      ? 'Teams 일정은 권한을 다시 확인한 뒤 표시돼요. 현재 확인된 다른 일정은 없어요.'
+      : filteredEmpty('이 날짜에는 표시할 일정이 없어요.', calendarItems.filter(onSelectedDay).length);
+
+    root.innerHTML = intro('캘린더', '') + plannerTools() + listTools('calendar', calendarItems) + `
+      <div class="calendar-layout">
+        <section class="card calendar-card" aria-labelledby="calendar-month">
+          <div class="calendar-toolbar">
+            <h2 id="calendar-month">${monthLabel}</h2>
+            <div class="month-actions">
+              <button type="button" class="icon-button" aria-label="이전 달" data-action="prev-month">‹</button>
+              <button type="button" class="secondary small" data-action="this-month">오늘</button>
+              <button type="button" class="icon-button" aria-label="다음 달" data-action="next-month">›</button>
+            </div>
+          </div>
+          <div class="calendar-options">
+            <label>일정 출처
+              <select id="calendar-source">
+                ${[['all', '전체'], ...sources].map(([key, label]) =>
+                  `<option value="${key}"${key === S.calendarSource ? ' selected' : ''}>${label}</option>`).join('')}
+              </select>
+            </label>
+            <div class="month-actions">
+              ${S.classroom?.courses?.length ? classroomCoursesButton() : ''}
+              <button type="button" class="secondary small" data-action="hidden">숨긴 일정</button>
+            </div>
+          </div>
+          <div class="calendar-month-status fine" role="status">${S.pendingMonth ? esc(S.pendingMonth + ' 일정을 불러오는 중…') : ''}</div>
+          <div class="calendar-grid">
+            <div class="weekdays">${weekdays.map(day => `<div class="weekday">${day}</div>`).join('')}</div>
+            ${C.layoutRanges(visibleItems, S.month).map(week => calendarWeek(week, visibleItems)).join('')}
+          </div>
+          <div class="calendar-legend" aria-label="일정 출처 범례">
+            ${sources.map(([key, label]) => `<span><i class="dot ${key}" aria-hidden="true"></i>${label}</span>`).join('')}
+          </div>
+        </section>
+        <section class="calendar-agenda" aria-labelledby="calendar-date-title">
+          <div class="card-head selected-heading">
+            <h2 id="calendar-date-title">${esc(pretty(S.selected))}</h2>
+            <span class="muted fine">${selected.length}개 일정</span>
+          </div>
+          <div class="date-detail">${list(selected, empty)}</div>
+        </section>
+      </div>`;
   }
   async function changeMonth(action) {
     const date = new Date((S.pendingMonth || S.permissionMonth || S.month) + '-01T00:00:00Z');
@@ -626,15 +1017,59 @@
     }
   }
   document.addEventListener('cancel', async event => {if (event.target !== modal) return; if (plannerEnabled() && personalForm()) {event.preventDefault(); if (!S.busy && await leaveTaskForm()) closeDialog();} else {dialogEpoch++; dialogRequestId++;}}, true);
-  function find(id, source) {return [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming, ...(S.assignments?.items || [])].find(e => e.id === id && e.source === source);}
-  let detailItem = null;
+  modal.addEventListener?.('close', () => {
+    if (!modal.open && $('#classroom-connection-token')) modal.replaceChildren();
+  });
+  function find(id, source) {
+    const matches = item => item.id === id && item.source === source;
+    return (S.view === 'calendar' && calendarEntries(S.calendarSource).find(matches)) ||
+      [...(S.today?.teams || []), ...(S.today?.personal || []), ...S.items, ...S.upcoming,
+       ...(S.assignments.items || []), ...classroomAssignments(), ...classroomSchedule()].find(matches);
+  }
+  let detailItem = null, calendarDetailEpoch = -1;
+  function updateClassroom(value) {
+    S.classroom = value;
+    if (!modal.open || calendarDetailEpoch !== dialogEpoch) return;
+    const current = [...classroomAssignments(),...classroomSchedule()];
+    if (detailItem.calendar_members.filter(isClassroom).some(old => !current.some(item =>
+      item.source === old.source && item.id === old.id && item.source_url === old.source_url
+    ))) closeDialog();
+  }
+  function calendarSourceLinks(members) {
+    const labels = {teams:'Teams 게시물',assignment:'Teams 과제',classroom:'Google Classroom 과제','classroom-event':'Google Classroom 공지'};
+    const seen = new Set();
+    return members.flatMap(item => (item.related_sources || [{url:item.source_url,channel:item.channel}]).map(source => {
+        const label = labels[item.source] + (source.channel ? ` · ${source.channel}` : '') + ' →';
+        const link = sourceLink(source.url, label, item.source);
+        if (!link || seen.has(source.url)) return '';
+        seen.add(source.url);
+        return link;
+    })).join('');
+  }
   function detail(e) {
     detailItem = e;
-    if (e.source === 'assignment' && A) {
-      openDialog(e.title, '<p class="detail-meta">'+esc(e.channel)+' · Teams 과제</p><p>'+esc(e.end_date ? period(e)+' '+(e.time || '') : '기한 없음')+'</p><p>'+esc(A.status(e))+'</p><p class="muted fine">제출 상태는 Teams에서 읽어 와요. 제출과 수정은 Teams에서 진행해 주세요.</p>'+sourceLink(e.source_url)+'<div class="detail-notes">'+esc(e.notes || '자세한 안내는 Teams 과제에서 확인해 주세요.')+'</div>', '<button class="secondary" data-action="close">닫기</button>');
+    calendarDetailEpoch = e.calendar_members ? dialogEpoch + 1 : -1;
+    const groupedLinks = e.calendar_members ? calendarSourceLinks(e.calendar_members) : null;
+    const containsTeams = e.calendar_members?.some(item => !isClassroom(item));
+    const assignmentFooter = (e.end_date && S.view !== 'calendar'
+      ? '<button type="button" class="secondary" data-action="assignment-calendar-date">캘린더에서 마감일 보기</button>' : '')
+      + '<button type="button" class="secondary" data-action="close">닫기</button>';
+    if (isClassroom(e)) {
+      const link = groupedLinks ?? sourceLink(e.source_url, 'Google Classroom 원문 보기 →', e.source);
+      const due = e.end_date ? `${period(e)} ${e.time || ''}` : '기한 없음';
+      const status = e.source === 'classroom' ? `<p>${esc(A.status(e))}</p>` : e.cancelled ? '<p>취소된 일정</p>' : '';
+      const footer = e.source === 'classroom' ? assignmentFooter : '<button type="button" class="secondary" data-action="close">닫기</button>';
+      openDialog(e.title, `<p class="detail-meta">${esc(e.channel)} · Google Classroom ${e.source === 'classroom' ? '과제' : '공지'}</p><p>${esc(due)}</p>${status}${link}<div class="detail-notes">${esc(e.notes || '')}</div>`, footer, containsTeams);
       return;
     }
-    openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + sourceLink(e.source_url) : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : (testServer() ? '<button class="secondary" data-action="override-detail">나만 수정</button>' : '')}${testServer() ? '<button class="secondary" data-action="reminders">예약 알림</button>' : ''}`, e.source === 'teams');
+    if (e.source === 'assignment' && A) {
+      openDialog(e.title, '<p class="detail-meta">'+esc(e.channel)+' · Teams 과제</p><p>'+esc(e.end_date ? period(e)+' '+(e.time || '') : '기한 없음')+'</p><p>'+esc(A.status(e))+'</p><p class="muted fine">제출 상태는 Teams에서 읽어 와요. 제출과 수정은 Teams에서 진행해 주세요.</p>'+(groupedLinks ?? sourceLink(e.source_url, 'Teams 과제 원문 보기 →', e.source))+'<div class="detail-notes">'+esc(e.notes || '자세한 안내는 Teams 과제에서 확인해 주세요.')+'</div>', assignmentFooter, containsTeams);
+      return;
+    }
+    const links = groupedLinks ?? (e.related_sources
+      ? e.related_sources.map((source, i) => sourceLink(source.url, `Teams 원문 ${i + 1} · ${source.channel} →`)).join('')
+      : sourceLink(e.source_url));
+    openDialog(e.title, `<p class="detail-meta">${esc(e.source === 'personal' ? '직접 작성한 할 일' : e.channel)} · ${esc(e.source === 'personal' ? '개인' : kindName[e.kind] || e.kind)}</p><p>${esc(period(e))} ${esc(e.time || '종일')}</p>${e.cancelled ? '<p class="badge">취소된 일정</p>' : ''}${e.source === 'personal' ? `<p class="muted">오늘 표시: ${esc({daily: '기간 중 매일', selected: '선택한 날짜와 마지막 날', final: '마지막 날만'}[e.display_mode])}</p>${e.display_mode === 'selected' ? `<p class="fine muted">${e.selected_dates.map(esc).join(', ')}</p>` : ''}` : (SCHOOL ? '<p class="muted fine">학교 공지에서 추출한 일정이에요. 정확한 내용은 원문에서 확인해 주세요.</p>' + links : '<p class="muted fine">실제 학교 공지가 아닌 베타용 예시입니다.</p>')}<div class="detail-notes">${esc(e.notes || '메모가 없어요.')}</div>`, `<button class="secondary" data-action="hide-detail">숨기기</button>${e.source === 'personal' ? '<button class="danger" data-action="delete-detail">삭제</button><button class="primary" data-action="edit-detail">수정</button>' : (testServer() ? '<button class="secondary" data-action="override-detail">나만 수정</button>' : '')}${testServer() ? '<button class="secondary" data-action="reminders">예약 알림</button>' : ''}`, e.source === 'teams');
   }
   function taskForm(e = null, draft = null) {
     detailItem = e; taskMissing = false; taskFormRevision++;
@@ -732,7 +1167,25 @@
     if (!item) return;
     const original = {...item};
     const pending = values.hidden === true ? '숨기는 중…' : values.hidden === false ? '복원하는 중…' : '완료 상태를 저장하는 중…';
-    return mutate(() => setState(original, values), message, false, result => applyConfirmedState(original, values, result), pending);
+    if (original.calendar_members) {
+      return mutate(() => changeEventSources(original, id => setState({...original, id}, values)),
+        message, false, undefined, pending);
+    }
+    return mutate(() => changeEventSources(original, id => setState({...original, id}, values)),
+      message, false, result => applyConfirmedState(original, values, result), pending);
+  }
+  async function changeEventSources(item, write) {
+    if (!item.related_sources) return write(item.id);
+    const epoch = authEpoch;
+    const results = await Promise.allSettled(item.related_sources.map(source => write(source.id)));
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed) {
+      if (activeView(epoch) && results.some(result => result.status === 'fulfilled')) {
+        await load().catch(() => {});
+      }
+      throw failed.reason;
+    }
+    return results[0].value;
   }
   function applyConfirmedDelete(item) {
     const keep = candidate => candidate.id !== item.id || candidate.source !== item.source;
@@ -802,11 +1255,11 @@
     const button = event.target.closest('button'); if (!button || button.disabled) return;
     const action = button.dataset.action;
     if (S.busy && !['logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
-    if (!S.today && !['today', 'calendar', 'assignments', 'refresh-assignments', 'refresh', 'retry-boot', 'logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
+    if (!S.today && S.view !== 'profile' && !['today', 'calendar', 'assignments', 'assignment-calendar-date', 'profile', 'refresh-assignments', 'refresh', 'retry-boot', 'logout', 'disconnect-device', 'logout-all', 'close'].includes(action)) return;
     const sessionEpoch = authEpoch, ownerDialog = dialogEpoch;
     try {
-      const leavesForm = button.dataset.detail || ['close','today','calendar','assignments','new','filters','hidden','feedback','changes','notifications','security','task-trash'].includes(action);
-      if (leavesForm && personalForm()) {if (!await leaveTaskForm() || !activeView(sessionEpoch) || ownerDialog !== dialogEpoch) return; if (['today','calendar','assignments'].includes(action)) closeDialog();}
+      const leavesForm = button.dataset.detail || ['close','today','calendar','assignments','profile','new','filters','hidden','feedback','changes','notifications','security','task-trash','classroom-courses','classroom-analysis'].includes(action);
+      if (leavesForm && personalForm()) {if (!await leaveTaskForm() || !activeView(sessionEpoch) || ownerDialog !== dialogEpoch) return; if (['today','calendar','assignments','profile'].includes(action)) closeDialog();}
       if (plannerEnabled() && action === 'task-trash') return await openTrash();
       if (plannerEnabled() && action === 'restore-trash') {if (trashItems.some(item => item.id === button.dataset.trashId)) return await restoreTrash(button.dataset.trashId); return;}
       if (plannerEnabled() && action === 'undo-trash') return await restoreTrash(undoTrash?.id);
@@ -817,12 +1270,83 @@
       if (plannerEnabled() && action === 'draft-discard') {if (confirm('서버의 임시저장을 지울까요? 현재 입력은 유지돼요.')) {const result = await taskDrafts?.discard(); if (result?.ok) toast('서버의 임시저장을 지웠어요.');} return;}
       if (button.dataset.changeDecision !== undefined) {const item = reviewDialogItems.get(button.dataset.changeId); if (!item) return; return mutate(() => api('/api/changes/'+encodeURIComponent(item.id),{method:'POST',body:{accept:button.dataset.changeDecision==='accept'}}),'변경사항을 처리했어요.');}
       if (button.dataset.assignmentFilter && assignmentsEnabled()) {S.assignmentFilter = ['upcoming','overdue','completed','all'].includes(button.dataset.assignmentFilter) ? button.dataset.assignmentFilter : 'upcoming'; render(); return;}
-      if (action === 'refresh-assignments' && assignmentsEnabled()) return await loadAssignments(true);
+      if (action === 'refresh-assignments') return await loadAssignments(true);
+      if (action === 'classroom-courses') return showClassroomCourses();
+      if (action === 'classroom-course-visibility') return await changeClassroomCourse(button.dataset.courseKey);
+      if (action === 'classroom-analysis') return classroomAnalysisDialog();
+      if (action === 'classroom-analysis-confirm') return await changeClassroomAnalysis(button.dataset.enabled);
+      if (action === 'classroom-google-connect' && S.service?.classroom_google_enabled) return classroomConnectionDialog(true);
+      if (action === 'classroom-connect' && S.service?.classroom_enabled) return classroomConnectionDialog(false);
+      if (action === 'classroom-google-confirm' && S.service?.classroom_google_enabled) {
+        const epoch = authEpoch;
+        button.disabled = true;
+        try {
+          const result = await api('/api/classroom/google/connect', {method:'POST'});
+          if (!activeView(epoch)) return;
+          const url = new URL(result.authorization_url);
+          if (url.origin !== 'https://accounts.google.com' || url.pathname !== '/o/oauth2/v2/auth') {
+            throw new Error('Google 연결 주소를 확인하지 못했어요.');
+          }
+          location.assign(url.href);
+        } finally {button.disabled = false;}
+        return;
+      }
+      if (action === 'classroom-script-confirm' && S.service?.classroom_enabled) {
+        button.disabled = true;
+        try {return await connectClassroom();} finally {button.disabled = false;}
+      }
+      if (action === 'classroom-disconnect') {
+        const google = S.classroom?.method === 'google';
+        const message = google ? '가져온 목록과 Google 연결 정보를 지우고 Google에 권한 취소를 요청해요.'
+          : '가져온 목록을 지우고 Apps Script 연결 키를 폐기해요.';
+        openDialog('Classroom 연결 해제', `<p>${message}</p><p>Google 클래스룸 원본, 개인 할 일, 수업 표시 설정은 남아요.</p>`,
+          `<button class="secondary" data-action="close">취소</button><button class="danger" data-action="classroom-disconnect-confirm" data-google="${google ? '1' : '0'}">연결 해제</button>`);
+        return;
+      }
+      if (action === 'classroom-disconnect-confirm') {
+        const epoch = authEpoch;
+        const google = button.dataset.google === '1';
+        await api(google ? '/api/classroom/google/connection' : '/api/classroom/connection', {method:'DELETE'});
+        if (!activeView(epoch)) return;
+        classroomRevision++;
+        stopClassroomRefresh();
+        S.classroom = {connected:false,snapshot:null};
+        closeDialog();
+        render();
+        if (google) await load();
+        return;
+      }
       if (button.dataset.detail) {const e = find(button.dataset.detail, button.dataset.source); if (e) detail(e); return;}
-      if (button.dataset.day) {S.selected = button.dataset.day; render(); return;}
+      if (action === 'assignment-calendar-date' && modal.open && ['assignment', 'classroom'].includes(detailItem?.source)) {
+        const date = detailItem.end_date;
+        if (!date) return;
+        closeDialog();
+        S.view = 'calendar';
+        S.calendarSource = 'all';
+        const month = date.slice(0, 7);
+        if (month === S.month && S.ready.calendar && !S.pendingMonth && !S.permissionMonth) {
+          S.selected = date;
+          render();
+        } else {
+          await loadMonth(month, date);
+        }
+        if (activeView(sessionEpoch) && S.view === 'calendar' && S.selected === date) {
+          $(`[data-day="${date}"]`)?.focus?.();
+        }
+        return;
+      }
+      if (button.dataset.day) {
+        S.selected = button.dataset.day;
+        render();
+        $(`[data-day="${S.selected}"]`)?.focus?.({preventScroll:true});
+        return;
+      }
       if (button.dataset.removeDate) {selectedDates.delete(button.dataset.removeDate); syncDates(); draftInputChanged(); return;}
       if (button.dataset.restore !== undefined) {const e = hiddenItems[Number(button.dataset.restore)]; return mutateState(e, {hidden: false}, '일정을 복원했어요.');}
       if (action === 'close') {closeDialog(); return;}
+      if (action === 'profile' && profile && S.me) {S.view = 'profile'; render(); return await Promise.allSettled([loadProfileStatus(),refreshPlannerStatus()]);}
+      if (action === 'profile-refresh') return await Promise.allSettled([load(),loadProfileStatus(),refreshPlannerStatus({force:true})]);
+      if (action === 'profile-logout-all') return openDialog('모든 기기에서 로그아웃할까요?', '<p>모든 기기의 Microsoft 연동과 브라우저 알림을 종료해요. 연결된 클래스룸, 개인 할 일과 표시 설정은 남아요.</p>', '<button class="secondary" data-action="close">취소</button><button class="danger" data-action="logout-all">모든 기기에서 로그아웃</button>');
       if (action === 'today' || action === 'calendar' || (action === 'assignments' && assignmentsEnabled())) {S.view = action; if (S.me) render(); return;}
       if (action === 'refresh') {if (!S.refreshing) return await load(); return;}
       if (action === 'retry-boot') return await boot();
@@ -855,7 +1379,14 @@
   });
   document.addEventListener('change', event => {
     const el = event.target;
+    if (el.name === 'profile-theme') {profile?.setTheme(el.value); return;}
     if (!S.today || S.loading) return;
+    if (el.id === 'calendar-source') {
+      S.calendarSource = el.value;
+      render();
+      $('#calendar-source')?.focus?.({preventScroll:true});
+      return;
+    }
     if (el.dataset.complete) {
       const e = find(el.dataset.complete, el.dataset.source); if (!e) return; const checked = el.checked; el.checked = e.completed;
       return mutateState(e, {completed: checked}, checked ? '완료했어요.' : '완료 표시를 해제했어요.');
@@ -897,7 +1428,12 @@
       data.time = data.time || null; data.selected_dates = data.display_mode === 'selected' ? [...selectedDates].filter(d => d >= data.start_date && d <= data.end_date) : [];
       const e = detailItem;
       if (!data.title.trim() || data.end_date < data.start_date) {$('#form-error').textContent = '제목과 시작·마지막 날짜를 확인해 주세요.'; return;}
-      if (e?.source === 'teams' && testServer()) {delete data.display_mode; delete data.selected_dates; return mutate(() => api(`/api/events/${encodeURIComponent(e.id)}/override`, {method:'PUT',body:data}), '이 계정의 일정만 수정했어요.');}
+      if (e?.source === 'teams' && testServer()) {
+        delete data.display_mode; delete data.selected_dates;
+        return mutate(() => changeEventSources(e, id => api(
+          `/api/events/${encodeURIComponent(id)}/override`, {method:'PUT',body:data}
+        )), '이 계정의 일정만 수정했어요.');
+      }
       return mutate(async () => {const epoch = authEpoch, dialog = dialogEpoch; const draftResult = plannerEnabled() ? await taskDrafts?.flush() : null; if (!activeView(epoch) || dialog !== dialogEpoch || (plannerEnabled() && (autoReadsPaused || resumeCheck))) throw new Error('로그인 상태를 확인한 뒤 다시 저장해 주세요.'); const result = await api(e ? `/api/tasks/${encodeURIComponent(e.id)}` : '/api/tasks',{method:e ? 'PUT' : 'POST',body:{...data,...(e ? {version:e.version} : {})}}); if (activeView(epoch) && plannerEnabled()) await taskDrafts?.clearConfirmed(draftResult); return result;}, '할 일을 저장했어요.', false, result => applyConfirmedState({hidden:false,completed:false,...e,...data,id:e?.id || result.id,source:'personal'}, {}, result));
     }
     if (form.id === 'filters-form') {
@@ -935,6 +1471,11 @@
       try {const me = await api('/api/me'); if (epoch !== authEpoch) return; S.me = me; lastSessionCheckAt = Date.now();} catch (error) {if (epoch !== authEpoch) return; if (error.status === 401) {loginScreen(); return;} throw error;}
       if (plannerEnabled()) {taskDrafts?.load(); refreshPlannerStatus({force:true});}
       await load();
+      if (S.service?.classroom_google_enabled && ['?classroom=connected','?classroom=failed','?classroom=skipped'].includes(location.search)) {
+        const failed = location.search === '?classroom=failed';
+        window.history?.replaceState(null, '', location.pathname);
+        if (failed) toast('Google Classroom 연결을 완료하지 못했어요. 계정과 읽기 권한을 확인해 주세요.', true);
+      }
     } catch (error) {
       if (epoch !== authEpoch) return;
       if (S.me) {failure(error); return;}
@@ -984,7 +1525,31 @@
   async function notificationsPanel() {
     const push = await readDialog('/api/push');
     if (!push) return;
-    openDialog('이 기기의 알림', `<p>알림 상태: <strong>${push.registered ? '켜짐' : '꺼짐'}</strong></p><p class="muted">화면이 닫혀 있어도 지원되는 브라우저에서 알림을 받아요. 잠금화면에는 일정 제목 대신 확인 안내만 표시해요.</p>${!push.configured ? '<p class="error-message">서버의 Web Push 키가 아직 설정되지 않았어요.</p>' : ''}${!push.background_enabled ? '<p class="error-message">알림을 받으려면 다시 로그인할 때 이 기기 연동 유지를 선택해 주세요.</p>' : ''}<form id="notification-form"><label class="toggle-row">아침 요약 알림<input name="morning_enabled" type="checkbox" ${S.prefs.morning_enabled ? 'checked' : ''}></label><label class="field"><span class="field-label">아침 알림 시각</span><input name="morning_time" type="time" required value="${esc(S.prefs.morning_time || '07:00')}"></label><button class="secondary" type="submit">아침 설정 저장</button></form><p class="fine muted">아이폰·아이패드는 홈 화면에 추가한 웹앱에서 알림을 켜야 할 수 있어요. 브라우저·기기 설정에 따라 수신이 제한될 수 있어요.</p>`, `<button class="secondary" data-action="push-disable">이 기기 알림 끄기</button><button class="secondary" data-action="push-test" ${!push.registered ? 'disabled' : ''}>테스트 알림</button><button class="primary" data-action="push-enable" ${!push.configured || !push.background_enabled ? 'disabled' : ''}>이 기기 알림 켜기</button>`);
+    S.profilePush = push;
+    if (S.view === 'profile') render();
+    openDialog('알림 설정', `
+      <div class="notification-layout">
+        <section aria-labelledby="browser-notification-title">
+          <h3 id="browser-notification-title">이 기기의 브라우저 알림 <span class="fine">${push.registered ? '켜짐' : '꺼짐'}</span></h3>
+          <p class="muted">CalendarSync 화면을 닫아도 지원되는 브라우저에서 알림을 받을 수 있어요. 잠금화면에는 일정 확인 안내만 표시해요.</p>
+          ${!push.configured ? '<p class="error-message">서버의 Web Push 키가 아직 설정되지 않았어요.</p>' : ''}
+          ${!push.background_enabled ? '<p class="error-message">알림을 받으려면 다시 로그인할 때 이 기기 연동 유지를 선택해 주세요.</p>' : ''}
+          <div class="notification-actions">
+            <button type="button" class="secondary" data-action="push-disable">이 기기 알림 끄기</button>
+            <button type="button" class="secondary" data-action="push-test" ${!push.registered ? 'disabled' : ''}>테스트 알림</button>
+            <button type="button" class="primary" data-action="push-enable" ${!push.configured || !push.background_enabled ? 'disabled' : ''}>이 기기 알림 켜기</button>
+          </div>
+        </section>
+        <form id="notification-form" aria-labelledby="morning-summary-title">
+          <h3 id="morning-summary-title">아침 요약</h3>
+          <p class="muted">오늘 확인할 일정이 있으면, 설정한 시각(한국 시간)에 알림을 켠 브라우저로 알려줘요.</p>
+          <label class="toggle-row">아침 요약 알림 받기<input name="morning_enabled" type="checkbox" ${S.prefs.morning_enabled ? 'checked' : ''}></label>
+          <label class="field"><span class="field-label">받는 시각</span><input name="morning_time" type="time" required value="${esc(S.prefs.morning_time || '07:00')}"></label>
+          <button class="secondary" type="submit">아침 설정 저장</button>
+        </form>
+      </div>
+      <p class="fine muted">아이폰·아이패드는 홈 화면에 추가한 웹앱에서 알림을 켜야 할 수 있어요. 브라우저·기기 설정에 따라 수신이 제한될 수 있어요.</p>`
+    );
   }
   async function enablePush() {
     const epoch = authEpoch, ownerDialog = dialogEpoch;
@@ -1018,9 +1583,17 @@
     reminderCustomInitial = custom && !Number.isNaN(custom.getTime()) ? new Date(custom.getTime()-custom.getTimezoneOffset()*60000).toISOString().slice(0,16) : '';
     openDialog('이 일정의 예약 알림', `<form id="reminder-form"><p>${esc(item.title)}</p><label class="toggle-row">하루 전<input name="day" type="checkbox" ${rules.offsets.includes(-1440) ? 'checked' : ''}></label><label class="toggle-row">1시간 전<input name="hour" type="checkbox" ${rules.offsets.includes(-60) ? 'checked' : ''}></label><label class="field"><span class="field-label">직접 지정 (기기 현지 시각, 선택)</span><input name="custom" type="datetime-local" value="${esc(reminderCustomInitial)}"></label><p class="fine muted">완료·취소·숨김 또는 꺼둔 채널의 일정은 알림에서 제외돼요. 직접 지정한 시각은 새로 저장한 값으로 바뀌어요.</p><div class="dialog-foot"><button class="primary" type="submit">저장</button></div></form>`);
   }
-  function sourceLink(value) {
+  function sourceLink(value, label = 'Teams 원문 보기 →', source = 'teams') {
     if (!SCHOOL || !value) return '';
-    try {const url = new URL(value); if (url.protocol !== 'https:' || url.hostname !== 'teams.microsoft.com' || !url.pathname.startsWith('/l/message/')) return ''; return `<p><a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer">Teams 원문 보기 →</a></p>`;} catch {return '';}
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'https:' || url.username || url.password || url.port) return '';
+      if (isClassroom({source})) {
+        if (url.hostname !== 'classroom.google.com' || !url.pathname.startsWith('/c/')) return '';
+      } else if (url.hostname !== 'teams.microsoft.com' ||
+                 (source !== 'assignment' && !url.pathname.startsWith('/l/message/'))) return '';
+      return `<p><a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a></p>`;
+    } catch {return '';}
   }
   function expireIdle() {
     if (S.me && idleDeadline && Date.now() >= idleDeadline) {
@@ -1057,7 +1630,7 @@
       if (resumeCheck === check) {
         resumeCheck = null; updateRefreshStatus();
         if (activeView(check.epoch) && !autoReadsPaused) {taskDrafts?.changed(); refreshPlannerStatus({force:true});}
-        if (activeView(check.epoch)) {scheduleCheckingRefresh(); scheduleIngestionRefresh();}
+        if (activeView(check.epoch)) {scheduleCheckingRefresh(); scheduleIngestionRefresh(); scheduleClassroomRefresh(0);}
       }
     }
   }
@@ -1067,7 +1640,7 @@
   if (SCHOOL) {
     for (const type of ['pointerdown','keydown','touchstart']) document.addEventListener(type,resetIdle,{passive:true});
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) {clearTimeout(ingestionTimer); ingestionTimer = null;}
+      if (document.hidden) {clearTimeout(ingestionTimer); ingestionTimer = null; stopClassroomRefresh();}
       else if (!expireIdle()) {checkResumedSession(); scheduleCheckingRefresh(); scheduleIngestionRefresh();}
     });
     resetIdle();
