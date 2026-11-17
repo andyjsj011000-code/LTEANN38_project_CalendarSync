@@ -713,7 +713,8 @@
       connection:S.profileConnection ?? S.connection, teamsUnverified:S.teamsUnverified,
       teamsIngestion:plannerEnabled() ? ingestionText() : null,
       assignments:{state:S.assignments.loading ? 'idle' : S.assignments.state},
-      classroom:S.classroom && {connected:S.classroom.connected,reauth:S.classroom.reauth,announcement_analysis:S.classroom.announcement_analysis},
+      classroom:S.classroom && {connected:S.classroom.connected,method:S.classroom.method,reauth:S.classroom.reauth,
+        announcement_analysis:S.classroom.announcement_analysis,hasCourses:!!S.classroom.courses?.length},
       classroomError:!!S.partErrors.classroom, push:S.profilePush,
       browserPermission:window.Notification?.permission, hasPreferences:!!S.prefs};
   }
@@ -786,7 +787,7 @@
         ? '/auth/login?assignments=1' + (S.connection?.background_enabled === true ? '&background=1' : '')
         : '';
       const snapshot = {...S.assignments,items:[...(S.assignments.items || []),...classroomAssignments()]};
-      root.innerHTML = A.render(snapshot,S.assignmentFilter,connect,Date.now(),classroomCard(true)); return;
+      root.innerHTML = A.render(snapshot,S.assignmentFilter,connect,Date.now(),S.service?.classroom_enabled); return;
     }
     if (!S.today) return renderLoadState();
     topbar.hidden = false; $('#account-name').textContent = S.me.name;
@@ -812,30 +813,17 @@
     )).sort((a,b) => a.end_date.localeCompare(b.end_date) || (a.time || '').localeCompare(b.time || '')).slice(0,5);
     return `<section class="card today-upcoming"><div class="card-head"><h2>다가오는 일정</h2><button class="text-button" data-action="calendar">전체 보기 →</button></div><div class="upcoming-list">${!S.ready.upcoming && !upcoming.length ? `<div class="empty" role="status">${esc(S.partErrors.upcoming || '다가오는 일정을 불러오고 있어요.')}</div>` : upcoming.length ? upcoming.map(e => `<button class="upcoming-item" data-detail="${esc(e.id)}" data-source="${e.source}"><span class="date-stamp">${esc(e.end_date.slice(5).replace('-', '/'))}</span><span class="upcoming-text"><strong>${esc(e.title)}</strong><small>${esc(e.time || '종일')} · ${esc(isClassroom(e) ? 'Google Classroom' : e.source === 'teams' ? (SCHOOL ? 'Teams' : 'Teams 예시') : '개인')}</small></span></button>`).join('') : `<div class="empty">${esc(filteredEmpty('일주일 안에 다가오는 마감이 없어요.',S.upcoming.length))}</div>`}</div></section>`;
   }
-  function classroomCard(connectionOnly = false) {
+  function classroomCard() {
     if (!S.service?.classroom_enabled) return '';
     const connection = S.classroom;
     const google = connection?.method === 'google';
-    const actions = [];
-    if (connection && S.service.classroom_google_enabled && (!google || connection.reauth)) {
-      actions.push(`<button class="secondary small" data-action="classroom-google-connect">${google ? 'Google Classroom 다시 연결' : 'Google Classroom 연결'}</button>`);
-    }
-    if (connection?.connected) {
-      actions.push('<button class="text-button" data-action="classroom-disconnect">연결 해제</button>');
-    } else if (connection && !S.service.classroom_google_enabled) {
-      actions.push('<button class="secondary small" data-action="classroom-connect">Classroom 연결</button>');
-    }
-    if (connection?.courses?.length) actions.unshift(classroomCoursesButton());
-    if (typeof connection?.announcement_analysis === 'boolean') {
-      actions.unshift(`<button class="secondary small" data-action="classroom-analysis">${connection.announcement_analysis ? 'AI 일정 추출 끄기' : 'AI 일정 추출 켜기'}</button>`);
-    }
     let body;
     if (!connection) {
       body = esc(S.partErrors.classroom || 'Classroom 연결을 확인하고 있어요.');
     } else if (!connection.connected) {
-      body = '학교 Google 계정을 연결하면 공지와 과제가 여기에 표시돼요.';
+      body = '마이페이지에서 학교 Google 계정을 연결하면 공지와 과제가 표시돼요.';
     } else if (connection.reauth) {
-      body = 'Google 읽기 권한을 다시 승인하면 공지와 과제를 가져올 수 있어요.';
+      body = '마이페이지에서 Google 계정을 다시 연결하면 공지와 과제를 가져올 수 있어요.';
     } else if (!connection.snapshot) {
       body = google ? 'Google Classroom에서 공지와 과제를 가져오고 있어요.'
         : '최근 동기화 기록이 없어요. Apps Script에서 실행 결과를 확인해 주세요.';
@@ -845,7 +833,7 @@
       const dateTime = new Intl.DateTimeFormat('ko-KR', {
         dateStyle:'short', timeStyle:'short', timeZone:'Asia/Seoul'
       });
-      const statusOnly = connectionOnly || connection.announcement_analysis;
+      const statusOnly = connection.announcement_analysis;
       const items = statusOnly ? [] : connection.snapshot.items.filter(item => item.kind === 'announcement');
       const rows = items.map(item => {
         const link = item.url ? ` <a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">원문</a>` : '';
@@ -853,7 +841,7 @@
       }).join('');
       body = `<p class="fine muted">최근 동기화 ${esc(dateTime.format(connection.snapshot.captured_at))}</p>${statusOnly ? '' : rows || '<p class="empty">표시할 구글 클래스룸 공지가 없어요.</p>'}`;
     }
-    return `<section class="card classroom-card"><div class="card-head"><h2>Google Classroom</h2><div class="actions">${actions.join('')}</div></div><div class="list">${body}</div></section>`;
+    return `<section class="card classroom-card"><div class="card-head"><h2>Google Classroom</h2></div><div class="list">${body}</div></section>`;
   }
   function classroomCoursesButton() {
     return '<button class="secondary small" data-action="classroom-courses">구클 수업 표시</button>';
@@ -1005,6 +993,7 @@
               </select>
             </label>
             <div class="month-actions">
+              <button type="button" class="secondary small" data-action="filters" ${!S.prefs || !S.ready.channels ? 'disabled' : ''}>팀즈 채널 표시</button>
               ${S.classroom?.courses?.length ? classroomCoursesButton() : ''}
               <button type="button" class="secondary small" data-action="hidden">숨긴 일정</button>
             </div>

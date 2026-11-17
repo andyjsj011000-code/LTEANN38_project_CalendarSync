@@ -13,6 +13,8 @@ elements.modal.showModal = function () {this.open = true;};
 const requests = [];
 let signedIn = false;
 let ingestion = {state: 'partial', counts: {channels_checked: 15, channels_total: 62, messages_failed: 2}};
+let classroom = {connected: true, method: 'google', snapshot: null, announcement_analysis: false,
+  courses: [{key: 'id:101', name: '실험 수업', hidden: false}]};
 const storage = new Map();
 const item = {id: 'sample', source: 'teams', title: '<img src=x onerror=alert(1)>', notes: '<script>bad()</script>', channel: '예시 공지', start_date: '2026-10-20', end_date: '2026-10-25', time: null, kind: 'assignment', completed: false, cancelled: false};
 const context = {
@@ -32,7 +34,7 @@ const context = {
     else if (url === '/api/settings') data = {preferences: {disabled_kinds: []}, connection: {state:'connected', background_enabled: true}};
     else if (url === '/api/teams/ingestion-status') data = ingestion;
     else if (url === '/api/assignments') data = {items: [], state: 'permission_required'};
-    else if (url === '/api/classroom') data = {connected: true, method: 'google', snapshot: null, announcement_analysis: false};
+    else if (url === '/api/classroom') data = classroom;
     else if (url === '/api/push') data = {configured: true, registered: false, background_enabled: true};
     else if (url === '/api/changes') data = {items: []};
     else if (url === '/api/tasks' && options.method === 'POST') {status = 201; data = {id: 'saved-task'};}
@@ -73,6 +75,13 @@ const click = data => listeners.click({target: {closest() {return {dataset: data
   assert.match(elements['profile-teams-ingestion'].textContent, /최근 수집 완료.*62\/62개 채널 확인/);
   assert.match(elements.app.innerHTML, /Teams 과제 읽기[\s\S]*?승인 필요/);
   assert.match(elements.app.innerHTML, /Google 클래스룸 읽기[\s\S]*?연결됨/);
+  const classroomSettings = /data-profile-section="classroom"[\s\S]+?<\/details>/.exec(elements.app.innerHTML)[0];
+  assert.match(classroomSettings, /data-action="classroom-courses"/);
+  assert.match(classroomSettings, /data-action="classroom-disconnect"/);
+  assert.match(elements.app.innerHTML, /data-action="classroom-analysis"/);
+  await click({action: 'classroom-disconnect'});
+  assert.match(elements.modal.innerHTML, /data-action="classroom-disconnect-confirm" data-google="1"/);
+  await click({action: 'close'});
   assert.match(elements.app.innerHTML, /브라우저 알림[\s\S]*?꺼짐/);
   const permissionRows = [...elements.app.innerHTML.matchAll(/data-profile-section="[\w-]+"[\s\S]+?<\/details>/g)];
   assert.equal(permissionRows.length, 6);
@@ -81,6 +90,9 @@ const click = data => listeners.click({target: {closest() {return {dataset: data
     assert.match(row, /끄거나 해제하면/);
   }
   assert.match(elements.app.innerHTML, /href="\/privacy#connections"/);
+  classroom = {connected: false, snapshot: null};
+  await click({action: 'profile-refresh'});
+  assert.match(elements.app.innerHTML, /data-action="classroom-google-connect"/);
   await click({action: 'classroom-google-connect'});
   assert.match(elements.modal.innerHTML, /수업 목록·공지·내 과제/);
   assert.match(elements.modal.innerHTML, /Google에서 읽기 권한 확인/);

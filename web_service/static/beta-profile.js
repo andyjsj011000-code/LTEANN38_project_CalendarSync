@@ -67,7 +67,17 @@
     const pushStatus = push === false ? unavailable : !push ? pending : !push.configured ? disabled
       : browserPermission === 'denied' ? status('브라우저에서 차단', 'attention')
       : push.registered && browserPermission === 'granted' ? on : push.registered ? status('브라우저 권한 확인', 'attention') : off;
-    const connectClassroom = button(service.classroom_google_enabled ? 'classroom-google-connect' : 'classroom-connect', classroom?.reauth ? '다시 연결' : '클래스룸 연결');
+    const classroomActions = [];
+    if (service.classroom_enabled && classroom && !classroomError) {
+      if (!classroom.connected || classroom.reauth) {
+        classroomActions.push(button(service.classroom_google_enabled ? 'classroom-google-connect' : 'classroom-connect',
+          classroom.reauth ? '다시 연결' : '클래스룸 연결'));
+      } else if (service.classroom_google_enabled && classroom.method !== 'google') {
+        classroomActions.push(button('classroom-google-connect', 'Google 계정으로 연결'));
+      }
+      if (classroom.hasCourses) classroomActions.push(button('classroom-courses', '구클 수업 표시'));
+      if (classroom.connected) classroomActions.push(button('classroom-disconnect', '연결 해제'));
+    }
 
     function row(id, iconName, name, description, current, dataUsed, after, action = '') {
       const collection = id === 'teams' && teamsIngestion;
@@ -100,7 +110,7 @@
           '권한이 해제되면 과제 조회와 표시가 중단돼요. Teams 원본과 서버에 저장된 최근 과제 목록은 남을 수 있어요. Microsoft에서 앱 권한을 철회하면 공지 읽기에도 영향을 줄 수 있어요.', assignment === approval || assignment === retry ? reconnectAssignments : assignment === enabled ? microsoftApps : '')}
         ${row('classroom','book','Google 클래스룸 읽기','수업, 공지, 내 과제와 마감일',classroomStatus,
           '참여 중인 수업 이름, 최근 공지와 과제, 기한, 원문 링크와 내 제출 상태를 읽어요.',
-          '가져온 목록과 연결 정보를 지워요. Google 직접 연결은 Google에 권한 취소도 요청해요. Google 원본, 수업 표시 설정과 개인 할 일은 남아요.', service.classroom_enabled && classroom && !classroomError ? (classroom.connected && !classroom.reauth ? button('classroom-disconnect','연결 해제') : connectClassroom) : '')}
+          '가져온 목록과 연결 정보를 지워요. Google 직접 연결은 Google에 권한 취소도 요청해요. Google 원본, 수업 표시 설정과 개인 할 일은 남아요.', classroomActions.join(''))}
         ${row('analysis','sparkles','클래스룸 공지 AI 분석','공지 본문에서 일정 추출',analysis,
           '별도로 켜면 최근 공지 본문과 작성일을 OpenAI API로 보내 일정과 요약을 만들어요. 제출 상태와 성적은 전송 대상에서 제외해요.',
           '새 전송을 중단하고 CalendarSync에 저장한 추출 결과를 지워요. 클래스룸 연결과 가져온 원본 목록은 남아요.', typeof classroom?.announcement_analysis === 'boolean' ? button('classroom-analysis',classroom.announcement_analysis ? 'AI 분석 끄기' : '동의 설정') : '')}

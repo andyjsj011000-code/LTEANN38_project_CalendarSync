@@ -75,11 +75,11 @@
       </section>`;
     }).join('');
   }
-  function render(snapshot, tab, connect, now = Date.now(), classroom = '') {
+  function render(snapshot, tab, connect, now = Date.now(), classroomEnabled = false) {
     const items = snapshot.items || [];
     const loading = !!connect && (snapshot.loading || snapshot.state === 'idle');
-    const providers = [connect && 'Teams', classroom && 'Google Classroom'].filter(Boolean).join('와 ');
-    const refreshLabel = classroom ? 'Teams 과제 새로고침' : '과제 새로고침';
+    const providers = [connect && 'Teams', classroomEnabled && 'Google Classroom'].filter(Boolean).join('와 ');
+    const refreshLabel = classroomEnabled ? 'Teams 과제 새로고침' : '과제 새로고침';
     const checked = snapshot.checked_at ? 'Teams 최근 확인 ' + checkedAtFormat.format(snapshot.checked_at * 1000) : '';
     const unknown = items.some(classroomStatusUnknown) ? '제출 상태를 확인할 수 없는 Classroom 과제는 전체 탭에서 볼 수 있어요.' : '';
     const note = [loading ? 'Teams 과제를 확인하고 있어요.' : checked, unknown].filter(Boolean).join(' · ');
@@ -89,7 +89,6 @@
         <div><h1 id="assignments-title">과제</h1><p class="muted">제출 상태는 ${providers}에서 가져와요.</p></div>
         ${connect ? `<button type="button" class="secondary" data-action="refresh-assignments" ${loading ? 'disabled aria-busy="true"' : ''}>${loading ? '불러오는 중…' : refreshLabel}</button>` : ''}
       </div>
-      ${classroom}
       ${connect ? notice(snapshot, connect) : ''}
       <div class="assignment-tabs" role="group" aria-label="과제 분류">
         ${tabs.map(([key, title]) => `<button type="button" data-assignment-filter="${key}" aria-pressed="${tab === key}">${title} <span class="assignment-tab-count">${filter(items, key, now).length}</span></button>`).join('')}
