@@ -21,9 +21,6 @@ async def _sync_single_user_channels(user_id: str) -> Tuple[str, List[Dict[str, 
         joined_channels = await graph_service.get_user_joined_channels(user_id)
         return user_id, joined_channels
     except Exception as e:
-        """
-        logger.error(f"User {user_id} 채널 조회 실패: {e}")
-        """
         logger.error(f"채널 조회 실패: {e}")
         return user_id, []
 

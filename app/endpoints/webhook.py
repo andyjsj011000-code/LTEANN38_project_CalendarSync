@@ -91,12 +91,10 @@ async def cleanup_user_data(user_id: str, db: Session):
         raw_event_ids = db.execute(log_stmt).scalars().all()
         valid_event_ids = [e_id for e_id in raw_event_ids if e_id and e_id.strip()]
 
-        deleted_count = 0
-
         # Step A: DB 로그 기반 타겟 삭제 시도
         if valid_event_ids:
             try:
-                deleted_count += await graph_service.delete_events_by_ids(
+                await graph_service.delete_events_by_ids(
                     user_id=target_graph_user, event_ids=valid_event_ids
                 )
             except Exception as graph_err:
@@ -104,15 +102,9 @@ async def cleanup_user_data(user_id: str, db: Session):
 
         # Step B: Fallback (보완책) - DB에 없거나 누락된 유령 일정까지 Extended Property로 조회하여 이중 삭제
         try:
-            fallback_deleted = await graph_service.delete_user_synced_events(
-                user_id=target_graph_user
-            )
-            deleted_count += fallback_deleted
+            await graph_service.delete_user_synced_events(user_id=target_graph_user)
         except Exception as fallback_err:
             logger.warning(f"Extended Property 기반 Fallback 삭제 실패: {fallback_err}")
-        """
-        logger.info(f"🗑️ [Graph API] 총 {deleted_count}건의 Outlook 일정 최종 삭제 완료")
-        """
 
         # 3. DB 유저 삭제 (Cascade 설정으로 관련 SyncLog, ChannelMapping 자동 삭제)
         db.delete(db_user)
@@ -191,13 +183,7 @@ async def teams_event_webhook(
         user_info = await graph_service.get_user(user_id)
         if user_info:
             user_email = user_info.get("mail") or user_info.get("userPrincipalName")
-            """
-            logger.info(f"🔍 [Graph API] Email 조회 성공: User({user_id}) -> {user_email}")
-            """
     except Exception as ge:
-        """
-        logger.warning(f"[Graph API] User({user_id}) 이메일 조회 실패: {ge}")
-        """
         logger.warning(f"[Graph API] 이메일 조회 실패: {ge}")
 
     user_grade = calculate_grade_from_email(user_email, now_utc.year)
@@ -234,9 +220,6 @@ async def teams_event_webhook(
                     service_url=service_url,
                 )
                 db.add(new_user)
-                """
-                logger.info(f"✨ [신규 유저 등록] User({user_id}) | Email: {user_email} | Grade: {user_grade}")
-                """
                 logger.info("[신규 유저 등록]")
             else:
                 # 기존 유저 정보 갱신 (지정 객체만 단건 조작)
@@ -250,9 +233,6 @@ async def teams_event_webhook(
                         db_user.conversation_id = user_conversation_id
                     if service_url:
                         db_user.service_url = service_url
-                    """
-                    logger.info(f"🔄 [유저 정보 갱신] User({user_id}) | Email: {user_email} | Grade: {user_grade}")
-                    """
                     logger.info("🔄 [유저 정보 갱신]")
 
             db.commit()

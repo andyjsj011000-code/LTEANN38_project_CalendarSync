@@ -59,9 +59,6 @@ class BotService:
         self._access_token = data["access_token"]
         expires_in = data.get("expires_in", 3600)
         self._token_expires_at = now + timedelta(seconds=expires_in)
-        """
-        logger.info("[BotService] Bot Framework 액세스 토큰 발급완료")
-        """
         return self._access_token
 
     async def send_teams_reply(self, service_url: str, conversation_id: str, message: str) -> bool:
