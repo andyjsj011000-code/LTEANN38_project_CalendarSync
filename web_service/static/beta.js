@@ -928,13 +928,14 @@
   }
   function calendarEventButton(item, segment = null) {
     const title = item.title + (item.cancelled ? ' · 취소' : '');
+    const assignment = item.kind === 'assignment' || item.calendar_members?.some(member => member.kind === 'assignment');
     const classes = [
-      segment ? 'range-event' : 'single-event', calendarSourceOf(item),
+      segment ? 'range-event' : 'single-event', calendarSourceOf(item), assignment ? 'calendar-assignment' : '',
       segment?.before ? 'before' : '', segment?.after ? 'after' : '',
       item.completed ? 'done' : '', item.cancelled ? 'cancelled' : '',
     ].filter(Boolean).join(' ');
     const placement = segment ? ` style="grid-column:${segment.first + 1} / ${segment.last + 2};grid-row:${segment.lane + 2}"` : '';
-    const label = `${title} · ${period(item)}${item.time ? ' ' + item.time : ''}`;
+    const label = `${title}${assignment ? ' · 과제' : ''} · ${period(item)}${item.time ? ' ' + item.time : ''}`;
     return `<button type="button" class="${classes}" data-detail="${esc(item.id)}" data-source="${esc(item.source)}"
       aria-label="${esc(label)}" title="${esc(label)}"${placement}>
       <span class="${segment ? 'range-title' : 'single-title'}">${segment?.before ? '‹ ' : ''}${esc(title)}${segment?.after ? ' ›' : ''}</span>
@@ -969,6 +970,7 @@
     const sources = [['teams', SCHOOL ? 'Teams' : 'Teams 예시']];
     if (S.service?.classroom_enabled) sources.push(['classroom', 'Google Classroom']);
     sources.push(['personal', '개인 할 일']);
+    const legend = [...sources, ['calendar-assignment', '과제']];
     const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
     const empty = S.teamsUnverified && S.calendarSource === 'all'
       ? 'Teams 일정은 권한을 다시 확인한 뒤 표시돼요. 현재 확인된 다른 일정은 없어요.'
@@ -1003,8 +1005,8 @@
             <div class="weekdays">${weekdays.map(day => `<div class="weekday">${day}</div>`).join('')}</div>
             ${C.layoutRanges(visibleItems, S.month).map(week => calendarWeek(week, visibleItems)).join('')}
           </div>
-          <div class="calendar-legend" aria-label="일정 출처 범례">
-            ${sources.map(([key, label]) => `<span><i class="dot ${key}" aria-hidden="true"></i>${label}</span>`).join('')}
+          <div class="calendar-legend" aria-label="일정 색상 범례">
+            ${legend.map(([key, label]) => `<span><i class="dot ${key}" aria-hidden="true"></i>${label}</span>`).join('')}
           </div>
         </section>
         <section class="calendar-agenda" aria-labelledby="calendar-date-title">

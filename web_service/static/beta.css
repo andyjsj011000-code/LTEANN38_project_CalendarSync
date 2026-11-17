@@ -151,6 +151,7 @@ input, select, textarea { color: var(--ink); }
 .calendar-layout .teams { --event-text: light-dark(#593b96, #d9cbff); --event-fill: light-dark(#eee8fa, #392d51); --event-mark: light-dark(#7554b5, #bfa8ff); }
 .calendar-layout .classroom, .assignment-list-source[data-provider="classroom"] { --event-text: light-dark(#275d44, #a6e6bf); --event-fill: light-dark(#e5f3eb, #1d3b32); --event-mark: light-dark(#3f8160, #82c99e); }
 .calendar-layout .personal { --event-text: light-dark(#32558a, #b4d5ff); --event-fill: light-dark(#e7effb, #233857); --event-mark: light-dark(#4e76b3, #90bbea); }
+.calendar-layout .calendar-assignment { --event-text: light-dark(#812f42, #ffc1cf); --event-fill: light-dark(#fae9ed, #482931); --event-mark: light-dark(#a7465c, #ef8ea4); }
 .calendar-layout .calendar-legend .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--event-mark); }
 .calendar-layout :is(.range-event, .single-event) {
   min-height: 19px;
@@ -236,6 +237,13 @@ input, select, textarea { color: var(--ink); }
   .assignment-list-row { padding-inline: 6px; gap: 6px; }
   .notification-layout { grid-template-columns: minmax(0, 1fr); }
   .notification-layout form { padding-top: 12px; border-top: 1px solid var(--line); }
+}
+
+@media (max-width: 590px) and (forced-colors: active) {
+  .calendar-layout :is(.range-event, .single-event) { border-block-start: 2px solid CanvasText; }
+  .calendar-layout :is(.range-event, .single-event).calendar-assignment { border-block-start-style: dashed; }
+  .calendar-layout .calendar-legend .dot { border: 1px solid CanvasText; }
+  .calendar-layout .calendar-legend .dot.calendar-assignment { border-style: dashed; }
 }
 
 @media (forced-colors: none) {
