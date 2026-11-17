@@ -25,6 +25,22 @@ const filtersForm = (channels, disabled = []) => ({id:'filters-form', querySelec
 }});
 
 (async () => {
+  // A new toast stays visible when it replaces a message that has started fading out.
+  {
+    const h = harness({overrides:{'/api/push': () => response({detail:'Notification settings unavailable'}, 500)}});
+    await settle();
+    h.context.window.matchMedia = () => ({matches:true});
+    await h.click({action:'notifications'});
+    assert.equal(h.elements.toast.hidden,false);
+    await h.advance(5800);
+    assert.match(h.elements.toast.className,/toast-leaving/);
+    await h.click({action:'notifications'});
+    assert.equal(h.elements.toast.className,'toast error');
+    await h.advance(200);
+    assert.equal(h.elements.toast.hidden,false);
+    await h.advance(5800);
+    assert.equal(h.elements.toast.hidden,true);
+  }
   // Channel search must preserve unsaved checkboxes, including rows outside the result.
   {
     const channels = [{id:'a',name:'물리 공지',enabled:true},{id:'b',name:'English ＡＢＣ',enabled:false},{id:'c',name:'물리 과제',enabled:true}];
