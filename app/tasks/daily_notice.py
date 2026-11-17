@@ -54,9 +54,6 @@ async def _send_notice_to_single_user(
             message=notice_message,
         )
     except Exception as e:
-        """
-        logger.error(f"User {user_id} 알림 발송 실패: {e}")
-        """
         logger.error(f"User 알림 발송 실패: {e}")
 
 

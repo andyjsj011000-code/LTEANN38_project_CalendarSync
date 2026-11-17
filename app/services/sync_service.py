@@ -182,9 +182,6 @@ class SyncService:
                 outlook_event_id=outlook_event_id,
             )
         except Exception as e:
-            """
-            logger.error(f"User {user_id} 캘린더 CREATE Fan-out 실패: {e}")
-            """
             logger.error(f"캘린더 CREATE Fan-out 실패: {e}")
             return None
 
@@ -288,9 +285,6 @@ class SyncService:
                         description=full_description,
                     )
                 except Exception as e:
-                    """
-                    logger.error(f"User {user_id} 캘린더 UPDATE Fan-out 실패: {e}")
-                    """
                     logger.error(f"캘린더 UPDATE Fan-out 실패: {e}")
                 return None
             else:
@@ -309,9 +303,6 @@ class SyncService:
                         outlook_event_id=outlook_event_id,
                     )
                 except Exception as e:
-                    """
-                    logger.error(f"User {user_id} 캘린더 신규 등록 Fan-out 실패: {e}")
-                    """
                     logger.error(f"캘린더 신규 등록 Fan-out 실패: {e}")
                     return None
         return None
@@ -385,9 +376,6 @@ class SyncService:
         try:
             await self.graph.delete_user_calendar_event(user_id=user_id, event_id=outlook_event_id)
         except Exception as e:
-            """
-            logger.error(f"User {user_id} 캘린더 DELETE Fan-out 실패: {e}")
-            """
             logger.error(f"캘린더 DELETE Fan-out 실패: {e}")
 
     async def _handle_delete(self, db: Session, action: ScheduleAction):
